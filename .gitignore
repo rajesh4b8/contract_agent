@@ -21,3 +21,6 @@ data/demo_contracts.json
 node_modules/
 dist/
 build/
+
+AI-Powered-Smart-Contract-Review-Guide.pdf
+sample-contracts/
