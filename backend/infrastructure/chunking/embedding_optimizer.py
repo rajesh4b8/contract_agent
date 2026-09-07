@@ -329,7 +329,13 @@ class BatchProcessor:
         
         for chunk in batch:
             try:
-                embedding = await embedding_service.generate_embedding(chunk.content)
+                gen_async = getattr(embedding_service, "generate_embedding_async", None)
+                if gen_async is not None:
+                    embedding = await gen_async(chunk.content)
+                else:
+                    embedding = await asyncio.to_thread(
+                        embedding_service.generate_embedding, chunk.content
+                    )
                 results.append((chunk, embedding))
                 
                 # Small delay to avoid rate limits

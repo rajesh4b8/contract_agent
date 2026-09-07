@@ -69,6 +69,8 @@ app.add_middleware(
 )
 
 # Include routers based on environment
+from backend.api.models_api import router as models_router
+app.include_router(models_router)
 app.include_router(document_router)
 app.include_router(intelligence_router)
 app.include_router(enhanced_search_router, prefix="/api")

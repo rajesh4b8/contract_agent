@@ -24,3 +24,6 @@ build/
 
 AI-Powered-Smart-Contract-Review-Guide.pdf
 sample-contracts/
+
+# Claude Code local session state (plans, memory, settings)
+.claude/

@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from backend.application.services.document_processing_service import DocumentServiceFactory
 from backend.domain.entities import DocumentProcessingRequest
 from backend.llm_manager import LLMManager
+from backend.shared.config.models import DEFAULT_MODEL_ID
 from backend.infrastructure.audit_logger import AuditLogger, AuditEventType, audit_log
 from backend.infrastructure.content_validator import ContentValidationService
 from backend.infrastructure.error_tracker import ErrorTracker, ErrorCategory, ErrorSeverity, error_tracking_context
@@ -90,7 +91,7 @@ async def upload_pdf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
-    model: str = Query(default="gemini-2.5-flash", description="LLM model to use for processing"),
+    model: str = Query(default=DEFAULT_MODEL_ID, description="LLM model to use for processing"),
     enable_enhanced: bool = Query(default=False, description="Enable enhanced processing with sections/clauses"),
     llm_mgr: LLMManager = Depends(get_llm_manager)
 ):
@@ -154,7 +155,8 @@ async def upload_pdf(
             # Check for duplicate by filename
             logger.info("Step 3: Checking for duplicates")
             try:
-                duplicate_check = llm_mgr.agents["gemini-2.5-flash"]._llm if hasattr(llm_mgr.agents["gemini-2.5-flash"], '_llm') else llm_mgr.agents["gemini-2.5-flash"]
+                _dup_agent = llm_mgr.get_model_by_name(DEFAULT_MODEL_ID)
+                duplicate_check = _dup_agent._llm if hasattr(_dup_agent, '_llm') else _dup_agent
                 from backend.infrastructure.contract_repository import Neo4jContractRepository
                 repo = Neo4jContractRepository()
                 logger.info("Repository initialized successfully")
@@ -240,8 +242,10 @@ async def upload_pdf(
                         )
                         
                         if chunking_result["success"]:
+                            _plan = chunking_result.get('plan') or {}
+                            _strategy = _plan.get('strategy_type') if isinstance(_plan, dict) else getattr(_plan, 'strategy_type', None)
                             logger.info(f"Enhanced chunking completed: {chunking_result['chunk_count']} chunks, "
-                                      f"strategy: {chunking_result['plan'].strategy_type}, "
+                                      f"strategy: {_strategy}, "
                                       f"quality: {chunking_result['quality_assessment']['overall_quality']:.2f}")
                             
                             # Log document analysis insights
@@ -407,7 +411,7 @@ async def upload_pdf(
 async def upload_pdf_stream(
     file: UploadFile = File(...),
     tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
-    model: str = Query(default="gemini-2.5-flash", description="LLM model to use for processing"),
+    model: str = Query(default=DEFAULT_MODEL_ID, description="LLM model to use for processing"),
     llm_mgr: LLMManager = Depends(get_llm_manager)
 ):
     """

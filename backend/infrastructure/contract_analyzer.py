@@ -3,6 +3,7 @@ from backend.shared.utils.contract_search_tool import CONTRACT_TYPES
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
+from backend.shared.utils.message_content import content_to_text
 import logging
 
 from backend.shared.utils.logger import get_logger
@@ -44,5 +45,5 @@ class LLMContractAnalyzer(IContractAnalyzer):
 Use contract_type from: {CONTRACT_TYPES}"""
         
         response = self.llm.invoke(prompt)
-        result = self.parser.parse(response.content)
+        result = self.parser.parse(content_to_text(response.content))
         return result.dict()

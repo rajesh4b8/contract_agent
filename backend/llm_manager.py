@@ -1,9 +1,10 @@
-import os
-from langchain_openai import ChatOpenAI
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_anthropic import ChatAnthropic
-from langchain_mistralai import ChatMistralAI
 from backend.shared.utils.logger import get_logger
+from backend.shared.config.models import (
+    LEGACY_ALIASES,
+    build_llm,
+    configured_model_ids,
+    normalize_model_id,
+)
 
 logger = get_logger(__name__)
 
@@ -19,42 +20,27 @@ class LLMManager:
         self.init_agents()
 
     def init_agents(self):
-        if os.getenv("OPENAI_API_KEY"):
-            self.agents["gpt-4o"] = get_agent(ChatOpenAI(model="gpt-4o", temperature=0))
+        """Build one chat agent per configured model id.
 
-        if os.getenv("GOOGLE_API_KEY"):
-            self.agents["gemini-2.5-pro"] = get_agent(
-                ChatGoogleGenerativeAI(
-                    model="gemini-2.5-pro",
-                    temperature=0,
-                )
-            )
-            self.agents["gemini-2.5-flash"] = get_agent(
-                ChatGoogleGenerativeAI(
-                    model="gemini-2.5-flash",
-                    temperature=0,
-                )
-            )
+        The model catalogue (ids, provider model strings, which providers are
+        enabled) lives in ``backend.shared.config.models``.
+        """
+        self.agents = {}
+        for model_id in configured_model_ids():
+            try:
+                self.agents[model_id] = get_agent(build_llm(model_id))
+            except Exception as e:  # noqa: BLE001 - one bad provider shouldn't kill the rest
+                logger.warning(f"Skipping model '{model_id}': {e}")
 
+        # Keep legacy ids resolving to the same agent objects.
+        for old_id, new_id in LEGACY_ALIASES.items():
+            if new_id in self.agents and old_id not in self.agents:
+                self.agents[old_id] = self.agents[new_id]
 
-        if os.getenv("ANTHROPIC_API_KEY"):
-            self.agents["sonnet-3.5"] = get_agent(
-                ChatAnthropic(
-                    model="claude-3-5-sonnet-latest",
-                    temperature=0,
-                )
-            )
-
-        if os.getenv("MISTRAL_API_KEY"):
-            self.agents["mistral-large"] = get_agent(
-                ChatMistralAI(
-                    model="mistral-large-latest",
-                )
-            )
-        logger.info(f"Loaded {len(self.agents)} llms.")
+        logger.info(f"Loaded {len(set(self.agents.values()))} llms ({len(self.agents)} ids).")
 
     def get_model_by_name(self, name: str):
-        try:
-            return self.agents[name]
-        except KeyError:
+        agent = self.agents.get(name) or self.agents.get(normalize_model_id(name))
+        if agent is None:
             raise ValueError(f"The model {name} wasn't initiated")
+        return agent

@@ -103,6 +103,9 @@ class ContractIntelligenceService:
     
     def _get_llm_for_model(self, model: str):
         """Get LLM instance for the specified model"""
+        from backend.shared.config.models import normalize_model_id
+
+        model = normalize_model_id(model)
         try:
             return self.llm_manager.agents[model]._llm if hasattr(self.llm_manager.agents[model], '_llm') else self.llm_manager.agents[model]
         except KeyError:

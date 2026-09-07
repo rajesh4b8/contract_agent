@@ -3,6 +3,7 @@ from backend.governance.rbac import Permission, requires_permission
 from fastapi.responses import StreamingResponse
 from backend.application.services.contract_intelligence_service import ContractIntelligenceServiceFactory
 from backend.llm_manager import LLMManager
+from backend.shared.config.models import DEFAULT_MODEL_ID
 from backend.infrastructure.contract_repository import Neo4jContractRepository
 import json
 import logging
@@ -25,7 +26,7 @@ def get_llm_manager(request: Request):
 async def analyze_contract_intelligence(
     contract_id: str,
     tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
-    model: str = Query(default="gemini-2.5-flash", description="LLM model to use for analysis"),
+    model: str = Query(default=DEFAULT_MODEL_ID, description="LLM model to use for analysis"),
     use_planning: bool = Query(default=True, description="Use autonomous planning agent"),
     llm_mgr: LLMManager = Depends(get_llm_manager)
 ):
@@ -159,7 +160,7 @@ async def batch_analyze_contracts(
     background_tasks: BackgroundTasks,
     contract_ids: list[str],
     tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
-    model: str = Query(default="gemini-2.5-flash", description="LLM model to use for analysis"),
+    model: str = Query(default=DEFAULT_MODEL_ID, description="LLM model to use for analysis"),
     llm_mgr: LLMManager = Depends(get_llm_manager)
 ):
     """
@@ -244,18 +245,14 @@ async def get_intelligence_dashboard():
         raise HTTPException(status_code=500, detail=f"Dashboard summary failed: {str(e)}")
 
 @router.get("/models")
-async def get_available_models(llm_mgr: LLMManager = Depends(get_llm_manager)):
-    """Get list of available LLM models for intelligence analysis"""
-    
-    try:
-        available_models = list(llm_mgr.agents.keys())
-        
-        return {
-            "available_models": available_models,
-            "default_model": "gemini-2.5-flash",
-            "recommended_models": ["gemini-2.5-flash", "gemini-1.5-pro"]
-        }
-        
-    except Exception as e:
-        logger.error(f"Failed to get available models: {e}")
-        raise HTTPException(status_code=500, detail=f"Model list failed: {str(e)}")
+async def get_available_models():
+    """Deprecated alias for ``GET /api/models`` (kept for backward compatibility)."""
+    from backend.shared.config.models import DEFAULT_MODEL_ID, available_models
+
+    models = available_models()
+    return {
+        "models": models,
+        "available_models": [m["id"] for m in models if m["available"]],
+        "default_model": DEFAULT_MODEL_ID,
+        "recommended_models": [m["id"] for m in models if m["recommended"]],
+    }

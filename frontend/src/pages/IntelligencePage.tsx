@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { DocumentUpload } from '../components/features/contracts/DocumentUpload';
 import { ContractIntelligence } from '../components/features/intelligence/ContractIntelligence';
 import { AgentWorkflowTracker } from '../components/features/agents/AgentWorkflowTracker';
 import { Card } from '../components/shared/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/shared/ui/select';
 import { useContractHistory } from '../contexts/ContractHistoryContext';
+import { useModels } from '../services/modelsApi';
 
 interface UploadResult {
   filename: string;
@@ -15,7 +16,14 @@ interface UploadResult {
 }
 
 export const IntelligencePage: React.FC = () => {
-  const [selectedModel, setSelectedModel] = useState('gemini-2.5-flash');
+  const { models, defaultModel } = useModels();
+  const [selectedModel, setSelectedModel] = useState(defaultModel);
+
+  // Adopt the backend default once the catalogue loads, unless the user already picked.
+  const [modelTouched, setModelTouched] = useState(false);
+  useEffect(() => {
+    if (!modelTouched) setSelectedModel(defaultModel);
+  }, [defaultModel, modelTouched]);
   const [uploadResult, setUploadResult] = useState<UploadResult | null>(null);
   const [workflowStatus, setWorkflowStatus] = useState<any>(null);
   const [showWorkflow, setShowWorkflow] = useState(false);
@@ -72,15 +80,19 @@ export const IntelligencePage: React.FC = () => {
         <div className="bg-white rounded-lg p-4 shadow-sm border border-slate-200">
           <div className="flex items-center gap-3">
             <label className="text-sm font-semibold text-slate-700">AI Model:</label>
-            <Select value={selectedModel} onValueChange={setSelectedModel}>
-              <SelectTrigger className="w-56 border-slate-300">
+            <Select
+              value={selectedModel}
+              onValueChange={(v) => { setModelTouched(true); setSelectedModel(v); }}
+            >
+              <SelectTrigger className="w-72 border-slate-300">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                <SelectItem value="gemini-2.5-flash">Gemini 2.0 Flash</SelectItem>
-                <SelectItem value="gemini-1.5-pro">Gemini 1.5 Pro</SelectItem>
-                <SelectItem value="gpt-4o">GPT-4o</SelectItem>
-                <SelectItem value="sonnet-3.5">Claude Sonnet 3.5</SelectItem>
+                {models.map((m) => (
+                  <SelectItem key={m.id} value={m.id} disabled={!m.available}>
+                    {m.label}{!m.available ? ' (API key not set)' : ''}
+                  </SelectItem>
+                ))}
               </SelectContent>
             </Select>
           </div>

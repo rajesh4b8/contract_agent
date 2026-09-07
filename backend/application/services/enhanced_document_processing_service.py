@@ -60,25 +60,14 @@ class EnhancedDocumentProcessingService:
             raise
     
     def _get_llm_for_model(self, model_name: str):
-        """Get LLM instance"""
-        if model_name == "gpt-4o":
-            from langchain_openai import ChatOpenAI
-            return ChatOpenAI(model="gpt-4o", temperature=0)
-        elif model_name in ["gemini-1.5-pro", "gemini-2.5-flash-exp", "gemini-2.5-flash", "gemini-2.5-flash"]:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            model_mapping = {
-                "gemini-2.5-flash-exp": "gemini-2.5-flash",
-                "gemini-2.5-flash": "gemini-2.5-flash",
-                "gemini-2.5-flash": "gemini-2.5-flash",
-                "gemini-1.5-pro": "gemini-1.5-pro"
-            }
-            actual_model = model_mapping.get(model_name, "gemini-2.5-flash")
-            return ChatGoogleGenerativeAI(model=actual_model, temperature=0)
-        elif model_name == "sonnet-3.5":
-            from langchain_anthropic import ChatAnthropic
-            return ChatAnthropic(model="claude-3-5-sonnet-latest", temperature=0)
-        else:
-            raise ValueError(f"Unknown model: {model_name}")
+        """Get a raw chat model for a public model id.
+
+        Catalogue + provider-SDK construction live in
+        ``backend.shared.config.models``.
+        """
+        from backend.shared.config.models import build_llm
+
+        return build_llm(model_name, temperature=0)
     
     def _process_with_enhanced_embeddings(self, pdf_agent, request: DocumentProcessingRequest) -> dict:
         """Process document with enhanced embeddings"""

@@ -4,6 +4,7 @@ from fastapi.responses import StreamingResponse
 from backend.application.services.document_processing_service import DocumentServiceFactory
 from backend.domain.entities import DocumentProcessingRequest
 from backend.llm_manager import LLMManager
+from backend.shared.config.models import DEFAULT_MODEL_ID
 import os
 import uuid
 import json
@@ -25,7 +26,7 @@ async def upload_contract(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
-    model: str = Query(default="gemini-2.5-flash", description="LLM model to use for processing"),
+    model: str = Query(default=DEFAULT_MODEL_ID, description="LLM model to use for processing"),
     llm_mgr: LLMManager = Depends(get_llm_manager)
 ):
     """Upload and process PDF contract - PRODUCTION ENDPOINT"""

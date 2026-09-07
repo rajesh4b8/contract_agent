@@ -64,7 +64,7 @@ class EnhancedSearchApi {
 
   async uploadEnhancedDocument(
     file: File, 
-    model: string = 'gemini-2.5-flash',
+    model: string = 'gemini-flash',
     enableEmbeddings: boolean = true
   ): Promise<any> {
     const formData = new FormData();

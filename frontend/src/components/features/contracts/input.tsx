@@ -1,4 +1,4 @@
-import React, { KeyboardEvent, useRef } from "react";
+import React, { KeyboardEvent, useEffect, useRef } from "react";
 import { Textarea } from "../../shared/ui/textarea";
 import {
     Select,
@@ -13,6 +13,7 @@ import { fetchEventSource } from '@microsoft/fetch-event-source';
 import { MouseEvent } from 'react';
 import { SendHorizontal } from "lucide-react";
 import { Message, MessagePart, useChat } from "./provider";
+import { useModels } from "../../../services/modelsApi";
 
 export function ChatInput() {
     const history = useRef<string[]>([])
@@ -20,10 +21,16 @@ export function ChatInput() {
     const { addMessage, addMessagePart, updateMessageGenerating, reset } = useChat();
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+    const { models, defaultModel } = useModels();
+    const [model, setModel] = React.useState(defaultModel);
+    const [modelTouched, setModelTouched] = React.useState(false);
+    useEffect(() => {
+        if (!modelTouched) setModel(defaultModel);
+    }, [defaultModel, modelTouched]);
+
     const handleSubmit = async (event: any) => {
         event.preventDefault();
         const formData = new FormData(event.target);
-        const model = formData.get("model") as string;
         const prompt = formData.get("prompt") as string;
 
         if (!prompt.trim()) {
@@ -114,15 +121,21 @@ export function ChatInput() {
                     ref={textareaRef}
                 />
                 <div className="flex gap-2">
-                    <Select name="model" defaultValue="gemini-2.5-flash">
+                    <Select
+                        name="model"
+                        value={model}
+                        onValueChange={(v) => { setModelTouched(true); setModel(v); }}
+                    >
                         <SelectTrigger className=" flex-1 text-foreground">
                             <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
                             <SelectGroup>
-                                <SelectItem value="gemini-1.5-pro">gemini-1.5-pro</SelectItem>
-                                <SelectItem value="gemini-2.5-flash">gemini-2.5-flash</SelectItem>
-                                <SelectItem value="gpt-4o">gpt-4o</SelectItem>
+                                {models.map((m) => (
+                                    <SelectItem key={m.id} value={m.id} disabled={!m.available}>
+                                        {m.label}{!m.available ? ' (API key not set)' : ''}
+                                    </SelectItem>
+                                ))}
                             </SelectGroup>
                         </SelectContent>
                     </Select>
