@@ -7,6 +7,7 @@ from backend.infrastructure.audit_logger import AuditLogger, AuditEventType
 from backend.infrastructure.content_validator import ContentValidationService, ValidationSeverity
 from backend.infrastructure.error_tracker import ErrorTracker, ErrorCategory, ErrorSeverity, ErrorContext, error_tracking_context
 
+@pytest.mark.integration  # writes to Neo4j
 def test_audit_logger_basic():
     """Test basic audit logging functionality"""
     audit_logger = AuditLogger()
@@ -22,6 +23,7 @@ def test_audit_logger_basic():
     assert audit_id != ""
     print(f"✅ Audit logged: {audit_id}")
 
+@pytest.mark.integration  # writes to Neo4j
 def test_audit_trail_retrieval():
     """Test audit trail retrieval"""
     audit_logger = AuditLogger()
@@ -141,6 +143,7 @@ def test_content_validator_structure():
     assert result["has_warnings"] == True
     print(f"✅ Contract structure validation detected missing fields")
 
+@pytest.mark.integration  # writes to Neo4j
 def test_error_tracker_basic():
     """Test basic error tracking"""
     error_tracker = ErrorTracker()
@@ -164,6 +167,7 @@ def test_error_tracker_basic():
         assert error_id != ""
         print(f"✅ Error tracked: {error_id}")
 
+@pytest.mark.integration  # writes to Neo4j
 def test_error_tracker_statistics():
     """Test error statistics retrieval"""
     error_tracker = ErrorTracker()

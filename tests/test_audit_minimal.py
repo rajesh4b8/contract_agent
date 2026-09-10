@@ -3,7 +3,6 @@ import os
 from unittest.mock import MagicMock, patch
 
 # Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Mock Neo4jContractRepository to avoid heavy imports and database connection
 mock_repo = MagicMock()

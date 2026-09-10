@@ -21,7 +21,6 @@ sys.modules['backend.infrastructure.audit_logger'].AuditEventType = FakeAuditEve
 # but I want to test the actual file.
 
 # Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from backend.infrastructure.agent_audit_service import AgentAuditService
 

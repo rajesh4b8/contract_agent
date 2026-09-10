@@ -3,6 +3,7 @@ from typing import Any, List, Optional, Type
 from dotenv import load_dotenv
 from langchain_core.tools import BaseTool
 from backend.shared.utils.gemini_embedding_service import embedding
+from backend.shared.utils.lazy import LazyProxy
 from langchain_neo4j import Neo4jGraph
 from pydantic import BaseModel, Field
 from enum import Enum
@@ -50,8 +51,12 @@ CONTRACT_TYPES = [
     "Licensing Addendum",
 ]
 
-graph: Neo4jGraph = Neo4jGraph(
-    refresh_schema=False, driver_config={"notifications_min_severity": "OFF"}
+# Connects on first use, not on import — see backend/shared/utils/lazy.py
+graph = LazyProxy(
+    lambda: Neo4jGraph(
+        refresh_schema=False, driver_config={"notifications_min_severity": "OFF"}
+    ),
+    "graph",
 )
 # embedding imported from gemini_embedding_service (1536 dimensions)
 

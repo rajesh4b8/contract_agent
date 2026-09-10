@@ -5,7 +5,6 @@ import os
 from fastapi import HTTPException
 
 # Add current directory to path
-sys.path.insert(0, os.getcwd())
 
 from backend.governance.rbac import RBACManager, UserRole, Permission, requires_permission
 

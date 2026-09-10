@@ -54,9 +54,11 @@ async def get_current_user_role(x_user_role: Optional[str] = Header(None)) -> Us
     Mock implementation - in production this would validate a JWT token.
     """
     if not x_user_role:
-        logger.warning("Access attempted without user role header")
-        # Default to VIEWER for safety, or raise 401
-        return UserRole.ADMIN
+        logger.warning("Access attempted without user role header; defaulting to VIEWER")
+        # Fail closed. An unauthenticated caller gets the least-privileged role,
+        # never ADMIN — the header is trivially absent (the frontend never sends
+        # it), so defaulting high made every endpoint effectively unguarded.
+        return UserRole.VIEWER
         
     try:
         role = UserRole(x_user_role.upper())

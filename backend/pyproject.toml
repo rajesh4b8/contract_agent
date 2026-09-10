@@ -29,3 +29,12 @@ dependencies = [
     "fastmcp>=0.1.0",
     "nest_asyncio>=1.6.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+# pytest is configured at the repo root (pytest.ini) because the test suites
+# live both in ./tests and ./backend/tests and both import `backend.*`.

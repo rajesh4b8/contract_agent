@@ -3,11 +3,10 @@ import json
 import asyncio
 from unittest.mock import MagicMock, patch
 
-# Mock Neo4j and Gemini BEFORE importing backend modules that instantiate them at module level
-with patch("langchain_neo4j.Neo4jGraph"), \
-     patch("backend.shared.utils.gemini_embedding_service.embedding"):
-    from backend.mcp_server import search_clause_library, get_playbook_rule, fetch_contract_metadata
-    from backend.shared.utils.mcp_logger import trace_id_var
+# The Neo4j and Gemini singletons are lazy (backend/shared/utils/lazy.py), so a
+# plain import touches no external service and needs no import-time patching.
+from backend.mcp_server import search_clause_library, get_playbook_rule, fetch_contract_metadata
+from backend.shared.utils.mcp_logger import trace_id_var
 
 class TestMCPCapabilities(unittest.IsolatedAsyncioTestCase):
     """

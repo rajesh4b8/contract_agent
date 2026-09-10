@@ -3,7 +3,6 @@ import os
 from unittest.mock import MagicMock
 
 # Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from backend.governance.validators.hallucination import HallucinationValidator
 from backend.governance.base import GuardResult

@@ -59,6 +59,7 @@ class TestChainOfThoughtAgent:
     """Test Chain-of-Thought pattern agent"""
     
     @pytest.mark.asyncio
+    @pytest.mark.integration  # reads policies from Neo4j
     async def test_cot_agent_risk_assessment(self):
         """Test CoT agent risk assessment"""
         agent = ChainOfThoughtAgent()

@@ -7,7 +7,6 @@ import sys
 import os
 
 # Add backend to path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'backend'))
 
 def test_planning_engine_phase3_integration():
     """Test planning engine uses Phase 3 tools"""
