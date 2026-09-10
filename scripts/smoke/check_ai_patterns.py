@@ -1,5 +1,11 @@
 """Test AI Patterns implementation."""
 
+# Run directly (`python scripts/smoke/<name>.py`) from anywhere: Python puts
+# this file's directory on sys.path, not the repo root, so `backend.*` would
+# not resolve without this.
+import pathlib
+import sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import asyncio
 import sys
 import os

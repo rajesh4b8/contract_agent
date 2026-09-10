@@ -58,6 +58,10 @@ The whole app, including `backend.main`, now imports with no database and no API
   existed (`tests/backend`).
 - Moved 9 scripts that need a live server or database out of the test tree into `scripts/smoke/`
   (renamed `test_*` → `check_*`). They were never tests; several had zero assertions.
+  Moving them broke `backend.*` imports (run directly, `sys.path[0]` is the script's own
+  directory), and two had been importing `backend.tools` / `backend.services` — packages that
+  stopped existing at some reorg, so they had been dead well before this. All nine now run from
+  any working directory, guarded statically by `backend/tests/test_smoke_scripts_are_runnable.py`.
 - Marked 7 genuinely Neo4j-dependent tests `@pytest.mark.integration` rather than deleting them.
 - Deleted the import-time mock patching in `test_mcp_capabilities.py` — it existed only to dodge
   the eager singletons.

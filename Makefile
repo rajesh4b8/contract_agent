@@ -28,6 +28,7 @@ stop:  ## Stop the stack
 logs:  ## Tail backend logs
 	docker compose logs -f backend
 
-smoke:  ## Manual end-to-end checks against a running stack (scripts/smoke)
-	@echo "These need the stack up (make run) and hit real services."
-	@ls scripts/smoke/*.py | sed 's/^/  $(PY) /'
+smoke:  ## List the manual end-to-end checks (need a running stack)
+	@echo "These hit real services — start them with 'make run' first."
+	@echo "Run one at a time; each is standalone:"
+	@for f in scripts/smoke/*.py; do echo "  $(PY) $$f"; done
