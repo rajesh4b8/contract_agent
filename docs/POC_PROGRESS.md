@@ -1,7 +1,7 @@
 # POC Progress Tracker
 
-**Resume point: Increment 1 — `awaiting your test`.**
-Run `make test`, then try the app (see *Running it locally*) and write under *Your feedback*.
+**Resume point: Increment 2 — `not started`.**
+Increments 0 and 1 are accepted. Say *continue the POC work* to begin Increment 2.
 
 This file is the live state of the POC work. It is committed, so any session on any machine can
 pick up by reading it first. The detailed reasoning behind the plan lives in the session that
@@ -22,8 +22,8 @@ produced it; this file is what you and I actually work from.
 | # | Increment | Status |
 |---|-----------|--------|
 | 0 | Make the repo testable | accepted |
-| 1 | Real clause extraction against a schema | **awaiting your test** |
-| 2 | Ground policy checks in one real playbook | not started |
+| 1 | Real clause extraction against a schema | accepted |
+| 2 | Ground policy checks in one real playbook | next |
 | 3 | Redlines that are real and persisted | not started |
 | 4 | Human-in-the-loop approve / edit / reject | not started |
 | 5 | One measurable outcome | not started |
@@ -301,7 +301,7 @@ changed:  backend/agents/intelligence_tools.py           (the stub -> a real cal
 
 ### Your feedback
 
-_(write here — anything that should change before Increment 2)_
+_Passed testing 2026-09-10. Accepted._
 
 ---
 
