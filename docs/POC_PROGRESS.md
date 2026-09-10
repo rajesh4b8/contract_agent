@@ -1,7 +1,7 @@
 # POC Progress Tracker
 
-**Resume point: Increment 0 — `awaiting your test`.**
-Run `make test`, then write under *Your feedback* below and say continue.
+**Resume point: Increment 1 — `awaiting your test`.**
+Run `make test`, then try the app (see *Running it locally*) and write under *Your feedback*.
 
 This file is the live state of the POC work. It is committed, so any session on any machine can
 pick up by reading it first. The detailed reasoning behind the plan lives in the session that
@@ -21,8 +21,8 @@ produced it; this file is what you and I actually work from.
 
 | # | Increment | Status |
 |---|-----------|--------|
-| 0 | Make the repo testable | **awaiting your test** |
-| 1 | Real clause extraction against a schema | not started |
+| 0 | Make the repo testable | accepted |
+| 1 | Real clause extraction against a schema | **awaiting your test** |
 | 2 | Ground policy checks in one real playbook | not started |
 | 3 | Redlines that are real and persisted | not started |
 | 4 | Human-in-the-loop approve / edit / reject | not started |
@@ -150,32 +150,133 @@ moved:    9 files -> scripts/smoke/check_*.py
 
 ### Your feedback
 
-_(write here — anything that should change before Increment 1)_
+_(accepted — no changes requested)_
 
 ---
 
 ## Increment 1 — Real clause extraction against a schema
 
-**Goal:** the contract intelligence output is currently fabricated. `ClauseDetectorTool._run`
-(`backend/agents/intelligence_tools.py:60-113`) builds a proper extraction prompt, discards it —
-`# This would use the LLM - simplified for prototype` — and returns two hardcoded clauses for
-every contract. `PolicyCheckerTool` then keyword-matches those constants, so every upload produces
-an identical risk report. No LLM is called anywhere in the intelligence path.
+**Goal:** the intelligence output was fabricated. `ClauseDetectorTool._run` built a proper
+extraction prompt, discarded it — `# This would use the LLM - simplified for prototype` — and
+returned two hardcoded clauses for every contract. No LLM was called anywhere in the intelligence
+path, so every document produced an identical report.
 
-**Plan:** one pydantic model with the design doc's seven fields (`clause_type`, `risk_level`,
-`violated_policy`, `evidence_span`, `suggested_redline`, `confidence`, `human_review_required`);
-pass the `llm` the orchestrator already holds into the tools (it is stored at
-`contract_intelligence_agents.py:20-21` and then never given to any tool); replace the stub with
-`with_structured_output`. Reuse the working `PydanticOutputParser` pattern from
-`backend/infrastructure/contract_analyzer.py:33,48`.
+### What changed
 
-**Test it will ship with:** every returned clause's text must be a substring of the uploaded
-contract, and two different contracts must produce different clauses. That assertion alone would
-have caught the stub.
+**The schema.** `backend/shared/models/clause_finding.py` defines `ClauseFinding` with the design
+doc's seven fields: `clause_type`, `risk_level`, `violated_policy`, `evidence_span`,
+`suggested_redline`, `confidence`, `human_review_required`. `violated_policy` and
+`suggested_redline` are filled by Increments 2 and 3; the shape is settled now so it only changes
+once. Confidence is normalised (models often answer `85` for 85%).
+
+**Real extraction.** The tool now calls the model with a `PydanticOutputParser`, reusing the
+pattern already working in `contract_analyzer.py`. Two properties make it trustworthy:
+
+- **Grounding.** Every finding must quote the contract verbatim in `evidence_span`. Findings whose
+  span is not actually present are dropped — an ungrounded clause is a hallucination, and policy
+  checks and risk scores would inherit it. This fired in practice: one run invented a Termination
+  clause and it was discarded.
+- **Honest failure.** Extraction raises instead of returning `[]`. "The model was unavailable" and
+  "this contract has no notable clauses" produce very different reports, and conflating them is how
+  the original stub went unnoticed for so long.
+
+**The model was being thrown away.** `IntelligenceOrchestrator` received an `llm` and stored it,
+but every tool was constructed with no arguments. Worse, `_get_llm_for_model` returned a *compiled
+LangGraph agent* rather than a chat model — its `._llm` lookup never matched — and a compiled graph
+has no `.invoke(prompt)` for a string. It now builds a real chat model via `build_llm()` from the
+central catalogue, and the model is threaded to all three tool construction sites.
+
+### Three pre-existing bugs this surfaced
+
+Raising instead of returning `[]` exposed each of these immediately.
+
+1. **A third construction site.** `ReACTAgent` also built the tool with no model. It had been
+   silently receiving the two fake clauses.
+2. **`asyncio.run()` inside a running event loop.** `_pattern_analysis` crashed whenever a contract
+   was complex enough for a pattern to be selected — which killed the entire analysis, extracted
+   clauses included. It presented as "this document has no clauses". Fixed with `run_coroutine()`.
+3. **Markdown-fenced JSON.** The model wrapped its answer in ```` ```json ```` for the larger
+   contract but not the smaller one, so the same prompt succeeded on one document and failed on the
+   next with "Invalid json output". `strip_code_fence()` handles it.
+
+### A correction worth recording
+
+I first added a retry wrapper around the model call. The logs showed why that was wrong: the
+google-genai SDK already retries 429/503 with its own backoff (1s → 17s), so a second layer turned
+a 34-second failure into 100+ seconds and caused request timeouts. The wrapper and its tests were
+removed. Provider SDKs own transient retries; do not stack another layer on top.
+
+### How to test
+
+```bash
+make test          # 100 passed, 7 deselected
+```
+
+Then, with the stack up (`make run`), upload both files in `sample-contracts/` and analyse each.
+**They must produce different clauses.** That is the whole point of the increment.
+
+Note: analysis is now genuinely slower (6–60s depending on contract size) because it makes a real
+model call. Previously it took ~0.1s because it made none.
+
+**Verified on 2026-09-10:**
+
+```
+ACME / NORTHWIND MSA (5,756 chars): 6 clauses, risk 55.0 (MEDIUM)
+  LOW      Payment Terms      Section 3
+  LOW      Confidentiality    Section 4
+  MEDIUM   IP Ownership       Section 5
+  MEDIUM   Indemnification    Section 8
+  HIGH     Liability          Section 9    [needs review]
+  LOW      Termination        Section 10
+
+SHUTTLE SERVICES (32,885 chars): 3 clauses, risk 30.0 (LOW)
+  LOW      Payment Terms      Section 2
+  MEDIUM   Termination        Section 4
+  HIGH     Indemnification    Section 5    [needs review]
+
+clauses identical: False        (it was True before this increment)
+```
+
+All 9 evidence spans were checked back against the contract text stored in Neo4j: **9/9 verbatim.**
+
+### Watch out for the Gemini free-tier quota
+
+`gemini-flash` is capped at **20 requests/day** on the free tier and was exhausted during this
+work — a 429 `RESOURCE_EXHAUSTED` that presents as a slow request followed by an error. If analysis
+starts failing, that is the first thing to check: try `?model=gemini-flash-lite` (separate quota),
+or add billing. The failure is now surfaced rather than silently returning zero clauses.
+
+### Files touched
+
+```
+new:      backend/shared/models/clause_finding.py
+new:      backend/tests/test_clause_extraction.py
+          backend/tests/test_message_content.py
+          backend/tests/test_run_coroutine.py
+changed:  backend/agents/intelligence_tools.py           (the stub -> a real call)
+          backend/agents/contract_intelligence_agents.py (llm wiring, run_coroutine)
+          backend/agents/planning/execution_engine.py    (llm wiring)
+          backend/agents/patterns/react_agent.py         (llm wiring)
+          backend/agents/agent_workflow_tracker.py       (None start-time crash)
+          backend/application/services/contract_intelligence_service.py (build_llm)
+          backend/api/contract_intelligence.py           (new fields in the response)
+          backend/domain/entities.py                     (ContractClause fields)
+          backend/shared/utils/message_content.py        (strip_code_fence)
+          backend/tests/test_pattern_integration.py      (stub llm)
+```
+
+### Known issues found but not fixed here
+
+- `EnhancedPrecedentMatcherTool._find_real_precedents()` is called without its required `tenant_id`,
+  so precedent matching warns and returns nothing on every clause.
+- `ChainOfThoughtAgent` raises `NameError: name 'overall_risk' is not defined`. It fails safely
+  (the base agent catches it), but the CoT path produces nothing.
+- The frontend still reads `content`/`confidence_score`; the response carries both those aliases and
+  the new canonical fields. The UI does not yet show `evidence_span` or the review flag.
 
 ### Your feedback
 
-_(not started)_
+_(write here — anything that should change before Increment 2)_
 
 ---
 

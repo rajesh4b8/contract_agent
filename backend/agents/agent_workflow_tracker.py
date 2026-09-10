@@ -77,6 +77,13 @@ class WorkflowTracker:
         
     def complete_workflow(self):
         """Complete the workflow tracking"""
+        if self.workflow_start_time is None:
+            # Some paths (the planning engine) complete a workflow they never
+            # started. Raising here masked the real failure underneath with a
+            # confusing TypeError about datetime and None.
+            logger.warning("complete_workflow() called without start_workflow(); timing unavailable")
+            self.workflow_start_time = datetime.now()
+
         total_time = int((datetime.now() - self.workflow_start_time).total_seconds() * 1000)
         
         logger.info("🏁 MULTI-AGENT WORKFLOW COMPLETED")

@@ -28,9 +28,9 @@ class ExecutionResult:
 class StepExecutor:
     """Execute individual analysis steps"""
     
-    def __init__(self):
+    def __init__(self, llm=None):
         self.tools = {
-            StepType.EXTRACT_CLAUSES: ClauseDetectorTool(),
+            StepType.EXTRACT_CLAUSES: ClauseDetectorTool(llm=llm),
             StepType.CHECK_POLICIES: PolicyCheckerTool(),
             StepType.ASSESS_RISK: RiskCalculatorTool(),
             StepType.GENERATE_REDLINES: RedlineGeneratorTool()
@@ -305,8 +305,8 @@ class StepExecutor:
 class PlanExecutionEngine:
     """Execute planned analysis workflows with dependency management"""
     
-    def __init__(self):
-        self.step_executor = StepExecutor()
+    def __init__(self, llm=None):
+        self.step_executor = StepExecutor(llm)
         self.execution_context: Dict[str, Any] = {}
     
     async def execute_plan(self, plan: ExecutionPlan, contract_text: str) -> Dict[str, Any]:

@@ -61,10 +61,16 @@ async def analyze_contract_intelligence(
                 "clauses": [
                     {
                         "clause_type": clause.clause_type,
-                        "content": clause.content,
                         "risk_level": clause.risk_level,
+                        "evidence_span": clause.evidence_span,
+                        "confidence": clause.confidence_score,
+                        "violated_policy": clause.violated_policy,
+                        "suggested_redline": clause.suggested_redline,
+                        "human_review_required": clause.human_review_required,
+                        "location": clause.location,
+                        # Legacy aliases the UI still reads; drop once migrated.
+                        "content": clause.content,
                         "confidence_score": clause.confidence_score,
-                        "location": clause.location
                     }
                     for clause in intelligence.clauses
                 ],

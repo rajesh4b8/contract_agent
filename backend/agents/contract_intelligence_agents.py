@@ -14,6 +14,26 @@ import logging
 from backend.shared.utils.logger import get_logger
 logger = get_logger(__name__)
 
+def run_coroutine(coro):
+    """Run a coroutine from sync code, whether or not a loop is already running.
+
+    The LangGraph nodes are synchronous but execute inside FastAPI's event loop,
+    so a bare ``asyncio.run`` raises "cannot be called from a running event
+    loop". That failure killed the whole analysis — clauses included — whenever a
+    contract was complex enough for a pattern to be selected.
+    """
+    import asyncio
+    import concurrent.futures
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        return executor.submit(asyncio.run, coro).result()
+
+
 class IntelligenceOrchestrator:
     """Proper multi-agent orchestrator following SOLID principles"""
     
@@ -21,7 +41,7 @@ class IntelligenceOrchestrator:
         self.llm = llm
         self.workflow = self._build_workflow()
         self.planning_agent = PlanningAgentFactory.create_planning_agent()
-        self.execution_engine = PlanExecutionEngine()
+        self.execution_engine = PlanExecutionEngine(llm)
     
     def _build_workflow(self) -> StateGraph:
         """Build workflow with proper state management"""
@@ -60,7 +80,7 @@ class IntelligenceOrchestrator:
         )
         
         try:
-            tool = ClauseDetectorTool()
+            tool = ClauseDetectorTool(llm=self.llm)
             clauses_json = tool._run(state["contract_text"])
             clauses_list = json.loads(clauses_json)
             
@@ -92,8 +112,8 @@ class IntelligenceOrchestrator:
         })
         
         if pattern == "react":
-            agent = ReACTAgent(max_iterations=3)
-            result = asyncio.run(agent.execute({
+            agent = ReACTAgent(max_iterations=3, llm=self.llm)
+            result = run_coroutine(agent.execute({
                 'contract_text': state['contract_text'],
                 'clauses': state['extracted_clauses'],
                 'contract_id': state.get('contract_id', 'unknown')
@@ -107,7 +127,7 @@ class IntelligenceOrchestrator:
         
         elif pattern == "chain_of_thought":
             agent = ChainOfThoughtAgent()
-            result = asyncio.run(agent.execute({
+            result = run_coroutine(agent.execute({
                 'clauses': state['extracted_clauses'],
                 'task_type': 'risk_assessment',
                 'contract_id': state.get('contract_id', 'unknown')
