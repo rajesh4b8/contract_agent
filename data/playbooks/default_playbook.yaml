@@ -1,0 +1,112 @@
+# Default commercial contract playbook.
+#
+# These rules were previously encoded as `if` statements and a COMPANY_POLICIES
+# dict inside backend/agents/intelligence_tools.py, which meant policy could only
+# be changed by editing Python and could not be cited in a finding. They now live
+# here as data: a lawyer can read and revise them, and every violation reported by
+# the system names the rule id that produced it.
+#
+# Load with:  make seed-playbook
+#
+# id           stable identifier; appears as `violated_policy` on a clause finding.
+#              Never reuse an id for a different rule — past findings reference it.
+# rule_type    mandatory | recommended | prohibited
+# applies_to   contract types this rule covers; "general" means all
+# severity     CRITICAL | HIGH | MEDIUM | LOW — drives the risk score
+# redline_text preferred replacement language, used when a violation is raised
+
+name: Default Commercial Contract Playbook
+version: "1.0"
+tenant_id: default-tenant
+
+rules:
+  - id: PAY-001
+    rule_text: >-
+      Payment is due within thirty (30) days of invoice receipt. Net 45 terms are
+      acceptable only with Delivery Director approval. Payment terms of Net 60 or
+      longer are prohibited.
+    rule_type: mandatory
+    applies_to: [general]
+    severity: CRITICAL
+    section_reference: "Payment Terms"
+    redline_text: "Payment is due within thirty (30) days of invoice receipt."
+
+  - id: LIA-001
+    rule_text: >-
+      Liability must be capped by reference to the fees paid or payable under the
+      applicable Statement of Work, at no more than 1x those fees (2x with Legal
+      approval). Unlimited liability, and exposure to indirect, consequential or
+      special damages, are prohibited.
+    rule_type: mandatory
+    applies_to: [general]
+    severity: CRITICAL
+    section_reference: "Limitation of Liability"
+    redline_text: >-
+      Our liability shall not exceed the total fees paid or payable under the
+      applicable Statement of Work.
+
+  - id: LIA-002
+    rule_text: >-
+      A liability cap stated as a fixed monetary amount not linked to contract
+      value is a deviation, and is unacceptable below USD 100,000.
+    rule_type: mandatory
+    applies_to: [general]
+    severity: HIGH
+    section_reference: "Limitation of Liability"
+    redline_text: >-
+      Our liability shall not exceed the total fees paid or payable under the
+      applicable Statement of Work.
+
+  - id: IND-001
+    rule_text: >-
+      Indemnification must be mutual and limited to third-party claims arising
+      from gross negligence, willful misconduct, or infringement of intellectual
+      property. Broad or open-ended indemnities, and indemnifying the counterparty
+      for their own negligence or misuse, are prohibited.
+    rule_type: mandatory
+    applies_to: [general]
+    severity: CRITICAL
+    section_reference: "Indemnification"
+    redline_text: >-
+      Each party will indemnify the other solely for third-party claims arising
+      from gross negligence, willful misconduct, or infringement of IP under this
+      Agreement.
+
+  - id: TRM-001
+    rule_text: >-
+      Either party may terminate with no less than thirty (30) days' written
+      notice. Immediate termination without notice is prohibited, and all
+      completed work must remain payable on termination.
+    rule_type: mandatory
+    applies_to: [general]
+    severity: HIGH
+    section_reference: "Termination"
+    redline_text: >-
+      Either party may terminate this SOW with thirty (30) days' written notice.
+      All completed work shall be payable upon termination.
+
+  - id: IPR-001
+    rule_text: >-
+      The client owns deliverables created specifically for the engagement. The
+      company retains ownership of its pre-existing IP, reusable tools and
+      methodologies. Assignment of IP without carve-outs for pre-existing company
+      IP is prohibited.
+    rule_type: mandatory
+    applies_to: [general]
+    severity: CRITICAL
+    section_reference: "Intellectual Property"
+    redline_text: >-
+      Client owns deliverables created specifically for the engagement. Company
+      retains ownership of its pre-existing IP, reusable tools, and methodologies.
+
+  - id: CON-001
+    rule_text: >-
+      Confidentiality obligations are required and must be mutual, covering all
+      proprietary information disclosed under the agreement.
+    rule_type: mandatory
+    applies_to: [general]
+    severity: MEDIUM
+    section_reference: "Confidentiality"
+    redline_text: >-
+      Both parties agree to maintain confidentiality of all proprietary
+      information.

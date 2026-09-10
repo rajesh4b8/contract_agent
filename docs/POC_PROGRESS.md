@@ -1,7 +1,7 @@
 # POC Progress Tracker
 
-**Resume point: Increment 2 — `not started`.**
-Increments 0 and 1 are accepted. Say *continue the POC work* to begin Increment 2.
+**Resume point: Increment 2 — `awaiting your test`.**
+Run `make test`, then `make seed-playbook` and analyse a contract. Write under *Your feedback*.
 
 This file is the live state of the POC work. It is committed, so any session on any machine can
 pick up by reading it first. The detailed reasoning behind the plan lives in the session that
@@ -23,7 +23,7 @@ produced it; this file is what you and I actually work from.
 |---|-----------|--------|
 | 0 | Make the repo testable | accepted |
 | 1 | Real clause extraction against a schema | accepted |
-| 2 | Ground policy checks in one real playbook | next |
+| 2 | Ground policy checks in one real playbook | **awaiting your test** |
 | 3 | Redlines that are real and persisted | not started |
 | 4 | Human-in-the-loop approve / edit / reject | not started |
 | 5 | One measurable outcome | not started |
@@ -311,18 +311,89 @@ _Passed testing 2026-09-10. Accepted._
 
 ## Increment 2 — Ground policy checks in one real playbook
 
-Seed one playbook (`data/Contract_Policy_Playbook.pdf` exists; `POST /api/policies/upload` already
-ingests into `(:PolicyRule)`). Replace keyword matching against the in-code `COMPANY_POLICIES`
-dict with retrieval of the seeded rules, and set `violated_policy` to the rule id so every finding
-traces back to a playbook entry.
+**Goal:** policy lived in a Python dict and a chain of `if` statements inside
+`intelligence_tools.py`. A finding could say *"payment terms exceed company policy"* but could not
+name the rule, policy could only be changed by editing code, and no lawyer could review it.
 
-Also fix the migration runner: `backend/run_migration.py` only runs `multi_level_embeddings`, but
-`clause_schema_migration` seeds the `(:ClauseType)` nodes that `CLASSIFIED_AS` needs — without it
-every classification is silently dropped.
+### What changed
+
+**Policy is now data.** `data/playbooks/default_playbook.yaml` holds the seven rules that were
+previously hardcoded — payment, two liability rules, indemnification, termination, IP and
+confidentiality — each with a stable id, severity, section reference and preferred redline. A test
+asserts every topic the old checker enforced still has a rule, so nothing was lost in the move.
+
+**Seeding.** `make seed-playbook` loads it into `(:PolicyDocument)-[:HAS_RULE]->(:PolicyRule)`.
+Idempotent — rules MERGE on `(tenant_id, id)`, so editing the file and re-running updates in place.
+`make check-playbook` validates without touching the database. Validation is strict: a missing
+field, unknown severity or duplicate id fails loudly, because a silently dropped rule means
+contracts stop being checked against it with nothing in the output to say so.
+
+**Checking is grounded in the rules.** `PolicyCheckerTool` now receives the tenant's rules and asks
+the model which clauses breach which, returning a rule id per finding. Three things are taken from
+the playbook rather than the model:
+
+- **the rule id** — a violation citing an id that was not supplied is discarded, as is one pointing
+  at a clause index that does not exist;
+- **severity** — it drives the risk score, so it must not drift between runs;
+- **the suggested fix** — the rule's own redline text.
+
+**Findings carry their provenance.** `violated_policy` on a clause names the rule(s) it breaches,
+and violations expose `rule_id` and `section_reference` through the API.
+
+**An empty playbook is an error.** Previously zero rules would have produced zero violations, which
+reads as "this contract is compliant" — a completely different claim. It now raises.
+
+### One thing this increment had to undo
+
+CUAD keyword deviations were being merged into `policy_violations`. They are heuristics with no
+playbook rule behind them, so with them in the list a consumer could not tell a cited breach from a
+guess — which would have made the citation guarantee worthless. They stay in
+`cuad_analysis.deviations`, where the API already surfaced them separately.
+
+### Also fixed
+
+`backend/run_migration.py upgrade` only ran the embeddings migration. It now runs the section,
+clause, audit and phase-2/3 migrations too. `clause_schema_migration` seeds the `(:ClauseType)`
+nodes that `CLASSIFIED_AS` matches against — without it every CUAD classification was being
+silently dropped at write time.
+
+### How to test
+
+```bash
+make test            # 166 passed, 3 skipped
+make check-playbook  # validates the file, no database needed
+```
+
+With the stack up:
+
+```bash
+make seed-playbook   # 7 rules
+```
+
+Then analyse a contract and confirm each violation names a rule.
+
+**Verified on 2026-09-10** against the Acme MSA:
+
+```
+6 clauses, 1 violation, risk 55.0 (MEDIUM)
+  IND-001  [CRITICAL] Indemnification
+           The clause requires Customer to indemnify Provider for third-party claims...
+
+clause citations:
+  Indemnification    violated_policy=IND-001
+  (others)           violated_policy=None
+
+every violation cites a rule: True
+cuad deviations (kept separate): 1
+```
+
+Note `make seed-playbook` runs on the host, where `.env`'s `NEO4J_URI` points at the compose
+hostname. The target overrides it to `bolt://localhost:7687`; use
+`make seed-playbook HOST_NEO4J_URI=...` for a remote instance.
 
 ### Your feedback
 
-_(not started)_
+_(write here — anything that should change before Increment 3)_
 
 ---
 

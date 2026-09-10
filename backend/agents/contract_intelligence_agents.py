@@ -8,11 +8,33 @@ from backend.agents.intelligence_tools import (
 from backend.agents.agent_workflow_tracker import workflow_tracker
 from backend.agents.planning.planning_agent import PlanningAgentFactory
 from backend.agents.planning.execution_engine import PlanExecutionEngine
+from backend.infrastructure.playbook_loader import load_rules_for_tenant
 import json
 import logging
 
 from backend.shared.utils.logger import get_logger
 logger = get_logger(__name__)
+
+def _attach_violated_policy(clauses: list, violations: list) -> list:
+    """Record on each clause which playbook rule(s) it breaches.
+
+    A clause breaching several rules lists them comma-separated; the field is a
+    human- and machine-readable citation, not a foreign key.
+    """
+    by_clause: dict[str, list[str]] = {}
+    for violation in violations:
+        rule_id = violation.get("rule_id")
+        content = violation.get("clause_content", "")
+        if rule_id and content:
+            by_clause.setdefault(content, []).append(rule_id)
+
+    stamped = []
+    for clause in clauses:
+        text = clause.get("evidence_span") or clause.get("content", "")
+        rule_ids = by_clause.get(text)
+        stamped.append({**clause, "violated_policy": ", ".join(rule_ids) if rule_ids else None})
+    return stamped
+
 
 def run_coroutine(coro):
     """Run a coroutine from sync code, whether or not a loop is already running.
@@ -156,15 +178,28 @@ class IntelligenceOrchestrator:
         )
         
         try:
-            tool = PolicyCheckerTool()
+            rules = load_rules_for_tenant(
+                state.get("tenant_id") or "default-tenant",
+                state.get("contract_type") or "general",
+            )
+            tool = PolicyCheckerTool(llm=self.llm, rules=rules)
             clauses_json = json.dumps(state["extracted_clauses"])
             violations_json = tool._run(clauses_json)
             violations_list = json.loads(violations_json)
-            
+
+            # Stamp the breached rule back onto the clause, so a finding carries
+            # its own provenance instead of the caller having to join on text.
+            clauses = _attach_violated_policy(state["extracted_clauses"], violations_list)
+
             critical_count = len([v for v in violations_list if v.get("severity") == "CRITICAL"])
-            workflow_tracker.complete_agent(execution, f"Found {len(violations_list)} violations ({critical_count} critical)")
-            
+            workflow_tracker.complete_agent(
+                execution,
+                f"Found {len(violations_list)} violations ({critical_count} critical) "
+                f"against {len(rules)} playbook rules"
+            )
+
             return {**state,
+                "extracted_clauses": clauses,
                 "policy_violations": violations_list,
                 "current_step": "policy_checking"
             }
@@ -266,8 +301,11 @@ class IntelligenceOrchestrator:
                 enhanced_analysis = adaptive_analyzer.enhance_analysis(clause, clause)
                 enhanced_clauses.append(enhanced_analysis)
             
-            # Merge deviations with existing violations
-            enhanced_violations = state["policy_violations"] + deviations
+            # Deviations are keyword-matched heuristics, not playbook breaches, so
+            # they stay out of policy_violations: everything in that list cites a
+            # rule id, and mixing in findings that cannot would make the citation
+            # meaningless. They are still returned, under cuad_analysis.deviations.
+            enhanced_violations = state["policy_violations"]
             
             # Update risk data with enhanced CUAD insights
             enhanced_risk_data = dict(state["risk_data"])
@@ -391,7 +429,9 @@ class IntelligenceOrchestrator:
                 "precedent_matches": []
             }
     
-    def analyze_contract(self, contract_text: str, use_planning: bool = True) -> dict:
+    def analyze_contract(self, contract_text: str, use_planning: bool = True,
+                         tenant_id: str = "default-tenant",
+                         contract_type: str = "general") -> dict:
         """Run analysis with optional autonomous planning"""
         try:
             if use_planning:
@@ -411,9 +451,9 @@ class IntelligenceOrchestrator:
                         return asyncio.run(self._analyze_with_planning(contract_text))
                 except Exception as planning_error:
                     logger.error(f"Planning agent failed: {planning_error}, falling back to traditional workflow")
-                    return self._analyze_traditional(contract_text)
+                    return self._analyze_traditional(contract_text, tenant_id, contract_type)
             else:
-                return self._analyze_traditional(contract_text)
+                return self._analyze_traditional(contract_text, tenant_id, contract_type)
             
         except Exception as e:
             logger.error(f"Analysis failed: {e}")
@@ -475,7 +515,9 @@ class IntelligenceOrchestrator:
             logger.error(f"🧠 Full traceback: {traceback.format_exc()}")
             raise e
     
-    def _analyze_traditional(self, contract_text: str) -> dict:
+    def _analyze_traditional(self, contract_text: str,
+                             tenant_id: str = "default-tenant",
+                             contract_type: str = "general") -> dict:
         """Traditional workflow analysis (fallback)"""
         # Start workflow tracking
         workflow_tracker.start_workflow()
@@ -483,6 +525,8 @@ class IntelligenceOrchestrator:
         # Initialize proper state with CUAD fields
         initial_state = {
             "contract_text": contract_text,
+            "tenant_id": tenant_id,
+            "contract_type": contract_type,
             "extracted_clauses": [],
             "policy_violations": [],
             "risk_data": {},

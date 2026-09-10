@@ -34,8 +34,33 @@ def main():
     
     try:
         if command == "upgrade":
+            # Every migration that has a runnable entry point, not just the
+            # embeddings one. clause_schema_migration seeds the (:ClauseType)
+            # nodes that CLASSIFIED_AS matches against — without it, every CUAD
+            # classification is silently dropped at write time.
             logger.info("Running schema upgrade...")
             upgrade_schema()
+
+            from migrations.section_schema_migration import run_migration as section_migration
+            from migrations.clause_schema_migration import run_migration as clause_migration
+            from migrations.audit_error_schema_migration import run_migration as audit_migration
+            from migrations.phase2_phase3_schema import run_migration as phase_migration
+
+            for name, migrate in [
+                ("sections", section_migration),
+                ("clauses + clause types", clause_migration),
+                ("audit + error tracking", audit_migration),
+                ("phase 2/3 schema", phase_migration),
+            ]:
+                logger.info(f"Running migration: {name}")
+                try:
+                    migrate()
+                except Exception as e:
+                    # Keep going: a later migration may still be applicable, and
+                    # stopping here would leave the schema half-built with no
+                    # indication of which parts succeeded.
+                    logger.error(f"Migration {name!r} failed: {e}")
+
             logger.info("Schema upgrade completed successfully!")
             
         elif command == "downgrade":

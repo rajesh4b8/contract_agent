@@ -76,6 +76,8 @@ async def analyze_contract_intelligence(
                 ],
                 "violations": [
                     {
+                        "rule_id": violation.rule_id,
+                        "section_reference": violation.section_reference,
                         "clause_type": violation.clause_type,
                         "issue": violation.issue,
                         "severity": violation.severity,

@@ -17,7 +17,10 @@ class ContractIntelligenceService:
         self.llm_manager = llm_manager
         self.repository = Neo4jContractRepository()
     
-    def analyze_contract_intelligence(self, contract_text: str, model: str = "gemini-2.5-flash", use_planning: bool = True) -> ContractIntelligence:
+    def analyze_contract_intelligence(self, contract_text: str, model: str = "gemini-2.5-flash",
+                                      use_planning: bool = True,
+                                      tenant_id: str = "default-tenant",
+                                      contract_type: str = "general") -> ContractIntelligence:
         """Perform complete contract intelligence analysis using multi-agent system"""
         
         start_time = time.time()
@@ -32,7 +35,9 @@ class ContractIntelligenceService:
             try:
                 orchestrator = ContractIntelligenceAgentFactory.create_orchestrator(llm)
                 # Run multi-agent analysis with optional planning
-                analysis_result = orchestrator.analyze_contract(contract_text, use_planning)
+                analysis_result = orchestrator.analyze_contract(
+                    contract_text, use_planning, tenant_id, contract_type
+                )
             except ImportError as ie:
                 logger.error(f"Import error in orchestrator: {ie}")
                 raise Exception(f"Intelligence system not properly configured: {ie}")
@@ -90,7 +95,11 @@ class ContractIntelligenceService:
                 return None
             
             # Perform analysis with optional planning
-            intelligence = self.analyze_contract_intelligence(contract_text, model, use_planning)
+            intelligence = self.analyze_contract_intelligence(
+                contract_text, model, use_planning,
+                tenant_id=tenant_id,
+                contract_type=contract_data.get("contract_type") or "general",
+            )
             
             # Store intelligence results back to database
             self._store_intelligence_results(contract_id, tenant_id, intelligence)
@@ -147,7 +156,9 @@ class ContractIntelligenceService:
                 issue=violation_data.get("issue", ""),
                 severity=violation_data.get("severity", "LOW"),
                 suggested_fix=violation_data.get("suggested_fix", ""),
-                clause_content=violation_data.get("clause_content", "")
+                clause_content=violation_data.get("clause_content", ""),
+                rule_id=violation_data.get("rule_id"),
+                section_reference=violation_data.get("section_reference", ""),
             ))
         
         # Convert risk assessment

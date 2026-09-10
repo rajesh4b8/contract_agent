@@ -6,6 +6,8 @@ class IntelligenceState(TypedDict):
     
     # Input data
     contract_text: str
+    tenant_id: str        # which playbook applies
+    contract_type: str    # narrows which rules apply
     
     # Processing results (structured data, not strings)
     extracted_clauses: List[dict]
