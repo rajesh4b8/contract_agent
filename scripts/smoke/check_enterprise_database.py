@@ -3,11 +3,17 @@
 Test Enterprise Database Implementation
 """
 
+# Run directly (`python scripts/smoke/<name>.py`) from anywhere: Python puts
+# this file's directory on sys.path, not the repo root, so `backend.*` would
+# not resolve without this.
+import pathlib
+import sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
 import sys
 import os
 
 # Add backend to path
-sys.path.append(os.path.join(os.path.dirname(__file__), 'backend'))
 
 def test_multi_tenancy():
     """Test multi-tenant database structure"""

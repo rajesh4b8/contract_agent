@@ -1,7 +1,10 @@
 from langchain_core.tools import BaseTool
+from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 from typing import Type, Dict, Any, List
 from backend.domain.entities import ContractClause, PolicyViolation, RiskAssessment, RedlineRecommendation
+from backend.shared.models.clause_finding import ClauseExtraction
+from backend.shared.utils.message_content import content_to_text, strip_code_fence
 import json
 import logging
 
@@ -52,65 +55,86 @@ COMPANY_POLICIES = {
 class ClauseDetectorInput(BaseModel):
     contract_text: str = Field(description="Contract text to analyze for clauses")
 
+CLAUSE_TYPES_OF_INTEREST = [
+    "Payment Terms",
+    "Liability",
+    "Indemnification",
+    "Confidentiality",
+    "Termination",
+    "IP Ownership",
+]
+
+# Characters of contract text sent to the model in one pass.
+CLAUSE_EXTRACTION_WINDOW = 12000
+
+
 class ClauseDetectorTool(BaseTool):
     name: str = "clause_detector"
     description: str = "Detect and extract key contract clauses"
     args_schema: Type[BaseModel] = ClauseDetectorInput
-    
+    llm: Any = None
+
     def _run(self, contract_text: str) -> str:
-        """Extract clauses from contract text"""
-        try:
-            # Truncate for LLM processing
-            text = contract_text[:6000] if len(contract_text) > 6000 else contract_text
-            
-            prompt = f"""
-            Extract key contract clauses from this text. Return ONLY a JSON array of clauses.
-            
-            Text: {text}
-            
-            Return exactly this format:
-            [
-                {{
-                    "clause_type": "Payment Terms",
-                    "content": "extracted clause text",
-                    "risk_level": "MEDIUM",
-                    "confidence_score": 0.9,
-                    "location": "Section 3.1"
-                }}
-            ]
-            
-            Focus on these clause types:
-            - Payment Terms
-            - Liability
-            - Confidentiality  
-            - Termination
-            - IP Ownership
-            """
-            
-            # This would use the LLM - simplified for prototype
-            clauses = [
-                {
-                    "clause_type": "Payment Terms",
-                    "content": "Payment due within 30 days of invoice",
-                    "risk_level": "LOW",
-                    "confidence_score": 0.8,
-                    "location": "Section 3"
-                },
-                {
-                    "clause_type": "Liability",
-                    "content": "Liability limited to $50,000",
-                    "risk_level": "HIGH", 
-                    "confidence_score": 0.9,
-                    "location": "Section 8"
-                }
-            ]
-            
-            logger.info(f"Extracted {len(clauses)} clauses")
-            return json.dumps(clauses)
-            
-        except Exception as e:
-            logger.error(f"Clause detection failed: {e}")
-            return json.dumps([])
+        """Extract clauses from the contract, returning a JSON array.
+
+        Every returned clause quotes the contract verbatim in ``evidence_span``.
+        Findings whose span is not actually present in the source are dropped:
+        an ungrounded clause is a hallucination, and downstream policy checks and
+        risk scores would inherit it.
+        """
+        if self.llm is None:
+            # Refuse rather than invent. This tool previously returned two
+            # hardcoded clauses regardless of input, which made every contract
+            # produce an identical risk report.
+            raise ValueError("ClauseDetectorTool requires an llm to extract clauses")
+
+        text = contract_text[:CLAUSE_EXTRACTION_WINDOW]
+        parser = PydanticOutputParser(pydantic_object=ClauseExtraction)
+
+        prompt = f"""You are a contract analyst. Extract the clauses that matter for
+legal review from the contract below.
+
+Focus on these clause types: {", ".join(CLAUSE_TYPES_OF_INTEREST)}.
+Include a clause only if it is genuinely present. It is correct to return fewer
+clauses, or none, rather than invent one.
+
+For each clause set `evidence_span` to the clause text copied EXACTLY from the
+contract — same words, same order. Do not paraphrase or summarise. Judge
+`risk_level` from the perspective of the party receiving this contract: unusual,
+one-sided or open-ended terms are higher risk. Set `human_review_required` when
+the clause is HIGH or CRITICAL risk, or when you are unsure.
+
+Leave `violated_policy` and `suggested_redline` null.
+
+CONTRACT:
+{text}
+
+{parser.get_format_instructions()}"""
+
+        # No retry wrapper here: the provider SDKs already retry 429/503 with
+        # their own backoff (google-genai walks 1s -> 17s before giving up).
+        # Adding a second layer tripled a 34s failure into a 100s+ one.
+        #
+        # Failures propagate rather than returning an empty list. "The model was
+        # unavailable" and "this contract has no notable clauses" produce very
+        # different reports, and conflating them is how the original stub went
+        # unnoticed. Callers already handle the exception.
+        response = self.llm.invoke(prompt)
+        extraction = parser.parse(strip_code_fence(content_to_text(response.content)))
+
+        grounded, ungrounded = [], []
+        for clause in extraction.clauses:
+            (grounded if clause.is_grounded_in(text) else ungrounded).append(clause)
+
+        if ungrounded:
+            logger.warning(
+                f"Dropped {len(ungrounded)} ungrounded clause(s) whose evidence span "
+                f"was absent from the contract: "
+                f"{[c.clause_type for c in ungrounded]}"
+            )
+
+        logger.info(f"Extracted {len(grounded)} clauses from {len(text):,} characters")
+        return json.dumps([c.to_wire() for c in grounded])
 
 # Policy Compliance Agent Tools
 class PolicyCheckerInput(BaseModel):

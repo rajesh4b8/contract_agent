@@ -24,11 +24,12 @@ class ReACTStep:
 class ReACTAgent(BasePatternAgent):
     """ReACT Pattern: Reasoning-Action-Observation (SOLID: SRP, OCP, DIP)"""
     
-    def __init__(self, max_iterations: int = 3):
+    def __init__(self, max_iterations: int = 3, llm=None):
         super().__init__("ReACT Pattern Agent")
         self.max_iterations = max_iterations
         self.steps: List[ReACTStep] = []
-        self.clause_tool = ClauseDetectorTool()  # Reuse existing tool (DRY)
+        # Needs the model: without it the tool cannot extract clauses.
+        self.clause_tool = ClauseDetectorTool(llm=llm)
     
     def get_agent_role(self) -> str:
         return "Iterative contract analysis with reasoning-action-observation cycles"

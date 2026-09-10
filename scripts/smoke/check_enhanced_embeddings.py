@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Run directly (`python scripts/smoke/<name>.py`) from anywhere: Python puts
+# this file's directory on sys.path, not the repo root, so `backend.*` would
+# not resolve without this.
+import pathlib
+import sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 """
 Test script for enhanced multi-level embeddings system
 """
@@ -10,8 +16,6 @@ import logging
 from pathlib import Path
 
 # Add backend to path
-backend_path = Path(__file__).parent / "backend"
-sys.path.insert(0, str(backend_path))
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -31,7 +35,7 @@ async def test_enhanced_embeddings():
         from backend.embeddings.validator import EmbeddingValidator
         from backend.embeddings.strategies.factory import EmbeddingFactory
         from backend.embeddings.strategies import EmbeddingType
-        from backend.tools.enhanced_contract_search_tool import EnhancedContractSearchTool
+        from backend.shared.utils.enhanced_contract_search_tool import EnhancedContractSearchTool
         
         print("✅ All components imported successfully")
         
@@ -125,7 +129,7 @@ async def test_enhanced_embeddings():
         
         try:
             from backend.embeddings.migrator import EmbeddingMigrator
-            from backend.migrations.migration_001_multi_level_embeddings import upgrade_schema
+            from backend.migrations.multi_level_embeddings import upgrade_schema
             
             print("✅ Migration components imported successfully")
             print("ℹ️  Run 'python backend/run_migration.py upgrade' to apply schema changes")

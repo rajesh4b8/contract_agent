@@ -3,7 +3,7 @@ from backend.shared.utils.contract_search_tool import CONTRACT_TYPES
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import PydanticOutputParser
-from backend.shared.utils.message_content import content_to_text
+from backend.shared.utils.message_content import content_to_text, strip_code_fence
 import logging
 
 from backend.shared.utils.logger import get_logger
@@ -45,5 +45,7 @@ class LLMContractAnalyzer(IContractAnalyzer):
 Use contract_type from: {CONTRACT_TYPES}"""
         
         response = self.llm.invoke(prompt)
-        result = self.parser.parse(content_to_text(response.content))
+        # Same fence handling as clause extraction: models wrap JSON in
+        # ```json despite the format instructions, and inconsistently.
+        result = self.parser.parse(strip_code_fence(content_to_text(response.content)))
         return result.dict()

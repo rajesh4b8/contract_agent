@@ -3,6 +3,7 @@ from enum import Enum
 from dotenv import load_dotenv
 from langchain_core.tools import BaseTool
 from backend.shared.utils.gemini_embedding_service import embedding
+from backend.shared.utils.lazy import LazyProxy
 from langchain_neo4j import Neo4jGraph
 from pydantic import BaseModel, Field
 from backend.shared.utils.logger import get_logger
@@ -34,8 +35,12 @@ class Location(BaseModel):
     country: Optional[str] = Field(None, description="Use two-letter ISO standard")
     state: Optional[str]
 
-graph: Neo4jGraph = Neo4jGraph(
-    refresh_schema=False, driver_config={"notifications_min_severity": "OFF"}
+# Connects on first use, not on import — see backend/shared/utils/lazy.py
+graph = LazyProxy(
+    lambda: Neo4jGraph(
+        refresh_schema=False, driver_config={"notifications_min_severity": "OFF"}
+    ),
+    "graph",
 )
 # embedding imported from gemini_embedding_service (1536 dimensions)
 

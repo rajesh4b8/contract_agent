@@ -102,21 +102,23 @@ class ContractIntelligenceService:
             return None
     
     def _get_llm_for_model(self, model: str):
-        """Get LLM instance for the specified model"""
-        from backend.shared.config.models import normalize_model_id
+        """Get a raw chat model for the requested id.
+
+        `llm_manager.agents[...]` holds *compiled LangGraph agents* for the chat
+        endpoint, not chat models — they have no `.invoke(prompt)` for a plain
+        string and no structured-output support. The intelligence tools need the
+        underlying model, so build it from the central catalogue instead of
+        reaching into the agent (the old `._llm` lookup never matched, so this
+        silently returned the compiled agent).
+        """
+        from backend.shared.config.models import build_llm, normalize_model_id
 
         model = normalize_model_id(model)
         try:
-            return self.llm_manager.agents[model]._llm if hasattr(self.llm_manager.agents[model], '_llm') else self.llm_manager.agents[model]
-        except KeyError:
-            logger.warning(f"Model {model} not found, using default")
-            # Use first available model as fallback
-            available_models = list(self.llm_manager.agents.keys())
-            if available_models:
-                fallback_model = available_models[0]
-                return self.llm_manager.agents[fallback_model]._llm if hasattr(self.llm_manager.agents[fallback_model], '_llm') else self.llm_manager.agents[fallback_model]
-            else:
-                raise ValueError("No LLM models available")
+            return build_llm(model)
+        except Exception as e:
+            logger.warning(f"Could not build LLM for '{model}' ({e}); falling back to default")
+            return build_llm(None)
     
     def _convert_to_domain_entities(self, analysis_result: Dict[str, Any]) -> ContractIntelligence:
         """Convert analysis results to domain entities"""
@@ -124,12 +126,17 @@ class ContractIntelligenceService:
         # Convert clauses
         clauses = []
         for clause_data in analysis_result.get("clauses", []):
+            evidence_span = clause_data.get("evidence_span") or clause_data.get("content", "")
             clauses.append(ContractClause(
                 clause_type=clause_data.get("clause_type", ""),
-                content=clause_data.get("content", ""),
+                content=evidence_span,
                 risk_level=clause_data.get("risk_level", "LOW"),
                 confidence_score=clause_data.get("confidence_score", 0.0),
-                location=clause_data.get("location", "")
+                location=clause_data.get("location", ""),
+                evidence_span=evidence_span,
+                violated_policy=clause_data.get("violated_policy"),
+                suggested_redline=clause_data.get("suggested_redline"),
+                human_review_required=clause_data.get("human_review_required", False),
             ))
         
         # Convert violations

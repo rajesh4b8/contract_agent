@@ -1,4 +1,10 @@
 #!/usr/bin/env python3
+# Run directly (`python scripts/smoke/<name>.py`) from anywhere: Python puts
+# this file's directory on sys.path, not the repo root, so `backend.*` would
+# not resolve without this.
+import pathlib
+import sys
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
 import requests
 import json
 
@@ -32,11 +38,11 @@ def test_simple_intelligence():
     print("1. Testing multi-agent orchestrator...")
     
     try:
-        from backend.services.contract_intelligence_service import ContractIntelligenceServiceFactory
-        from backend.agent_manager import AgentManager
+        from backend.application.services.contract_intelligence_service import ContractIntelligenceServiceFactory
+        from backend.llm_manager import LLMManager
         
         # Initialize services
-        agent_manager = AgentManager()
+        agent_manager = LLMManager()
         intelligence_service = ContractIntelligenceServiceFactory.create_service(agent_manager)
         
         # Run multi-agent analysis

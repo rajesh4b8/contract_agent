@@ -10,13 +10,44 @@ from backend.agents.patterns.chain_of_thought_agent import ChainOfThoughtAgent
 from backend.agents.patterns.pattern_selector import PatternSelector, AnalysisComplexity
 
 
+class StubLLM:
+    """Returns clauses quoted from whatever contract text it is shown.
+
+    These tests exercise the ReACT loop, not extraction quality. They used to
+    pass without a model only because ClauseDetectorTool returned two hardcoded
+    clauses for any input; now the tool needs a real one.
+    """
+
+    def __init__(self, spans):
+        self.spans = spans
+
+    def invoke(self, prompt):
+        import json as _json
+
+        clauses = [{
+            "clause_type": "Liability",
+            "evidence_span": span,
+            "risk_level": "MEDIUM",
+            "confidence": 0.8,
+            "location": "",
+            "violated_policy": None,
+            "suggested_redline": None,
+            "human_review_required": False,
+        } for span in self.spans]
+
+        class Response:
+            content = _json.dumps({"clauses": clauses})
+
+        return Response()
+
+
 class TestReACTAgent:
     """Test ReACT pattern agent"""
     
     @pytest.mark.asyncio
     async def test_react_agent_basic_execution(self):
         """Test basic ReACT agent execution"""
-        agent = ReACTAgent(max_iterations=2)
+        agent = ReACTAgent(max_iterations=2, llm=StubLLM(['termination clause']))
         
         result = await agent.execute({
             'contract_text': 'Sample contract with termination clause and liability terms...',
@@ -32,7 +63,7 @@ class TestReACTAgent:
     @pytest.mark.asyncio
     async def test_react_agent_convergence(self):
         """Test ReACT agent converges with high confidence"""
-        agent = ReACTAgent(max_iterations=5)
+        agent = ReACTAgent(max_iterations=5, llm=StubLLM(['payment terms']))
         
         result = await agent.execute({
             'contract_text': 'This contract contains payment terms, liability clauses, and termination provisions.',
@@ -59,6 +90,7 @@ class TestChainOfThoughtAgent:
     """Test Chain-of-Thought pattern agent"""
     
     @pytest.mark.asyncio
+    @pytest.mark.integration  # reads policies from Neo4j
     async def test_cot_agent_risk_assessment(self):
         """Test CoT agent risk assessment"""
         agent = ChainOfThoughtAgent()

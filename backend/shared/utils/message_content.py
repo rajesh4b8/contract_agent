@@ -5,7 +5,11 @@ as a list of content blocks (``[{"type": "text", "text": ...}, ...]``) rather th
 a plain string. Code that feeds ``response.content`` into string parsers must
 flatten it first.
 """
+import re
 from typing import Any
+
+# ```json ... ``` or bare ``` ... ``` wrapping the whole response.
+_FENCED = re.compile(r"^\s*```(?:json|JSON)?\s*\n(?P<body>.*?)\n?\s*```\s*$", re.DOTALL)
 
 
 def content_to_text(content: Any) -> str:
@@ -28,3 +32,17 @@ def content_to_text(content: Any) -> str:
                     parts.append(text)
         return "".join(parts)
     return str(content) if content is not None else ""
+
+
+def strip_code_fence(text: str) -> str:
+    """Remove a surrounding markdown code fence, if the model added one.
+
+    Models asked for JSON often answer with ```json ... ``` despite format
+    instructions, and pydantic parsers reject that with "Invalid json output".
+    Whether a fence appears varies by request, so the same prompt can succeed on
+    one contract and fail on the next.
+
+    Text that is not fenced is returned unchanged.
+    """
+    match = _FENCED.match(text)
+    return match.group("body") if match else text

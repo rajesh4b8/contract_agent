@@ -1,7 +1,9 @@
+import os
 from enum import Enum
 from typing import List, Dict, Set, Optional
 from fastapi import Header, HTTPException, Depends, status
 from backend.shared.utils.logger import get_logger
+from backend.shared.utils.route_utils import is_production
 
 logger = get_logger(__name__)
 
@@ -54,9 +56,26 @@ async def get_current_user_role(x_user_role: Optional[str] = Header(None)) -> Us
     Mock implementation - in production this would validate a JWT token.
     """
     if not x_user_role:
-        logger.warning("Access attempted without user role header")
-        # Default to VIEWER for safety, or raise 401
-        return UserRole.ADMIN
+        # Fail closed in production: an unauthenticated caller gets the
+        # least-privileged role, never ADMIN. Defaulting high made every
+        # endpoint effectively unguarded, since the header is trivially absent.
+        #
+        # There is no real authentication yet, so in development we fall back to
+        # a configurable role (DEV_DEFAULT_ROLE) — otherwise the UI, which sends
+        # no header, cannot upload. Replace this whole branch with real token
+        # validation when auth lands.
+        if is_production():
+            logger.warning("Access attempted without user role header; denying beyond VIEWER")
+            return UserRole.VIEWER
+
+        configured = os.getenv("DEV_DEFAULT_ROLE", UserRole.LEGAL_REVIEWER.value)
+        try:
+            role = UserRole(configured.upper())
+        except ValueError:
+            logger.error(f"Invalid DEV_DEFAULT_ROLE '{configured}'; falling back to VIEWER")
+            return UserRole.VIEWER
+        logger.debug(f"No user role header; using DEV_DEFAULT_ROLE={role.value}")
+        return role
         
     try:
         role = UserRole(x_user_role.upper())

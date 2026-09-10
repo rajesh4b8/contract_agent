@@ -48,11 +48,20 @@ class IDocumentProcessor(ABC):
 # Contract Intelligence Entities
 @dataclass
 class ContractClause:
+    """A clause as reported to the reviewer.
+
+    Field names track the design doc's output schema. ``content`` is the older
+    name for ``evidence_span`` and is kept while the UI still reads it.
+    """
     clause_type: str  # Payment, Liability, IP, Confidentiality, Termination
     content: str
-    risk_level: str  # LOW, MEDIUM, HIGH
+    risk_level: str  # LOW, MEDIUM, HIGH, CRITICAL
     confidence_score: float
     location: str = ""
+    evidence_span: str = ""          # verbatim quote from the contract
+    violated_policy: Optional[str] = None    # playbook rule id (Increment 2)
+    suggested_redline: Optional[str] = None  # proposed language (Increment 3)
+    human_review_required: bool = False
 
 @dataclass
 class PolicyViolation:

@@ -3,10 +3,14 @@ import os
 from unittest.mock import MagicMock, patch
 
 # Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from backend.infrastructure.audit_logger import AuditLogger, AuditEventType
 from backend.infrastructure.agent_audit_service import AgentAuditService
+
+import pytest
+
+# AuditLogger writes straight to Neo4j; the mocks here don't intercept that.
+pytestmark = pytest.mark.integration
 
 def test_agent_audit_service_lifecycle():
     """Test the specialized agent audit service directly with mocks"""

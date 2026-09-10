@@ -28,20 +28,40 @@ from typing import Any
 class ModelOption:
     id: str            # stable public id: API param value + frontend option value
     label: str         # human label for the dropdown
-    provider: str      # "google" | "openai" | "anthropic" | "mistral"
-    tier: str          # "lite" | "standard" | "premium" (cost/quality band)
+    provider: str      # "google" | "openai" | "anthropic" | "mistral" | "openrouter"
+    tier: str          # "free" | "lite" | "standard" | "premium" (cost/quality band)
     backend_model: str  # actual model string passed to the provider SDK
     description: str = ""
     recommended: bool = False
 
 
+def _env(name: str, default: str) -> str:
+    """Read an env var, treating an empty value as unset.
+
+    docker-compose renders an unset passthrough (``${FOO-}``) as an empty
+    string, which `os.getenv(name, default)` would happily return — silently
+    replacing the model id with "". Blank means "not configured".
+    """
+    return os.getenv(name) or default
+
+
 # Actual provider model strings — override per-deployment via env.
-_GEMINI_FLASH_LITE = os.getenv("GEMINI_FLASH_LITE_MODEL", "gemini-flash-lite-latest")
-_GEMINI_FLASH = os.getenv("GEMINI_FLASH_MODEL", "gemini-flash-latest")
-_GEMINI_PRO = os.getenv("GEMINI_PRO_MODEL", "gemini-pro-latest")
-_OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-_ANTHROPIC_MODEL = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
-_MISTRAL_MODEL = os.getenv("MISTRAL_MODEL", "mistral-large-latest")
+_GEMINI_FLASH_LITE = _env("GEMINI_FLASH_LITE_MODEL", "gemini-flash-lite-latest")
+_GEMINI_FLASH = _env("GEMINI_FLASH_MODEL", "gemini-flash-latest")
+_GEMINI_PRO = _env("GEMINI_PRO_MODEL", "gemini-pro-latest")
+_OPENAI_MODEL = _env("OPENAI_MODEL", "gpt-4o")
+_ANTHROPIC_MODEL = _env("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+_MISTRAL_MODEL = _env("MISTRAL_MODEL", "mistral-large-latest")
+
+# OpenRouter ":free" tiers, for development without burning a paid quota. The
+# free line-up changes over time, so these are env-overridable; check
+# https://openrouter.ai/api/v1/models for what is currently free.
+# Verified callable over the plain API on 2026-09-10. Not every ":free" model
+# is: thinkingmachines/inkling returns 403 "only available on agentic
+# harnesses", and dots-3-note-preview returns null content.
+_OR_SMALL = _env("OPENROUTER_SMALL_MODEL", "google/gemma-4-26b-a4b-it:free")
+_OR_LARGE = _env("OPENROUTER_LARGE_MODEL", "nvidia/nemotron-3-super-120b-a12b:free")
+_OR_LONG = _env("OPENROUTER_LONG_MODEL", "nvidia/nemotron-3.5-lightning:free")
 
 
 # The curated list. Order = display order. Keep it small and cheap-by-default:
@@ -89,10 +109,38 @@ MODEL_OPTIONS: list[ModelOption] = [
         backend_model=_ANTHROPIC_MODEL,
         description="Requires ANTHROPIC_API_KEY.",
     ),
+    # Free-tier options for development. Gemini's free tier is 20 requests/day
+    # per model, which a few analysis runs exhaust; these cost nothing and keep
+    # iteration unblocked. Quality is lower than the paid tiers — do not judge
+    # extraction accuracy from them.
+    ModelOption(
+        id="free-large",
+        label="Free · Nemotron 3 Super 120B (OpenRouter)",
+        provider="openrouter",
+        tier="free",
+        backend_model=_OR_LARGE,
+        description="The free option to use. Reliable for extraction; ~50s per analysis.",
+    ),
+    ModelOption(
+        id="free-small",
+        label="Free · Gemma 4 26B (OpenRouter)",
+        provider="openrouter",
+        tier="free",
+        backend_model=_OR_SMALL,
+        description="Faster and cleaner JSON, but its free endpoint is often rate-limited upstream.",
+    ),
+    ModelOption(
+        id="free-long",
+        label="Free · Nemotron 3.5 Lightning, 1M context (OpenRouter)",
+        provider="openrouter",
+        tier="free",
+        backend_model=_OR_LONG,
+        description="1M-token context for very long contracts. Slow — can exceed 200s.",
+    ),
 ]
 
 # Fallback chain / app default. Overridable so ops can pin a cheaper default.
-DEFAULT_MODEL_ID = os.getenv("DEFAULT_MODEL_ID", "gemini-flash")
+DEFAULT_MODEL_ID = _env("DEFAULT_MODEL_ID", "gemini-flash")
 
 # Old ids that may still arrive from persisted data, cached clients, or bookmarks.
 LEGACY_ALIASES: dict[str, str] = {
@@ -109,6 +157,7 @@ _PROVIDER_KEY_ENV: dict[str, tuple[str, ...]] = {
     "openai": ("OPENAI_API_KEY",),
     "anthropic": ("ANTHROPIC_API_KEY",),
     "mistral": ("MISTRAL_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
 }
 
 _BY_ID: dict[str, ModelOption] = {m.id: m for m in MODEL_OPTIONS}
@@ -199,5 +248,26 @@ def build_llm(model_id: str | None, *, temperature: float = 0):
         from langchain_mistralai import ChatMistralAI
 
         return ChatMistralAI(model=name)
+    if option.provider == "openrouter":
+        # OpenRouter speaks the OpenAI wire protocol, so the OpenAI client works
+        # against it with a different base URL and key.
+        from langchain_openai import ChatOpenAI
+
+        api_key = os.getenv("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ValueError(
+                f"Model {option.id!r} needs OPENROUTER_API_KEY. "
+                "Get a key at https://openrouter.ai/keys and set it in .env"
+            )
+        return ChatOpenAI(
+            model=name,
+            temperature=temperature,
+            base_url=_env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+            api_key=api_key,
+            # Shared free tiers return transient upstream 429s far more often
+            # than paid endpoints. Raise the client's own retry budget (default
+            # 2) rather than wrapping a second retry layer around it.
+            max_retries=5,
+        )
 
     raise ValueError(f"Unsupported provider {option.provider!r} for model {option.id!r}")

@@ -70,7 +70,13 @@ class QualityValidator:
                 'chunk_id': chunk_id,
                 'scores': quality_scores
             })
-        
+
+        # Aggregate score for callers that report or gate on overall quality.
+        # Without this key, consumers raised KeyError on the *success* path and
+        # fell into their own failure handler, re-chunking the whole document.
+        scores = [c['scores']['overall'] for c in validation_results['chunk_scores']]
+        validation_results['overall_quality'] = sum(scores) / len(scores) if scores else 0.0
+
         return validation_results
     
     def _identify_issues(self, quality_scores: Dict[str, float]) -> List[str]:
