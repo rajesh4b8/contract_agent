@@ -67,8 +67,14 @@ The whole app, including `backend.main`, now imports with no database and no API
 1. **RBAC defaulted to ADMIN.** `get_current_user_role` returned `UserRole.ADMIN` when the
    `X-User-Role` header was missing — the comment directly above it said it defaulted to VIEWER
    for safety. The frontend never sends that header, so every endpoint was effectively unguarded.
-   Now fails closed to `VIEWER`. **The repo's own test already asserted this** — it had simply
-   never been run.
+   **The repo's own test already asserted the correct behaviour** — it had simply never been run.
+
+   Failing closed then broke the UI upload with a 403, because the frontend sends no header. The
+   resolution keeps the security property and unbreaks local dev: **production fails closed to
+   `VIEWER`; development falls back to `DEV_DEFAULT_ROLE`** (default `LEGAL_REVIEWER`, which can
+   upload and analyse but not read the audit trail or manage policies). An unrecognised value
+   falls back to `VIEWER`. All three paths are covered by tests. Replace this branch with real
+   token validation when auth lands.
 2. **Every upload chunked the document twice.** `document_upload.py` logs
    `quality_assessment['overall_quality']` on the chunking *success* path, but
    `QualityValidator.validate_chunks` never returned that key. The `KeyError` was swallowed by the
@@ -94,6 +100,37 @@ Worth trying, to confirm the unlock is real:
 docker compose down                 # make sure nothing is running
 make test                           # still green
 ```
+
+### Running it locally
+
+```bash
+make run     # docker compose up --build; first run pulls neo4j + phoenix
+```
+
+| URL | What |
+|---|---|
+| http://localhost:3000 | The app. Opens on the Intelligence page |
+| http://localhost:8000/docs | FastAPI Swagger |
+| http://localhost:7474 | Neo4j browser — `neo4j` / `contractdev` |
+| http://localhost:6006 | Phoenix — LLM traces |
+
+`.env` sets `LOG_LEVEL=ERROR`, so the pipeline runs silently. Use `LOG_LEVEL=INFO make run` or
+`make logs` to watch it.
+
+**Verified working on 2026-09-09:** all four containers healthy, upload with no role header
+returns 200, and the contract lands in Neo4j with its full text.
+
+**What you will see, and it is the point of Increment 1:** analysing two very different
+contracts — a 5,756-character MSA and a 32,885-character services agreement — returns *byte-identical*
+clauses, violations and a risk score of 45.0 for both, in ~0.1s with no LLM call:
+
+```
+clauses identical    : True
+violations identical : True
+risk score           : 45.0 vs 45.0
+```
+
+That is `ClauseDetectorTool` returning its two hardcoded clauses. Increment 1 replaces it.
 
 ### Files touched
 
