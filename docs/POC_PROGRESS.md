@@ -239,6 +239,31 @@ clauses identical: False        (it was True before this increment)
 
 All 9 evidence spans were checked back against the contract text stored in Neo4j: **9/9 verbatim.**
 
+### Model options, and the quota trap
+
+`gemini-flash` is capped at **20 requests/day** on the free tier. A handful of analysis runs
+exhausts it, and it then presents as a failed upload — the upload path calls the model too, to
+extract parties and dates.
+
+Free **OpenRouter** models are wired in for development so this does not block iteration. Set
+`OPENROUTER_API_KEY` in `.env` (https://openrouter.ai/keys) and pick one in the UI, or pass
+`?model=free-large`. Setting `DEFAULT_MODEL_ID=free-large` makes everything use it by default.
+
+| id | model | notes |
+|---|---|---|
+| `free-large` | Nemotron 3 Super 120B | **use this one.** Reliable; 50–130s per analysis |
+| `free-small` | Gemma 4 26B | faster and cleaner JSON, but its free endpoint is often rate-limited |
+| `free-long` | Nemotron 3.5 Lightning | 1M context; too slow to be practical (>200s) |
+
+Not every OpenRouter `:free` model is callable from a plain API — `thinkingmachines/inkling`
+returns 403 "only available on agentic harnesses" and `dots-3-note-preview` returns null content.
+The three above were each verified end to end on 2026-09-10. The free line-up changes, so all three
+are env-overridable (`OPENROUTER_SMALL_MODEL` etc.).
+
+**Free models are flaky and weaker.** Expect intermittent upstream 429/502s — a retry usually
+succeeds — and lower extraction quality: the Shuttle contract yields 3 clauses on Gemini and 2 on
+`free-large`. Use them to exercise the pipeline, not to judge accuracy.
+
 ### Watch out for the Gemini free-tier quota
 
 `gemini-flash` is capped at **20 requests/day** on the free tier and was exhausted during this

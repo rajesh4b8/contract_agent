@@ -135,11 +135,18 @@ class DocumentProcessingService:
             
             workflow_tracker.complete_workflow()
             
-            # Convert structured result to response format
+            # Convert structured result to response format. On failure the
+            # reason goes into final_result too: that is the only field the UI
+            # shows, so dropping it left the user staring at "Processing error"
+            # with no way to tell a quota exhaustion from a corrupt PDF.
+            summary = processing_result.message or f"Processing {processing_result.status.value}"
+            if processing_result.error:
+                summary = f"{summary}: {processing_result.error}"
+
             return {
                 "status": processing_result.status.value,
                 "filename": request.filename,
-                "final_result": processing_result.message or f"Processing {processing_result.status.value}",
+                "final_result": summary,
                 "contract_id": processing_result.contract_id,
                 "error": processing_result.error
             }

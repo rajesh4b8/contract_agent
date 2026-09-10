@@ -4,7 +4,7 @@ export interface ModelOption {
   id: string;
   label: string;
   provider: string;
-  tier: 'lite' | 'standard' | 'premium' | string;
+  tier: 'free' | 'lite' | 'standard' | 'premium' | string;
   description: string;
   recommended: boolean;
   available: boolean;
