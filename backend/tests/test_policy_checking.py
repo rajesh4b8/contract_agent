@@ -150,7 +150,7 @@ def test_no_clauses_short_circuits_without_calling_the_model():
 
 class TestAttachViolatedPolicy:
     def test_clause_records_the_rule_it_breaches(self):
-        violations = [{"rule_id": "PAY-001", "clause_content": CLAUSES[0]["evidence_span"]}]
+        violations = [{"rule_id": "PAY-001", "clause_index": 0}]
 
         stamped = _attach_violated_policy(CLAUSES, violations)
 
@@ -159,19 +159,57 @@ class TestAttachViolatedPolicy:
 
     def test_multiple_breaches_are_listed(self):
         violations = [
-            {"rule_id": "LIA-001", "clause_content": CLAUSES[1]["evidence_span"]},
-            {"rule_id": "LIA-002", "clause_content": CLAUSES[1]["evidence_span"]},
+            {"rule_id": "LIA-001", "clause_index": 1},
+            {"rule_id": "LIA-002", "clause_index": 1},
         ]
 
         stamped = _attach_violated_policy(CLAUSES, violations)
 
         assert stamped[1]["violated_policy"] == "LIA-001, LIA-002"
 
+    def test_identical_clause_text_does_not_spread_a_citation(self):
+        """Attachment is by index, not by text.
+
+        Two clauses can carry the same evidence span — a repeated boilerplate
+        paragraph, or the same span extracted under two clause types. Joining on
+        the text would cite a breach found in one against both.
+        """
+        duplicated = [
+            {"clause_type": "Liability", "evidence_span": "Liability is capped at $50,000."},
+            {"clause_type": "Indemnification", "evidence_span": "Liability is capped at $50,000."},
+        ]
+
+        stamped = _attach_violated_policy(duplicated, [{"rule_id": "LIA-002", "clause_index": 0}])
+
+        assert stamped[0]["violated_policy"] == "LIA-002"
+        assert stamped[1]["violated_policy"] is None, "citation leaked to an identical clause"
+
+    def test_a_violation_without_an_index_is_ignored(self):
+        stamped = _attach_violated_policy(CLAUSES, [{"rule_id": "PAY-001"}])
+
+        assert all(c["violated_policy"] is None for c in stamped)
+
     def test_original_clause_fields_survive(self):
         stamped = _attach_violated_policy(CLAUSES, [])
 
         assert stamped[0]["clause_type"] == "Payment Terms"
         assert stamped[0]["evidence_span"] == CLAUSES[0]["evidence_span"]
+
+
+def test_violations_carry_the_clause_index_for_attachment():
+    tool = PolicyCheckerTool(llm=FakeLLM({"violations": [_breach("PAY-001", 0)]}), rules=RULES)
+
+    violations = json.loads(tool._run(json.dumps(CLAUSES)))
+
+    assert violations[0]["clause_index"] == 0
+
+
+def test_an_unseeded_tenant_fails_even_with_no_clauses():
+    """Config faults must not hide behind an empty contract."""
+    tool = PolicyCheckerTool(llm=FakeLLM({"violations": []}), rules=[])
+
+    with pytest.raises(ValueError, match="(?i)seed a playbook"):
+        tool._run(json.dumps([]))
 
 
 def test_every_violation_can_cite_a_rule():

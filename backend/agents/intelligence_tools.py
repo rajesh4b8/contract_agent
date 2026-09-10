@@ -158,8 +158,9 @@ class PolicyCheckerTool(BaseTool):
 
     def _run(self, clauses_json: str) -> str:
         clauses = json.loads(clauses_json)
-        if not clauses:
-            return json.dumps([])
+        # Config checks come first: an unseeded tenant must fail even when the
+        # contract yielded no clauses, or "nothing to check" is indistinguishable
+        # from "nothing configured to check against".
         if not self.rules:
             # No playbook seeded. Reporting zero violations would read as "this
             # contract is compliant", which is a different claim entirely.
@@ -169,6 +170,8 @@ class PolicyCheckerTool(BaseTool):
             )
         if self.llm is None:
             raise ValueError("PolicyCheckerTool requires an llm to evaluate clauses")
+        if not clauses:
+            return json.dumps([])
 
         by_id = {rule.id: rule for rule in self.rules}
         parser = PydanticOutputParser(pydantic_object=PolicyAssessment)
@@ -212,6 +215,10 @@ In `issue`, say specifically what the clause does that the rule forbids.
             clause = clauses[finding.clause_index]
             violations.append({
                 "rule_id": rule.id,
+                # Kept so clauses are stamped by index rather than by matching
+                # text: two clauses can share an evidence span, and a text join
+                # would cite a breach on both.
+                "clause_index": finding.clause_index,
                 "clause_type": clause.get("clause_type", "Unknown"),
                 "issue": finding.issue,
                 # Severity comes from the playbook, not the model: it drives the

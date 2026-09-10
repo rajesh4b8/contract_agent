@@ -46,6 +46,7 @@ def main():
             from migrations.audit_error_schema_migration import run_migration as audit_migration
             from migrations.phase2_phase3_schema import run_migration as phase_migration
 
+            failures = []
             for name, migrate in [
                 ("sections", section_migration),
                 ("clauses + clause types", clause_migration),
@@ -56,10 +57,16 @@ def main():
                 try:
                     migrate()
                 except Exception as e:
-                    # Keep going: a later migration may still be applicable, and
-                    # stopping here would leave the schema half-built with no
-                    # indication of which parts succeeded.
+                    # Keep going so a later migration still gets a chance, but
+                    # remember the failure: exiting 0 after a partial upgrade
+                    # would let CI and callers proceed as if the schema were
+                    # fully installed.
                     logger.error(f"Migration {name!r} failed: {e}")
+                    failures.append(name)
+
+            if failures:
+                logger.error(f"Schema upgrade incomplete; failed: {', '.join(failures)}")
+                sys.exit(1)
 
             logger.info("Schema upgrade completed successfully!")
             

@@ -8,33 +8,15 @@ from backend.agents.intelligence_tools import (
 from backend.agents.agent_workflow_tracker import workflow_tracker
 from backend.agents.planning.planning_agent import PlanningAgentFactory
 from backend.agents.planning.execution_engine import PlanExecutionEngine
-from backend.infrastructure.playbook_loader import load_rules_for_tenant
+from backend.infrastructure.playbook_loader import (
+    attach_violated_policy as _attach_violated_policy,
+    load_rules_for_tenant,
+)
 import json
 import logging
 
 from backend.shared.utils.logger import get_logger
 logger = get_logger(__name__)
-
-def _attach_violated_policy(clauses: list, violations: list) -> list:
-    """Record on each clause which playbook rule(s) it breaches.
-
-    A clause breaching several rules lists them comma-separated; the field is a
-    human- and machine-readable citation, not a foreign key.
-    """
-    by_clause: dict[str, list[str]] = {}
-    for violation in violations:
-        rule_id = violation.get("rule_id")
-        content = violation.get("clause_content", "")
-        if rule_id and content:
-            by_clause.setdefault(content, []).append(rule_id)
-
-    stamped = []
-    for clause in clauses:
-        text = clause.get("evidence_span") or clause.get("content", "")
-        rule_ids = by_clause.get(text)
-        stamped.append({**clause, "violated_policy": ", ".join(rule_ids) if rule_ids else None})
-    return stamped
-
 
 def run_coroutine(coro):
     """Run a coroutine from sync code, whether or not a loop is already running.
@@ -203,9 +185,18 @@ class IntelligenceOrchestrator:
                 "policy_violations": violations_list,
                 "current_step": "policy_checking"
             }
+        except ValueError as e:
+            # A missing playbook or missing model is a configuration fault, not a
+            # compliant contract. Swallowing it here would present an unseeded
+            # tenant as clean, which is the exact failure this increment removes.
+            workflow_tracker.error_agent(execution, f"Policy checking misconfigured: {e}")
+            raise
         except Exception as e:
             workflow_tracker.error_agent(execution, f"Policy checking failed: {e}")
-            return {**state, "policy_violations": []}
+            return {**state,
+                "policy_violations": [],
+                "policy_check_failed": str(e),
+            }
     
     def _calculate_risks(self, state: IntelligenceState) -> IntelligenceState:
         """Calculate risks - Single Responsibility"""
@@ -371,7 +362,9 @@ class IntelligenceOrchestrator:
             precedent_tool = EnhancedPrecedentMatcherTool()
             precedent_matches = json.loads(precedent_tool._run(clauses_json))
             
-            enhanced_violations = state["policy_violations"] + deviations
+            # Deviations stay out of policy_violations on every path — see the primary
+            # branch above. Everything in that list cites a playbook rule id.
+            enhanced_violations = state["policy_violations"]
             enhanced_risk_data = dict(state["risk_data"])
             
             workflow_tracker.complete_agent(execution, f"Phase 2 fallback completed: {len(deviations)} deviations")
@@ -407,7 +400,9 @@ class IntelligenceOrchestrator:
             precedent_tool = PrecedentMatcherTool()
             precedent_matches = json.loads(precedent_tool._run(clauses_json))
             
-            enhanced_violations = state["policy_violations"] + deviations
+            # Deviations stay out of policy_violations on every path — see the primary
+            # branch above. Everything in that list cites a playbook rule id.
+            enhanced_violations = state["policy_violations"]
             enhanced_risk_data = dict(state["risk_data"])
             
             workflow_tracker.complete_agent(execution, f"Fallback completed: {len(deviations)} deviations")
@@ -444,11 +439,16 @@ class IntelligenceOrchestrator:
                         # If we're in an event loop, create a task
                         import concurrent.futures
                         with concurrent.futures.ThreadPoolExecutor() as executor:
-                            future = executor.submit(asyncio.run, self._analyze_with_planning(contract_text))
+                            future = executor.submit(
+                                asyncio.run,
+                                self._analyze_with_planning(contract_text, tenant_id, contract_type),
+                            )
                             return future.result()
                     except RuntimeError:
                         # No event loop running, safe to use asyncio.run
-                        return asyncio.run(self._analyze_with_planning(contract_text))
+                        return asyncio.run(
+                            self._analyze_with_planning(contract_text, tenant_id, contract_type)
+                        )
                 except Exception as planning_error:
                     logger.error(f"Planning agent failed: {planning_error}, falling back to traditional workflow")
                     return self._analyze_traditional(contract_text, tenant_id, contract_type)
@@ -465,7 +465,9 @@ class IntelligenceOrchestrator:
                 "processing_complete": False
             }
     
-    async def _analyze_with_planning(self, contract_text: str) -> dict:
+    async def _analyze_with_planning(self, contract_text: str,
+                                     tenant_id: str = "default-tenant",
+                                     contract_type: str = "general") -> dict:
         """Analyze contract using autonomous planning agent"""
         logger.info("🧠 STEP 1: Starting Planning Agent Analysis")
         
@@ -492,7 +494,9 @@ class IntelligenceOrchestrator:
             
             # Step 2: Execute the planned workflow
             logger.info("🧠 STEP 4: Starting plan execution")
-            results = await self.execution_engine.execute_plan(execution_plan, contract_text)
+            results = await self.execution_engine.execute_plan(
+                execution_plan, contract_text, tenant_id, contract_type
+            )
             logger.info(f"🧠 STEP 5: Plan execution completed: {results.get('processing_complete')}")
             
             # Step 3: Provide feedback

@@ -11,6 +11,10 @@ from backend.agents.intelligence_tools import (
     RiskCalculatorTool, RedlineGeneratorTool
 )
 from backend.agents.agent_workflow_tracker import workflow_tracker
+from backend.infrastructure.playbook_loader import (
+    attach_violated_policy as _attach_violated_policy,
+    load_rules_for_tenant,
+)
 import json
 
 from backend.shared.utils.logger import get_logger
@@ -29,9 +33,12 @@ class StepExecutor:
     """Execute individual analysis steps"""
     
     def __init__(self, llm=None):
+        self.llm = llm
         self.tools = {
             StepType.EXTRACT_CLAUSES: ClauseDetectorTool(llm=llm),
-            StepType.CHECK_POLICIES: PolicyCheckerTool(),
+            # Rules are per-tenant, so this tool is rebuilt per run in
+            # _execute_policy_check rather than held here.
+            StepType.CHECK_POLICIES: PolicyCheckerTool(llm=llm),
             StepType.ASSESS_RISK: RiskCalculatorTool(),
             StepType.GENERATE_REDLINES: RedlineGeneratorTool()
         }
@@ -130,11 +137,26 @@ class StepExecutor:
         return json.loads(result_json)
     
     async def _execute_policy_check(self, step: ExecutionStep, context: Dict[str, Any]) -> List[Dict]:
-        """Execute policy checking with dependency results"""
+        """Check clauses against the tenant's playbook.
+
+        Rules are loaded per run: they are tenant- and contract-type-specific, so
+        a tool built once at construction would check every tenant against
+        whichever playbook happened to be loaded first — or, as before, against
+        none at all.
+        """
         clauses = context.get("extracted_clauses", [])
-        tool = self.tools[StepType.CHECK_POLICIES]
+        rules = load_rules_for_tenant(
+            context.get("tenant_id") or "default-tenant",
+            context.get("contract_type") or "general",
+        )
+        tool = PolicyCheckerTool(llm=self.llm, rules=rules)
         result_json = tool._run(json.dumps(clauses))
-        return json.loads(result_json)
+        violations = json.loads(result_json)
+
+        # Same provenance stamping the graph path does, so both routes produce
+        # clauses that cite the rules they breach.
+        context["extracted_clauses"] = _attach_violated_policy(clauses, violations)
+        return violations
     
     async def _execute_risk_assessment(self, step: ExecutionStep, context: Dict[str, Any]) -> Dict:
         """Execute risk assessment with enhanced analysis"""
@@ -309,7 +331,9 @@ class PlanExecutionEngine:
         self.step_executor = StepExecutor(llm)
         self.execution_context: Dict[str, Any] = {}
     
-    async def execute_plan(self, plan: ExecutionPlan, contract_text: str) -> Dict[str, Any]:
+    async def execute_plan(self, plan: ExecutionPlan, contract_text: str,
+                           tenant_id: str = "default-tenant",
+                           contract_type: str = "general") -> Dict[str, Any]:
         """Execute the complete analysis plan"""
         logger.info(f"🚀 EXEC STEP 1: Starting plan execution {plan.plan_id} with {len(plan.steps)} steps")
         logger.info(f"🚀 EXEC STEP 2: Contract text length: {len(contract_text)} characters")
@@ -317,6 +341,9 @@ class PlanExecutionEngine:
         # Initialize execution context
         self.execution_context = {
             "contract_text": contract_text,
+            # Which playbook the policy step checks against.
+            "tenant_id": tenant_id,
+            "contract_type": contract_type,
             "plan_id": plan.plan_id,
             "execution_start": datetime.now()
         }

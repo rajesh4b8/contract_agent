@@ -391,6 +391,29 @@ Note `make seed-playbook` runs on the host, where `.env`'s `NEO4J_URI` points at
 hostname. The target overrides it to `bolt://localhost:7687`; use
 `make seed-playbook HOST_NEO4J_URI=...` for a remote instance.
 
+### Addressed in review (Copilot, PR #2)
+
+Ten findings, all valid. The consequential ones:
+
+- **The default API path was ungrounded.** `use_planning` defaults to `true`, and that route built
+  `PolicyCheckerTool()` with no model and no rules. Every live check I ran used
+  `use_planning=false`, so I had tested the path I built rather than the one the product uses.
+  Rules are now loaded per run in the planning engine, which also stamps clauses.
+- **The fail-closed guard was being swallowed.** `_check_policies` caught every exception and
+  returned `policy_violations: []`, so an unseeded tenant still read as compliant. Configuration
+  faults now propagate.
+- **Citations could leak between clauses.** Attachment matched on clause text, so two clauses
+  sharing an evidence span both got cited. It attaches by index now.
+- **Deleted rules kept firing.** Seeding only MERGEd, so removing a rule from the YAML left it
+  active. Seeding now retires rules absent from the file.
+- **The clause migration injected sample data.** `run_migration()` called `_create_sample_clauses`,
+  which uses `CREATE` — every `upgrade` would have added fabricated clauses to real contracts.
+  Sample data is opt-in; `migrate_schema_only()` is what the runner calls.
+- **Partial migration failure exited 0.** It now exits non-zero and names what failed.
+- Also: deviations were still merged into violations on two fallback paths; the empty-clause short
+  circuit ran before the no-playbook check; rules were selected by a copied `tenant_id` rather than
+  the `HAS_RULE` relationship; and one test's name claimed to check a default its fixture overrode.
+
 ### Your feedback
 
 _(write here — anything that should change before Increment 3)_

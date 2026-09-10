@@ -100,8 +100,22 @@ class TestParsing:
 
         assert parse_playbook(path).rules[0].applies_to == ["general"]
 
-    def test_tenant_defaults_when_absent(self, tmp_path):
+    def test_tenant_is_read_from_the_file(self, tmp_path):
         assert parse_playbook(_write(tmp_path, MINIMAL)).tenant_id == "test-tenant"
+
+    def test_tenant_defaults_when_absent(self, tmp_path):
+        """MINIMAL declares a tenant, so it cannot exercise the fallback."""
+        path = _write(tmp_path, """
+            name: No Tenant
+            rules:
+              - id: R-1
+                rule_text: A rule.
+                rule_type: mandatory
+                severity: LOW
+                section_reference: S
+        """)
+
+        assert parse_playbook(path).tenant_id == "default-tenant"
 
 
 class TestValidation:

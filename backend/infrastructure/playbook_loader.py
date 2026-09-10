@@ -142,20 +142,46 @@ def seed_playbook(path: pathlib.Path = DEFAULT_PLAYBOOK, tenant_id: str | None =
             },
         )
 
+    # Rules deleted from the file must stop being enforced. Without this a
+    # lawyer could remove a rule from the playbook and it would keep firing,
+    # because MERGE only ever adds.
+    removed = graph.query(
+        """
+        MATCH (p:PolicyDocument {id: $policy_id, tenant_id: $tenant_id})-[:HAS_RULE]->(r:PolicyRule)
+        WHERE NOT r.id IN $current_ids
+        WITH collect(r) AS stale
+        FOREACH (rule IN stale | DETACH DELETE rule)
+        RETURN size(stale) AS removed
+        """,
+        {
+            "policy_id": f"playbook_{tenant}",
+            "tenant_id": tenant,
+            "current_ids": [rule.id for rule in playbook.rules],
+        },
+    )
+    retired = removed[0]["removed"] if removed else 0
+
     logger.info(
         f"Seeded playbook {playbook.name!r} v{playbook.version} "
         f"({len(playbook.rules)} rules) for tenant {tenant!r}"
+        + (f"; retired {retired} rule(s) no longer in the file" if retired else "")
     )
     return playbook
 
 
 def load_rules_for_tenant(tenant_id: str, contract_type: str = "general") -> List[LoadedRule]:
-    """Fetch the rules a contract of this type should be checked against."""
+    """Fetch the rules a contract of this type should be checked against.
+
+    Reached through (:PolicyDocument)-[:HAS_RULE]->(:PolicyRule) rather than by a
+    tenant_id copied onto the rule: the relationship is the source of truth, it
+    excludes orphaned rules, and it also picks up rules written by the policy
+    upload path, which sets tenant_id on the document but not on each rule.
+    """
     records = graph.query(
         """
-        MATCH (r:PolicyRule {tenant_id: $tenant_id})
+        MATCH (p:PolicyDocument {tenant_id: $tenant_id})-[:HAS_RULE]->(r:PolicyRule)
         WHERE $contract_type IN r.applies_to OR 'general' IN r.applies_to
-        RETURN r.id AS id, r.rule_text AS rule_text, r.rule_type AS rule_type,
+        RETURN DISTINCT r.id AS id, r.rule_text AS rule_text, r.rule_type AS rule_type,
                r.applies_to AS applies_to, r.severity AS severity,
                r.section_reference AS section_reference,
                coalesce(r.redline_text, '') AS redline_text
@@ -166,3 +192,25 @@ def load_rules_for_tenant(tenant_id: str, contract_type: str = "general") -> Lis
         {"tenant_id": tenant_id, "contract_type": contract_type},
     )
     return [LoadedRule(**record) for record in records]
+
+
+def attach_violated_policy(clauses: List[Dict[str, Any]],
+                           violations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Record on each clause which playbook rule(s) it breaches.
+
+    Attachment is by clause index, not by matching text: two clauses can carry
+    the same evidence span, and joining on the text would cite a breach found in
+    one of them against all of them.
+    """
+    by_index: Dict[int, List[str]] = {}
+    for violation in violations:
+        rule_id = violation.get("rule_id")
+        index = violation.get("clause_index")
+        if rule_id is not None and isinstance(index, int):
+            by_index.setdefault(index, []).append(rule_id)
+
+    stamped = []
+    for i, clause in enumerate(clauses):
+        rule_ids = by_index.get(i)
+        stamped.append({**clause, "violated_policy": ", ".join(rule_ids) if rule_ids else None})
+    return stamped
