@@ -565,6 +565,37 @@ re-analyse and confirm your decision is still there.
 - a `MODIFIED` redline survived **two** re-analyses with its text and note intact, while a newly
   found breach was added alongside it as `PENDING`
 
+### Addressed in review (Copilot, PR #4)
+
+Nine findings. Eight fixed, one honestly downgraded:
+
+- **Redline identity was positional.** `clause_index` is an offset into whichever list the last
+  extraction produced, so a reordering would orphan a reviewer's decision — breaking the guarantee
+  this increment exists to give. Ids are now keyed on a hash of the normalised clause text.
+- **The decision was a read-then-write race**, and an empty result crashed with `IndexError` → 500.
+  It is now one statement that reports the status it replaced, and a vanished row raises a 404.
+- **No uniqueness constraint** backed the MERGE. Added `redline_schema_migration` with a
+  `redline_id` uniqueness constraint and a de-duplication pass, wired into `run_migration upgrade`.
+- **Decisions are now audited.** The field description promised an audit trail that did not exist.
+- **The note box was shared across every row** — typing a reason for one populated all of them, and
+  deciding on another row submitted the wrong reason. Keyed per redline.
+- **A failed load rendered as "No redlines"**, telling the reviewer to re-run analysis when the real
+  answer was a 401 or a 500. The error is shown first, with a retry.
+- **The panel sent no identity headers**, so it could not work in production at all. Added
+  `frontend/src/lib/apiClient.ts` as the single place the frontend states who it is.
+- **The new card was not keyboard-operable.** `role`, `tabIndex`, Enter/Space and a focus ring.
+
+**Not fixed — the tenant header is not trusted.** `get_current_tenant` reads `X-Tenant-ID` and
+nothing validates it, so any caller can name any tenant. Moving it off the query string removed the
+casual form of the problem but not the problem. There is no honest fix without authentication, so
+the claim has been downgraded everywhere rather than dressed up: this is **not** tenant isolation
+and the system should not see real client data until auth exists.
+
+**A residual limitation worth knowing.** Content-hashed ids are stable under reordering, but the
+extractor is non-deterministic — a re-run can produce a slightly different span for the same clause
+and therefore a new redline alongside the decided one. Stale *pending* drafts are cleaned up on the
+next run; decided ones are kept deliberately. Quantifying that variance is Increment 5's job.
+
 ### Your feedback
 
 _(write here — anything that should change before Increment 5)_

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { Button } from '../../shared/ui/button';
 import { Badge } from '../../shared/ui/badge';
 import { Loader } from '../../shared/ui/loader';
+import { apiFetch, errorMessage } from '../../../lib/apiClient';
 
 type Status = 'PENDING' | 'APPROVED' | 'MODIFIED' | 'REJECTED';
 
@@ -43,15 +44,17 @@ export const RedlineReview: React.FC<Props> = ({ contractId }) => {
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
-  const [note, setNote] = useState('');
+  // Keyed by redline: a single shared string put one row's reason into every
+  // input, and submitting on a different row sent the wrong reason with it.
+  const [notes, setNotes] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const response = await fetch(`/api/intelligence/contracts/${contractId}/redlines`);
-      if (!response.ok) throw new Error(`Could not load redlines (${response.status})`);
+      const response = await apiFetch(`/api/intelligence/contracts/${contractId}/redlines`);
+      if (!response.ok) throw new Error(await errorMessage(response, 'Could not load redlines'));
       const data = await response.json();
       setRedlines(data.redlines ?? []);
     } catch (e) {
@@ -67,7 +70,7 @@ export const RedlineReview: React.FC<Props> = ({ contractId }) => {
     setSaving(redline.redline_id);
     setError(null);
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `/api/intelligence/redlines/${redline.redline_id}/decision`,
         {
           method: 'POST',
@@ -75,18 +78,17 @@ export const RedlineReview: React.FC<Props> = ({ contractId }) => {
           body: JSON.stringify({
             decision,
             edited_text: decision === 'MODIFIED' ? editedText : undefined,
-            note,
+            note: notes[redline.redline_id] ?? '',
           }),
         },
       );
       if (!response.ok) {
         // The API explains why a decision cannot be applied; show that rather
         // than a generic failure, since the reviewer can usually act on it.
-        const body = await response.json().catch(() => ({}));
-        throw new Error(body.detail || `Could not save decision (${response.status})`);
+        throw new Error(await errorMessage(response, 'Could not save decision'));
       }
       setEditing(null);
-      setNote('');
+      setNotes((current) => ({ ...current, [redline.redline_id]: '' }));
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not save decision');
@@ -96,6 +98,20 @@ export const RedlineReview: React.FC<Props> = ({ contractId }) => {
   };
 
   if (loading) return <div className="py-8 flex justify-center"><Loader /></div>;
+
+  // Before the empty state: a failed request leaves the list empty too, and
+  // telling the reviewer to "run an analysis" hides a 401 or a 500 they could
+  // actually act on.
+  if (error && redlines.length === 0) {
+    return (
+      <div className="space-y-3 py-6">
+        <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+          {error}
+        </div>
+        <Button size="sm" variant="outline" onClick={load}>Try again</Button>
+      </div>
+    );
+  }
 
   if (redlines.length === 0) {
     return (
@@ -177,8 +193,11 @@ export const RedlineReview: React.FC<Props> = ({ contractId }) => {
               <input
                 className="flex-1 min-w-[200px] rounded border border-slate-300 px-2 py-1 text-sm"
                 placeholder="Reason (optional)"
-                value={isEditing || busy ? note : note}
-                onChange={(e) => setNote(e.target.value)}
+                aria-label={`Reason for ${redline.clause_type} decision`}
+                value={notes[redline.redline_id] ?? ''}
+                onChange={(e) =>
+                  setNotes((current) => ({ ...current, [redline.redline_id]: e.target.value }))
+                }
               />
               {isEditing ? (
                 <>

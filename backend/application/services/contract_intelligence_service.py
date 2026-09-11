@@ -224,8 +224,24 @@ class ContractIntelligenceService:
 
     @staticmethod
     def _redline_id(contract_id: str, redline) -> str:
-        """Stable id: one breach of one rule on one clause has one redline."""
-        return f"{contract_id}_{redline.rule_id}_c{redline.clause_index}"
+        """Stable id: one breach of one rule on one clause has one redline.
+
+        Keyed on the clause *text*, not its position. `clause_index` is an offset
+        into whatever list the last extraction produced — re-extraction can
+        return the same clauses in a different order, or find one more, and every
+        index after that point shifts. The redline would then get a new id, be
+        recreated as PENDING, and the reviewer's decision would be orphaned on a
+        row nothing reads: exactly the guarantee this increment exists to provide,
+        broken by a reordering.
+
+        Hashing the normalised clause text keeps the id stable across reordering
+        and across whitespace differences from re-extraction.
+        """
+        import hashlib
+
+        normalised = " ".join((redline.original_text or "").split()).casefold()
+        digest = hashlib.sha1(normalised.encode("utf-8")).hexdigest()[:10]
+        return f"{contract_id}_{redline.rule_id}_{digest}"
 
     def record_redline_decision(self, redline_id: str, tenant_id: str,
                                 status, edited_text=None, note: str = "",
@@ -252,6 +268,8 @@ class ContractIntelligenceService:
             raise LookupError(f"No redline {redline_id!r} for this tenant")
 
         current = found[0]
+        # Validate before writing: an unapplicable decision must never reach the
+        # database, and the reviewer gets a specific reason instead of a 500.
         decision = build_decision(
             status,
             original_text=current["original_text"] or "",
@@ -261,9 +279,15 @@ class ContractIntelligenceService:
             decided_by=decided_by,
         )
 
+        # Read the prior status and write the new one in a single statement. Two
+        # separate queries let concurrent reviewers both observe PENDING, so the
+        # second decision silently replaced the first while both responses
+        # claimed to be the first. It also left a window where re-analysis could
+        # delete the row between the read and the write.
         updated = self.repository.graph.query(
             """
             MATCH (r:Redline {redline_id: $redline_id, tenant_id: $tenant_id})
+            WITH r, coalesce(r.status, 'PENDING') AS previous_status
             SET r.status = $status,
                 r.final_text = $final_text,
                 r.decision_note = $note,
@@ -272,7 +296,8 @@ class ContractIntelligenceService:
             RETURN r.redline_id AS redline_id, r.rule_id AS rule_id,
                    r.clause_index AS clause_index, r.status AS status,
                    r.final_text AS final_text, r.decision_note AS decision_note,
-                   r.decided_by AS decided_by, toString(r.decided_at) AS decided_at
+                   r.decided_by AS decided_by, toString(r.decided_at) AS decided_at,
+                   previous_status
             """,
             {
                 "redline_id": redline_id,
@@ -283,14 +308,46 @@ class ContractIntelligenceService:
                 "decided_by": decision.decided_by,
             },
         )
+        if not updated:
+            # The row went away between the two statements — a concurrent
+            # re-analysis dropping a pending draft, most likely.
+            raise LookupError(f"Redline {redline_id!r} no longer exists")
 
         result = dict(updated[0])
-        result["previous_status"] = current["status"]
         logger.info(
-            f"Redline {redline_id}: {current['status']} -> {decision.status.value} "
+            f"Redline {redline_id}: {result['previous_status']} -> {decision.status.value} "
             f"by {decision.decided_by}"
         )
+        self._audit_decision(redline_id, tenant_id, result, decision)
         return result
+
+    def _audit_decision(self, redline_id: str, tenant_id: str, result: dict, decision) -> None:
+        """Record the decision in the audit trail.
+
+        A ruling on contract language is exactly what an audit log is for, and
+        the API advertises one. Deciding twice overwrites the redline's own
+        fields, so without this the earlier ruling would leave no trace.
+        """
+        try:
+            from backend.infrastructure.audit_logger import AuditLogger, AuditEventType
+
+            AuditLogger().log_event(
+                event_type=AuditEventType.USER_INTERACTION,
+                resource_id=redline_id,
+                action=f"redline_{decision.status.value.lower()}",
+                status="success",
+                user_id=decision.decided_by,
+                tenant_id=tenant_id,
+                metadata={
+                    "rule_id": result.get("rule_id"),
+                    "previous_status": result.get("previous_status"),
+                    "new_status": decision.status.value,
+                    "note": decision.note,
+                },
+            )
+        except Exception as e:
+            # Never fail a recorded decision because the audit write failed.
+            logger.error(f"Could not audit decision on {redline_id}: {e}")
 
     def redline_review_summary(self, contract_id: str, tenant_id: str) -> dict:
         """Counts by status, for showing review progress."""

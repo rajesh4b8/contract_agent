@@ -326,8 +326,19 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
             </Card>
 
             <Card
-              className="border-slate-200 cursor-pointer hover:shadow-md hover:border-purple-300 transition-all duration-200"
+              className="border-slate-200 cursor-pointer hover:shadow-md hover:border-purple-300 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-purple-400"
+              role="button"
+              tabIndex={0}
+              aria-label="Open redline review"
               onClick={() => openModal('redlines')}
+              onKeyDown={(e) => {
+                // A Card renders a div, so it has none of a button's keyboard
+                // behaviour until it is given some.
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  openModal('redlines');
+                }
+              }}
             >
               <CardHeader className="pb-2">
                 <CardTitle className="text-sm text-slate-600 flex items-center gap-2">

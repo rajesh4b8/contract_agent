@@ -314,7 +314,8 @@ class RedlineDecisionRequest(BaseModel):
         default=None,
         description="Required for MODIFIED, and rejected for the others",
     )
-    note: str = Field(default="", description="Optional reason, shown in the audit trail")
+    note: str = Field(default="", description="Optional reason, kept with the decision "
+                                            "and recorded in the audit trail")
 
 
 @router.post("/redlines/{redline_id}/decision",
@@ -333,6 +334,10 @@ async def decide_redline(
 
     A decision is durable. Re-analysing the contract replaces undecided drafts
     only — it will not discard a judgement already made here.
+
+    Decisions are written to the audit trail. Note that the tenant comes from an
+    unvalidated header: see `get_current_tenant`. That is a real limitation of
+    this endpoint, not a formality.
     """
     service = ContractIntelligenceServiceFactory.create_service(llm_mgr)
 

@@ -116,7 +116,7 @@ class TestWhoMayDecide:
 class TestTheServiceLayer:
     """Lookup, tenant scoping and the decision round-trip."""
 
-    def _service(self, found_rows=None):
+    def _service(self, found_rows=None, previous_status="PENDING", update_rows=None):
         from unittest.mock import MagicMock
         from backend.application.services.contract_intelligence_service import (
             ContractIntelligenceService,
@@ -124,12 +124,20 @@ class TestTheServiceLayer:
 
         service = ContractIntelligenceService.__new__(ContractIntelligenceService)
         service.repository = MagicMock()
+        if update_rows is None:
+            update_rows = [{
+                "redline_id": "R-1", "rule_id": "PAY-001", "clause_index": 0,
+                "status": "APPROVED", "final_text": SUGGESTED, "decision_note": "",
+                "decided_by": "LEGAL_REVIEWER", "decided_at": "2026-09-10T00:00:00Z",
+                # The write reports the status it replaced, read in the same
+                # statement rather than by a separate earlier query.
+                "previous_status": previous_status,
+            }]
         service.repository.graph.query.side_effect = [
             found_rows if found_rows is not None else [],
-            [{"redline_id": "R-1", "rule_id": "PAY-001", "clause_index": 0,
-              "status": "APPROVED", "final_text": SUGGESTED, "decision_note": "",
-              "decided_by": "LEGAL_REVIEWER", "decided_at": "2026-09-10T00:00:00Z"}],
+            update_rows,
         ]
+        service._audit_decision = lambda *a, **k: None
         return service
 
     def test_an_unknown_redline_raises_rather_than_no_op(self):
@@ -152,7 +160,7 @@ class TestTheServiceLayer:
     def test_deciding_twice_is_allowed_and_shows_the_prior_ruling(self):
         service = self._service(found_rows=[
             {"original_text": ORIGINAL, "suggested_text": SUGGESTED, "status": "REJECTED"}
-        ])
+        ], previous_status="REJECTED")
 
         result = service.record_redline_decision("R-1", "t", RedlineStatus.APPROVED)
 
@@ -168,3 +176,31 @@ class TestTheServiceLayer:
 
         # One call to look it up, and no write.
         assert service.repository.graph.query.call_count == 1
+
+
+    def test_a_row_deleted_between_validation_and_write_raises(self):
+        """Re-analysis can drop a pending draft mid-decision.
+
+        Indexing into an empty result was a 500; a missing row is a lookup
+        failure, which the endpoint turns into a 404.
+        """
+        service = self._service(
+            found_rows=[{"original_text": ORIGINAL, "suggested_text": SUGGESTED,
+                         "status": "PENDING"}],
+            update_rows=[],
+        )
+
+        with pytest.raises(LookupError, match="no longer exists"):
+            service.record_redline_decision("R-1", "t", RedlineStatus.APPROVED)
+
+    def test_the_decision_is_written_in_one_statement(self):
+        """Two queries let concurrent reviewers both believe they were first."""
+        service = self._service(found_rows=[
+            {"original_text": ORIGINAL, "suggested_text": SUGGESTED, "status": "PENDING"}
+        ])
+
+        service.record_redline_decision("R-1", "t", RedlineStatus.APPROVED)
+
+        write = service.repository.graph.query.call_args_list[-1][0][0]
+        assert "SET r.status" in write
+        assert "previous_status" in write, "the write must report what it replaced"
