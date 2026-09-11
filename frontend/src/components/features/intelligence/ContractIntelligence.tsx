@@ -265,7 +265,10 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       {results && results.risk_assessment && (
         <div className="space-y-4">
           {/* Overview Cards - Clickable */}
-          <div className="grid grid-cols-4 gap-4">
+          {/* This panel sits in a half-width column on the Intelligence page,
+              so four cards across leaves ~100px each and every label wraps.
+              Two by two here; four only where there is genuinely room. */}
+          <div className="grid grid-cols-2 2xl:grid-cols-4 gap-4">
             <Card 
               className="border-slate-200 cursor-pointer hover:shadow-md hover:border-blue-300 transition-all duration-200"
               onClick={() => openModal('risk')}
@@ -351,7 +354,7 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
                   {results.redlines?.length || 0}
                 </div>
                 <p className="text-xs text-slate-500 mt-1">Suggested edits to review</p>
-                <p className="text-xs text-purple-600 mt-1 font-medium">Approve / edit / reject →</p>
+                <p className="text-xs text-purple-600 mt-1 font-medium">Review edits →</p>
               </CardContent>
             </Card>
           </div>
