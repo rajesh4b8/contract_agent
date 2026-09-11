@@ -3,7 +3,11 @@ from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 from typing import Type, Dict, Any, List
 from backend.domain.entities import ContractClause, PolicyViolation, RiskAssessment, RedlineRecommendation
-from backend.shared.models.clause_finding import ClauseExtraction, PolicyAssessment
+from backend.shared.models.clause_finding import (
+    ClauseExtraction,
+    PolicyAssessment,
+    RedlineSet,
+)
 from backend.shared.utils.message_content import content_to_text, strip_code_fence
 import json
 import logging
@@ -310,69 +314,96 @@ class RiskCalculatorTool(BaseTool):
             return json.dumps({"overall_risk_score": 50.0, "risk_level": "MEDIUM", "critical_issues": [], "recommendations": []})
 
 # Redline Generation Agent Tools
+# Redline Generation Agent Tools
 class RedlineGeneratorInput(BaseModel):
     violations_json: str = Field(description="JSON string of policy violations")
 
+
 class RedlineGeneratorTool(BaseTool):
+    """Draft replacement language for each violated clause.
+
+    This previously looked up a constant from a five-branch if/elif on clause
+    type, so every payment violation in every contract got the same sentence.
+    Those templates ignore the document's own defined terms, party names and
+    numbering, which makes them something a lawyer has to rewrite rather than
+    paste. The model now redrafts the specific clause, and the playbook's own
+    wording is passed in as the target to hit.
+    """
+
     name: str = "redline_generator"
-    description: str = "Generate redline recommendations for violations"
+    description: str = "Draft replacement language for clauses that breach policy"
     args_schema: Type[BaseModel] = RedlineGeneratorInput
-    
+    llm: Any = None
+
     def _run(self, violations_json: str) -> str:
-        """Generate redline recommendations"""
-        try:
-            violations = json.loads(violations_json)
-            redlines = []
-            
-            for violation in violations:
-                clause_type = violation.get("clause_type", "")
-                issue = violation.get("issue", "")
-                suggested_fix = violation.get("suggested_fix", "")
-                original_text = violation.get("clause_content", "")
-                
-                if "payment" in clause_type.lower():
-                    redlines.append({
-                        "original_text": original_text,
-                        "suggested_text": COMPANY_POLICIES["payment_terms"]["redline_text"],
-                        "justification": "Aligns with company payment policy (Net 30 preferred)",
-                        "priority": "HIGH"
-                    })
-                
-                elif "liability" in clause_type.lower():
-                    redlines.append({
-                        "original_text": original_text,
-                        "suggested_text": COMPANY_POLICIES["liability_cap"]["redline_text"],
-                        "justification": "Caps liability at 1x SOW fees per company policy",
-                        "priority": "CRITICAL"
-                    })
-                
-                elif "indemnif" in clause_type.lower():
-                    redlines.append({
-                        "original_text": original_text,
-                        "suggested_text": COMPANY_POLICIES["indemnification"]["redline_text"],
-                        "justification": "Limits indemnification to mutual third-party claims only",
-                        "priority": "CRITICAL"
-                    })
-                
-                elif "terminat" in clause_type.lower():
-                    redlines.append({
-                        "original_text": original_text,
-                        "suggested_text": COMPANY_POLICIES["termination"]["redline_text"],
-                        "justification": "Ensures 30-day notice and payment for work-in-progress",
-                        "priority": "HIGH"
-                    })
-                
-                elif "ip" in clause_type.lower() or "intellectual property" in clause_type.lower():
-                    redlines.append({
-                        "original_text": original_text,
-                        "suggested_text": COMPANY_POLICIES["ip_ownership"]["redline_text"],
-                        "justification": "Protects company pre-existing IP and methodologies",
-                        "priority": "CRITICAL"
-                    })
-            
-            logger.info(f"Generated {len(redlines)} redline recommendations")
-            return json.dumps(redlines)
-            
-        except Exception as e:
-            logger.error(f"Redline generation failed: {e}")
+        violations = json.loads(violations_json)
+        if not violations:
             return json.dumps([])
+        if self.llm is None:
+            raise ValueError("RedlineGeneratorTool requires an llm to draft redlines")
+
+        # Only violations that cite a rule can be remediated: the rule is what
+        # defines what "fixed" means, and it supplies the priority.
+        citable = [v for v in violations if v.get("rule_id")]
+        if not citable:
+            logger.warning("No violations cite a rule; nothing to redline")
+            return json.dumps([])
+
+        # Keyed by (rule, clause): the same rule can be breached by several
+        # clauses, and keying on the rule alone would collapse them — every
+        # suggestion for that rule would then attach to whichever breach came
+        # last, persisting a redline against the wrong clause text.
+        by_breach = {(v["rule_id"], v.get("clause_index")): v for v in citable}
+        parser = PydanticOutputParser(pydantic_object=RedlineSet)
+
+        block = "\n\n".join(
+            f"BREACH {i}: rule {v['rule_id']}, clause_index {v.get('clause_index')}\n"
+            f"RULE {v['rule_id']} requires: {v.get('suggested_fix') or '(no standard wording given)'}\n"
+            f"WHAT IS WRONG: {v.get('issue', '')}\n"
+            f"CURRENT CLAUSE: {' '.join((v.get('clause_content') or '').split())}"
+            for i, v in enumerate(citable)
+        )
+
+        prompt = f"""You are a contract lawyer preparing redlines. For each breach
+below, rewrite the clause so it complies with the rule.
+
+{block}
+
+Write `suggested_text` as language that could replace the current clause in the
+document: keep the contract's own defined terms, party names, numbering and
+drafting style, and change only what the rule requires. Do not copy the rule's
+standard wording verbatim if the clause uses different defined terms — adapt it.
+Keep every protection the current clause already provides that the rule does not
+object to.
+
+In `justification`, state what the rule requires and what you changed. Use
+`rule_id` and `clause_index` exactly as written above, so each redline is matched
+back to the breach it fixes — the same rule may appear more than once.
+
+{parser.get_format_instructions()}"""
+
+        response = self.llm.invoke(prompt)
+        drafted = parser.parse(strip_code_fence(content_to_text(response.content)))
+
+        redlines, unknown = [], []
+        for suggestion in drafted.redlines:
+            violation = by_breach.get((suggestion.rule_id, suggestion.clause_index))
+            if violation is None:
+                unknown.append(f"{suggestion.rule_id}@{suggestion.clause_index}")
+                continue
+            redlines.append({
+                "rule_id": suggestion.rule_id,
+                "clause_index": suggestion.clause_index,
+                "clause_type": violation.get("clause_type", ""),
+                "original_text": violation.get("clause_content", ""),
+                "suggested_text": suggestion.suggested_text,
+                "justification": suggestion.justification,
+                # Priority follows the rule's severity so it cannot drift.
+                "priority": violation.get("severity", "MEDIUM"),
+            })
+
+        if unknown:
+            logger.warning(f"Discarded redlines citing unknown rule/clause pairs: {unknown}")
+
+        logger.info(f"Drafted {len(redlines)} redlines for {len(citable)} violations")
+        return json.dumps(redlines)

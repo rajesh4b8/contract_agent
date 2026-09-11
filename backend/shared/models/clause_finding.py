@@ -107,3 +107,32 @@ class PolicyAssessment(BaseModel):
     """Wrapper so the parser has a single root object to target."""
 
     violations: List[PolicyBreach] = Field(default_factory=list)
+
+
+class RedlineSuggestion(BaseModel):
+    """Replacement language for one clause that breaches one rule.
+
+    The model rewrites the clause in front of it. A generic template pasted from
+    the playbook is what this replaced: it ignored the contract's own defined
+    terms, party names and numbering, so it could not be pasted into the document.
+    """
+
+    rule_id: str = Field(description="Id of the rule being remediated, exactly as given")
+    clause_index: int = Field(
+        description="Index of the breaching clause, exactly as given. The same rule "
+                    "can be breached by several clauses, so the rule alone does not "
+                    "identify which one this redline rewrites."
+    )
+    suggested_text: str = Field(
+        description="Replacement language for this specific clause, written to fit "
+                    "the contract's own defined terms and drafting style"
+    )
+    justification: str = Field(
+        description="Why this change is needed, citing what the rule requires"
+    )
+
+
+class RedlineSet(BaseModel):
+    """Wrapper so the parser has a single root object to target."""
+
+    redlines: List[RedlineSuggestion] = Field(default_factory=list)

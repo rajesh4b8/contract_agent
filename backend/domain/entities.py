@@ -87,18 +87,26 @@ class RiskAssessment:
 
 @dataclass
 class RedlineRecommendation:
+    """Proposed replacement language for a clause that breaches a rule."""
     original_text: str
     suggested_text: str
     justification: str
-    priority: str  # LOW, MEDIUM, HIGH
+    priority: str  # LOW, MEDIUM, HIGH, CRITICAL — follows the rule's severity
+    rule_id: Optional[str] = None   # the rule this remediates
+    clause_index: Optional[int] = None  # which clause it rewrites
+    clause_type: str = ""
 
 @dataclass
 class ContractIntelligence:
+    # redlines_generated is False when drafting errored. An empty redlines list
+    # then means "we do not know", not "none needed" — persistence must not
+    # overwrite good drafts on the strength of it.
     clauses: List[ContractClause]
     violations: List[PolicyViolation]
     risk_assessment: RiskAssessment
     redlines: List[RedlineRecommendation]
     processing_time: float = 0.0
+    redlines_generated: bool = True
     
     # CUAD mitigation fields (Phase 1)
     cuad_deviations: List[Dict[str, Any]] = None

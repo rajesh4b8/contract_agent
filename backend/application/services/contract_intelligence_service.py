@@ -110,6 +110,94 @@ class ContractIntelligenceService:
             logger.error(f"Failed to analyze contract {contract_id}: {e}")
             return None
     
+
+    def _store_redlines(self, contract_id: str, tenant_id: str, redlines,
+                        replace: bool = True) -> None:
+        """Persist redlines as (:Contract)-[:HAS_REDLINE]->(:Redline).
+
+        Only `redlines_count` used to be stored, so the drafted language existed
+        solely in the HTTP response and was gone on refresh — there was nothing
+        for a reviewer to come back to, and nothing for Increment 4 to approve.
+
+        Redlines for the contract are replaced wholesale: re-analysing supersedes
+        the previous set rather than accumulating duplicates alongside it.
+
+        `replace=False` when drafting failed. An empty list then means "we could
+        not draft", not "none were needed", and wiping the stored set on the
+        strength of a transient model error would destroy drafts a reviewer may
+        already be working from.
+        """
+        if not replace:
+            logger.warning(
+                f"Redline drafting failed for {contract_id}; keeping the previously "
+                f"stored redlines rather than replacing them"
+            )
+            return
+
+        try:
+            self.repository.graph.query(
+                """
+                MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
+                      -[:HAS_REDLINE]->(r:Redline)
+                WITH collect(r) AS old
+                FOREACH (redline IN old | DETACH DELETE redline)
+                """,
+                {"contract_id": contract_id, "tenant_id": tenant_id},
+            )
+
+            for index, redline in enumerate(redlines):
+                self.repository.graph.query(
+                    """
+                    MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
+                    CREATE (r:Redline {
+                        redline_id: $redline_id,
+                        rule_id: $rule_id,
+                        clause_index: $clause_index,
+                        clause_type: $clause_type,
+                        original_text: $original_text,
+                        suggested_text: $suggested_text,
+                        justification: $justification,
+                        priority: $priority,
+                        tenant_id: $tenant_id,
+                        created_at: datetime()
+                    })
+                    CREATE (c)-[:HAS_REDLINE]->(r)
+                    """,
+                    {
+                        "contract_id": contract_id,
+                        "tenant_id": tenant_id,
+                        "redline_id": f"{contract_id}_redline_{index:03d}",
+                        "rule_id": redline.rule_id,
+                        "clause_index": redline.clause_index,
+                        "clause_type": redline.clause_type,
+                        "original_text": redline.original_text,
+                        "suggested_text": redline.suggested_text,
+                        "justification": redline.justification,
+                        "priority": redline.priority,
+                    },
+                )
+
+            logger.info(f"Stored {len(redlines)} redlines for contract {contract_id}")
+        except Exception as e:
+            # Non-fatal: the analysis itself succeeded and is already saved.
+            logger.error(f"Failed to store redlines for {contract_id}: {e}")
+
+    def get_redlines(self, contract_id: str, tenant_id: str = "default-tenant") -> list:
+        """Read back the stored redlines for a contract."""
+        return self.repository.graph.query(
+            """
+            MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
+                  -[:HAS_REDLINE]->(r:Redline)
+            RETURN r.redline_id AS redline_id, r.rule_id AS rule_id,
+                   r.clause_index AS clause_index,
+                   r.clause_type AS clause_type, r.original_text AS original_text,
+                   r.suggested_text AS suggested_text, r.justification AS justification,
+                   r.priority AS priority
+            ORDER BY r.redline_id
+            """,
+            {"contract_id": contract_id, "tenant_id": tenant_id},
+        )
+
     def _get_llm_for_model(self, model: str):
         """Get a raw chat model for the requested id.
 
@@ -177,7 +265,10 @@ class ContractIntelligenceService:
                 original_text=redline_data.get("original_text", ""),
                 suggested_text=redline_data.get("suggested_text", ""),
                 justification=redline_data.get("justification", ""),
-                priority=redline_data.get("priority", "LOW")
+                priority=redline_data.get("priority", "LOW"),
+                rule_id=redline_data.get("rule_id"),
+                clause_index=redline_data.get("clause_index"),
+                clause_type=redline_data.get("clause_type", "")
             ))
         
         # Create ContractIntelligence with CUAD data
@@ -185,7 +276,8 @@ class ContractIntelligenceService:
             clauses=clauses,
             violations=violations,
             risk_assessment=risk_assessment,
-            redlines=redlines
+            redlines=redlines,
+            redlines_generated=analysis_result.get("redlines_generated", True),
         )
         
         # Add CUAD fields if present
@@ -246,6 +338,11 @@ class ContractIntelligenceService:
                 "tenant_id": tenant_id,
                 **intelligence_data
             })
+
+            self._store_redlines(
+                contract_id, tenant_id, intelligence.redlines,
+                replace=intelligence.redlines_generated,
+            )
             
             # Store performance metrics
             self._store_performance_metrics(contract_id, tenant_id, intelligence)

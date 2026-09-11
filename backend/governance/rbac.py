@@ -103,3 +103,31 @@ def requires_permission(permission: Permission):
         return True
         
     return permission_dependency
+
+
+async def get_current_tenant(
+    x_tenant_id: Optional[str] = Header(None),
+    role: UserRole = Depends(get_current_user_role),
+) -> str:
+    """Resolve the tenant whose data this request may touch.
+
+    Tenant comes from the caller, never from a query parameter. Accepting it
+    from the query string means anyone holding a read permission can read any
+    tenant's data by editing the URL — role checks say *what* you may do, not
+    *whose* data you may do it to.
+
+    As with `get_current_user_role`, this is mock auth: production requires the
+    header, development falls back to DEV_DEFAULT_TENANT so the UI (which sends
+    no header yet) keeps working. Replace with a claim from a validated token.
+    """
+    if x_tenant_id:
+        return x_tenant_id
+
+    if is_production():
+        logger.error("Tenant-scoped request with no X-Tenant-ID header")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="X-Tenant-ID header is required",
+        )
+
+    return os.getenv("DEV_DEFAULT_TENANT", "default-tenant")
