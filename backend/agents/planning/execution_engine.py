@@ -15,6 +15,7 @@ from backend.infrastructure.playbook_loader import (
     attach_violated_policy as _attach_violated_policy,
     load_rules_for_tenant,
 )
+from backend.shared.errors import LLMErrorInfo, LLMProviderError, classify_llm_error
 import json
 
 from backend.shared.utils.logger import get_logger
@@ -28,12 +29,17 @@ class ExecutionResult:
     execution_time_ms: int
     confidence_score: float
     error_message: Optional[str] = None
+    # Set when the step failed because the model provider refused the call —
+    # a spent quota, a rejected key. Carried rather than flattened to a string
+    # so the engine can decide to stop and the API can answer with its status.
+    provider_failure: Optional[LLMErrorInfo] = None
 
 class StepExecutor:
     """Execute individual analysis steps"""
     
-    def __init__(self, llm=None):
+    def __init__(self, llm=None, model_id: Optional[str] = None):
         self.llm = llm
+        self.model_id = model_id
         self.tools = {
             StepType.EXTRACT_CLAUSES: ClauseDetectorTool(llm=llm),
             # Rules are per-tenant, so this tool is rebuilt per run in
@@ -113,6 +119,24 @@ class StepExecutor:
                 )
                 
             except Exception as e:
+                # Retrying a refusal is not a retry. A spent quota or a rejected
+                # key answers the same way three times in a row, half a minute
+                # later, so these give up at once and report why.
+                provider_failure = classify_llm_error(e, self.model_id)
+                if provider_failure is not None:
+                    execution_time = int((datetime.now() - start_time).total_seconds() * 1000)
+                    workflow_tracker.error_agent(execution, provider_failure.message)
+                    logger.error(f"Step {step.step_id} hit a provider failure: {provider_failure.detail}")
+                    return ExecutionResult(
+                        step_id=step.step_id,
+                        success=False,
+                        output_data=None,
+                        execution_time_ms=execution_time,
+                        confidence_score=0.0,
+                        error_message=provider_failure.message,
+                        provider_failure=provider_failure,
+                    )
+
                 if attempt == max_retries:  # Last attempt failed
                     execution_time = int((datetime.now() - start_time).total_seconds() * 1000)
                     workflow_tracker.error_agent(execution, str(e))
@@ -324,12 +348,26 @@ class StepExecutor:
                 return f"Analysis result with {len(result)} fields"
         return "Analysis completed"
 
+# What each step's absence means, said plainly. The planner's own
+# descriptions read as instructions ("Generate comprehensive redlines"), which
+# is the wrong voice for a failure notice.
+_STEP_FAILURE_LABELS = {
+    StepType.EXTRACT_CLAUSES: "Clauses could not be extracted",
+    StepType.CHECK_POLICIES: "Policy compliance could not be checked",
+    StepType.ASSESS_RISK: "The risk score could not be calculated",
+    StepType.GENERATE_REDLINES: "Redlines could not be drafted",
+    StepType.VALIDATE_RESULTS: "Results could not be cross-validated",
+    StepType.CUAD_MITIGATION: "CUAD deviation analysis did not complete",
+}
+
+
 class PlanExecutionEngine:
     """Execute planned analysis workflows with dependency management"""
     
-    def __init__(self, llm=None):
-        self.step_executor = StepExecutor(llm)
+    def __init__(self, llm=None, model_id: Optional[str] = None):
+        self.step_executor = StepExecutor(llm, model_id)
         self.execution_context: Dict[str, Any] = {}
+        self.step_failures: List[tuple] = []  # (ExecutionStep, ExecutionResult)
     
     async def execute_plan(self, plan: ExecutionPlan, contract_text: str,
                            tenant_id: str = "default-tenant",
@@ -352,6 +390,7 @@ class PlanExecutionEngine:
         # workflow_tracker.start_workflow()
         
         step_results: Dict[str, ExecutionResult] = {}
+        self.step_failures = []
         
         try:
             # Execute steps respecting dependencies
@@ -375,7 +414,19 @@ class PlanExecutionEngine:
                     logger.info(f"🚀 EXEC STEP 4.{i+1}d: Context updated for {step.step_id}")
                 else:
                     logger.error(f"🚀 EXEC ERROR: Step {step.step_id} failed: {result.error_message}")
-                    # Continue execution for non-critical failures
+                    self.step_failures.append((step, result))
+
+                    # Clause extraction is the one step nothing can proceed
+                    # without: every later step reads its output, so when the
+                    # provider refuses it the run produces an empty analysis
+                    # that reads like a clean contract. Stop and say why.
+                    if (step.step_type == StepType.EXTRACT_CLAUSES
+                            and result.provider_failure is not None):
+                        workflow_tracker.complete_workflow()
+                        raise LLMProviderError(result.provider_failure)
+
+                    # Everything else degrades: the partial analysis is still
+                    # worth having, as long as the gap is reported.
             
             # Complete workflow tracking
             workflow_tracker.complete_workflow()
@@ -383,6 +434,8 @@ class PlanExecutionEngine:
             # Return final results in expected format
             return self._format_final_results()
             
+        except LLMProviderError:
+            raise
         except Exception as e:
             logger.error(f"Plan execution failed: {e}")
             workflow_tracker.complete_workflow()
@@ -426,9 +479,28 @@ class PlanExecutionEngine:
             "jurisdiction_info": self.execution_context.get("jurisdiction_info", {}),
             "precedent_matches": self.execution_context.get("precedent_matches", []),
             "validation": self.execution_context.get("validation_results", {}),
-            "processing_complete": True,
+            "warnings": self._failure_warnings(),
+            # Drafting is the step whose empty output must not be mistaken for
+            # "nothing needed changing" — the stored redlines are replaced on
+            # the strength of this flag.
+            "redlines_generated": not self._step_failed(StepType.GENERATE_REDLINES),
+            "processing_complete": not self.step_failures,
             "planned_execution": True
         }
+
+    def _step_failed(self, step_type: StepType) -> bool:
+        return any(step.step_type == step_type for step, _ in self.step_failures)
+
+    def _failure_warnings(self) -> List[str]:
+        """One line per step that degraded, in words a reviewer can act on.
+
+        Plan step ids are "step_2a"; what a reviewer needs to know is that the
+        policy check did not run, and why.
+        """
+        return [
+            f"{_STEP_FAILURE_LABELS.get(step.step_type, step.description)}: {result.error_message}"
+            for step, result in self.step_failures
+        ]
     
     def _format_error_results(self, error_message: str) -> Dict[str, Any]:
         """Format error results"""
@@ -437,6 +509,10 @@ class PlanExecutionEngine:
             "violations": [],
             "risk_assessment": {"overall_risk_score": 0, "risk_level": "UNKNOWN"},
             "redlines": [],
+            "warnings": [f"The analysis did not complete: {error_message}"],
+            # No redlines were drafted, so the stored set must survive: an
+            # empty list here means "we do not know", not "none needed".
+            "redlines_generated": False,
             "processing_complete": False,
             "error": error_message
         }

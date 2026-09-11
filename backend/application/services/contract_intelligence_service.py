@@ -2,6 +2,7 @@ from backend.agents.contract_intelligence_agents import ContractIntelligenceAgen
 from backend.domain.entities import ContractIntelligence, ContractClause, PolicyViolation, RiskAssessment, RedlineRecommendation
 from backend.infrastructure.contract_repository import Neo4jContractRepository
 from backend.llm_manager import LLMManager
+from backend.shared.errors import LLMProviderError, raise_if_provider_error
 import json
 import logging
 import time
@@ -33,7 +34,7 @@ class ContractIntelligenceService:
             
             # Create multi-agent orchestrator with error handling
             try:
-                orchestrator = ContractIntelligenceAgentFactory.create_orchestrator(llm)
+                orchestrator = ContractIntelligenceAgentFactory.create_orchestrator(llm, model)
                 # Run multi-agent analysis with optional planning
                 analysis_result = orchestrator.analyze_contract(
                     contract_text, use_planning, tenant_id, contract_type
@@ -41,6 +42,10 @@ class ContractIntelligenceService:
             except ImportError as ie:
                 logger.error(f"Import error in orchestrator: {ie}")
                 raise Exception(f"Intelligence system not properly configured: {ie}")
+            except LLMProviderError:
+                # Already explained, and re-wrapping it below would bury the
+                # explanation inside "Failed to initialize intelligence system".
+                raise
             except Exception as oe:
                 logger.error(f"Orchestrator creation failed: {oe}")
                 raise Exception(f"Failed to initialize intelligence system: {oe}")
@@ -53,6 +58,11 @@ class ContractIntelligenceService:
             return intelligence
             
         except Exception as e:
+            # A model that refused the request produces no analysis, not an
+            # analysis with no findings. Everything below renders as "no
+            # clauses, no violations, risk UNKNOWN", which a reviewer reads as
+            # a clean contract — so provider failures go back to the caller.
+            raise_if_provider_error(e, model)
             logger.error(f"Contract intelligence analysis failed: {e}")
             import traceback
             logger.error(f"Full traceback: {traceback.format_exc()}")
@@ -67,6 +77,8 @@ class ContractIntelligenceService:
                     recommendations=["Analysis failed - manual review required"]
                 ),
                 redlines=[],
+                redlines_generated=False,
+                warnings=[f"The analysis did not complete: {e}"],
                 processing_time=time.time() - start_time
             )
     
@@ -107,6 +119,9 @@ class ContractIntelligenceService:
             return intelligence
             
         except Exception as e:
+            # None means "no such contract" to the caller, which answers 404.
+            # A quota failure is not a missing contract.
+            raise_if_provider_error(e, model)
             logger.error(f"Failed to analyze contract {contract_id}: {e}")
             return None
     
@@ -449,6 +464,7 @@ class ContractIntelligenceService:
             risk_assessment=risk_assessment,
             redlines=redlines,
             redlines_generated=analysis_result.get("redlines_generated", True),
+            warnings=analysis_result.get("warnings", []) or [],
         )
         
         # Add CUAD fields if present

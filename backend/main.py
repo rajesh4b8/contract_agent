@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Depends, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -23,6 +23,7 @@ from backend.governance.prompt_guard import PromptGuard
 from backend.governance.output_guard import OutputGuard
 from backend.governance.rbac import Permission, requires_permission
 from backend.infrastructure.audit_logger import AuditLogger
+from backend.shared.errors import LLMProviderError, describe_llm_error
 
 logger = get_logger(__name__)
 
@@ -52,6 +53,23 @@ async def lifespan(app: FastAPI):
     # Shutdown - cleanup if needed
 
 app = FastAPI(lifespan=lifespan)
+
+
+@app.exception_handler(LLMProviderError)
+async def llm_provider_error_handler(request: Request, exc: LLMProviderError):
+    """Answer a classified model failure with its own status and explanation.
+
+    Without this every one of them arrived as a 500 "Processing failed:
+    <provider stack trace>", which tells a reviewer nothing about the fact
+    that the day's free quota is simply gone.
+    """
+    info = exc.info
+    logger.error(
+        f"LLM provider failure ({info.failure.value}) on {request.url.path}: {info.detail}"
+    )
+    headers = {"Retry-After": str(info.retry_after)} if info.retry_after else None
+    return JSONResponse(status_code=info.status_code, content=info.to_dict(), headers=headers)
+
 
 # Dependency injection
 def get_llm_manager(request: Request):
@@ -160,6 +178,28 @@ def rebuild_history(history):
 
 
 async def runner(model: str, prompt: str, history: str, llm_mgr: LLMManager, user_role: str = "unknown"):
+    """Stream a chat turn, reporting a model failure instead of dying silently.
+
+    An exception raised inside a streaming generator just closes the SSE
+    connection: the chat is left with a half-written answer and "Failed to
+    generate the response", whatever actually went wrong. Anything the
+    provider refuses — quota gone, key rejected, safety filter — is sent as an
+    `error` part the UI renders in place.
+    """
+    try:
+        async for event in _run_chat_turn(model, prompt, history, llm_mgr, user_role):
+            yield event
+    except Exception as exc:  # noqa: BLE001 - the stream is the only channel back
+        message = describe_llm_error(
+            exc, model,
+            fallback=f"The assistant could not complete this request: {exc}",
+        )
+        logger.error(f"Chat turn failed for model '{model}': {exc}", exc_info=True)
+        yield f"data: {json.dumps({'content': message, 'type': 'error'})}\n\n"
+        yield f"data: {json.dumps({'content': '', 'type': 'end'})}\n\n"
+
+
+async def _run_chat_turn(model: str, prompt: str, history: str, llm_mgr: LLMManager, user_role: str = "unknown"):
     logger.info(f"Processing LLM request for model '{model}' for user_role '{user_role}'")
     
     # Initialize AuditLogger and AgentAuditService for Guard persistence

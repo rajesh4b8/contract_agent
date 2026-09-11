@@ -4,6 +4,7 @@ from backend.domain.value_objects import ProcessingResult, ProcessingStatus
 from backend.agents.agent_workflow_tracker import workflow_tracker
 from backend.embeddings.orchestrator import EmbeddingOrchestrator
 from backend.embeddings.validator import EmbeddingValidator
+from backend.shared.errors import describe_llm_error
 import os
 import logging
 
@@ -82,6 +83,7 @@ class DocumentProcessingService:
         initial_state = {
             "file_path": request.file_path,
             "tenant_id": request.tenant_id or "default-tenant",
+            "model_id": request.processing_options.get("model"),
             "extracted_text": None,
             "contract_data": None,
             "processing_result": None,
@@ -139,9 +141,18 @@ class DocumentProcessingService:
             # reason goes into final_result too: that is the only field the UI
             # shows, so dropping it left the user staring at "Processing error"
             # with no way to tell a quota exhaustion from a corrupt PDF.
-            summary = processing_result.message or f"Processing {processing_result.status.value}"
             if processing_result.error:
-                summary = f"{summary}: {processing_result.error}"
+                # The error already reads as a sentence ("Google Gemini has no
+                # quota left on this API key…"), so it stands on its own rather
+                # than trailing a second "Processing error:" prefix the UI
+                # would then prefix again.
+                summary = (
+                    f"{processing_result.message}: {processing_result.error}"
+                    if processing_result.message
+                    else processing_result.error
+                )
+            else:
+                summary = processing_result.message or f"Processing {processing_result.status.value}"
 
             return {
                 "status": processing_result.status.value,
@@ -152,13 +163,16 @@ class DocumentProcessingService:
             }
             
         except Exception as e:
-            workflow_tracker.error_agent(execution, f"Processing failed: {str(e)}")
+            reason = describe_llm_error(
+                e, request.processing_options.get("model"), fallback=f"Processing failed: {e}"
+            )
+            workflow_tracker.error_agent(execution, reason)
             workflow_tracker.complete_workflow()
-            logger.error(f"Agent processing failed: {e}")
+            logger.error(f"Agent processing failed: {e}", exc_info=True)
             return {
                 "status": "error",
                 "filename": request.filename,
-                "final_result": f"Processing failed: {str(e)}",
+                "final_result": reason,
                 "contract_id": None
             }
     

@@ -8,6 +8,7 @@ from backend.shared.config.models import DEFAULT_MODEL_ID
 from backend.infrastructure.audit_logger import AuditLogger, AuditEventType, audit_log
 from backend.infrastructure.content_validator import ContentValidationService
 from backend.infrastructure.error_tracker import ErrorTracker, ErrorCategory, ErrorSeverity, error_tracking_context
+from backend.shared.errors import classify_llm_error, describe_llm_error, raise_if_provider_error
 from backend.agents.chunking_agent import ChunkingAgent
 from backend.infrastructure.chunking.storage_service import ChunkStorageService
 import os
@@ -315,7 +316,12 @@ async def upload_pdf(
                 if enable_enhanced:
                     # Use enhanced processor with sections/clauses
                     from backend.factories.document_processor_factory import DocumentProcessorFactory
-                    processor = DocumentProcessorFactory.create_processor("full", llm_mgr.agents[model])
+                    # get_model_by_name, not agents[model]: the raw lookup raises a
+                    # bare KeyError whose whole message is the model id, which
+                    # surfaced as "Processing failed: 'gemini-flash'".
+                    processor = DocumentProcessorFactory.create_processor(
+                        "full", llm_mgr.get_model_by_name(model)
+                    )
                     # Ensure tenant_id is passed in options
                     processing_request.processing_options["tenant_id"] = tenant_id
                     result = await processor.process_document(temp_path, processing_request.processing_options)
@@ -348,16 +354,25 @@ async def upload_pdf(
                     error_details=str(proc_error)
                 )
                 
-                # Return error as JSON instead of raising exception
-                return {
+                # Return error as JSON instead of raising exception. `details`
+                # is the only field the upload panel shows, so it carries the
+                # explanation: for a model failure that is "the day's Gemini
+                # quota is gone, pick a Free · model", not a stack trace.
+                llm_error = classify_llm_error(proc_error, model)
+                response = {
                     "message": "PDF processing failed",
                     "filename": file.filename,
                     "status": "error",
                     "contract_id": None,
-                    "details": f"Processing error: {str(proc_error)}",
+                    "details": llm_error.message if llm_error else f"Processing error: {proc_error}",
                     "model_used": model,
                     "error_type": type(proc_error).__name__
                 }
+                if llm_error:
+                    response["error_kind"] = llm_error.failure.value
+                    response["provider"] = llm_error.provider
+                    response["retry_after"] = llm_error.retry_after
+                return response
             
             logger.info(f"PDF processing completed for {file.filename}: {result['status']}")
             
@@ -403,6 +418,10 @@ async def upload_pdf(
                 except Exception as cleanup_error:
                     logger.error(f"Failed to cleanup temp file: {cleanup_error}")
                     
+            # A model failure is not a 500 from this service: answer with its
+            # own status (429 for a spent quota, 503 for a key problem) and the
+            # message that says what to do about it.
+            raise_if_provider_error(e, model)
             raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
         finally:
             logger.info(f"=== UPLOAD END: {file.filename if file else 'unknown'} ===")
@@ -475,6 +494,7 @@ async def upload_pdf_stream(
                 initial_state = {
                     "file_path": temp_path,
                     "tenant_id": tenant_id,
+                    "model_id": model,
                     "messages": messages,
                     "extracted_text": None,
                     "contract_data": None,
@@ -499,7 +519,8 @@ async def upload_pdf_stream(
                 yield f"data: {json.dumps({'content': '', 'type': 'end'})}\n\n"
                 
             except Exception as e:
-                error_msg = f"Processing failed: {str(e)}"
+                logger.error(f"Streaming PDF processing failed: {e}", exc_info=True)
+                error_msg = describe_llm_error(e, model, fallback=f"Processing failed: {e}")
                 yield f"data: {json.dumps({'content': error_msg, 'type': 'error'})}\n\n"
                 yield f"data: {json.dumps({'content': '', 'type': 'end'})}\n\n"
             finally:

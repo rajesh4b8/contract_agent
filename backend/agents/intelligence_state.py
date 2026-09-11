@@ -8,6 +8,7 @@ class IntelligenceState(TypedDict):
     contract_text: str
     tenant_id: str        # which playbook applies
     contract_type: str    # narrows which rules apply
+    model_id: str         # public model id, so a failure can name the model
     
     # Processing results (structured data, not strings)
     extracted_clauses: List[dict]
@@ -15,6 +16,12 @@ class IntelligenceState(TypedDict):
     risk_data: dict
     redline_suggestions: List[dict]
     redline_generation_failed: str   # set when drafting errored; blocks overwrite
+    # Set when a stage degraded instead of failing outright. LangGraph drops
+    # state keys it was never told about, so `policy_check_failed` was being
+    # written by the policy node and silently discarded before it could be
+    # reported.
+    policy_check_failed: str
+    risk_calculation_failed: str
     
     # CUAD mitigation results (Phase 1 extension)
     cuad_deviations: List[dict]

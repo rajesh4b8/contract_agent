@@ -108,6 +108,10 @@ class ContractIntelligence:
     redlines: List[RedlineRecommendation]
     processing_time: float = 0.0
     redlines_generated: bool = True
+    # Stages that degraded rather than failed the run: "Redlines could not be
+    # drafted: OpenRouter is rate-limiting this key". Without these a
+    # half-finished analysis is indistinguishable from a clean contract.
+    warnings: List[str] = None
     
     # CUAD mitigation fields (Phase 1)
     cuad_deviations: List[Dict[str, Any]] = None
@@ -115,6 +119,8 @@ class ContractIntelligence:
     precedent_matches: List[Dict[str, Any]] = None
     
     def __post_init__(self):
+        if self.warnings is None:
+            self.warnings = []
         if self.cuad_deviations is None:
             self.cuad_deviations = []
         if self.jurisdiction_info is None:

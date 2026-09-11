@@ -43,6 +43,12 @@ export async function errorMessage(response: Response, fallback: string): Promis
   try {
     const body = await response.json();
     if (typeof body?.detail === 'string') return body.detail;
+    // FastAPI's own validation errors put a list of objects in `detail`.
+    if (Array.isArray(body?.detail)) {
+      const parts = body.detail.map((d: any) => d?.msg).filter(Boolean);
+      if (parts.length > 0) return parts.join('; ');
+    }
+    if (typeof body?.message === 'string') return body.message;
   } catch {
     // No JSON body; fall through to the generic message.
   }

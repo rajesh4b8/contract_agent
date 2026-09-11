@@ -9,6 +9,7 @@ import { RedlineReview } from './RedlineReview';
 import { ViolationsDetail } from './ViolationsDetail';
 import { RiskDetail } from './RiskDetail';
 import { useModal } from '../../../lib/useModal';
+import { errorMessage } from '../../../lib/apiClient';
 
 interface ContractClause {
   clause_type: string;
@@ -56,12 +57,14 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
   const [results, setResults] = useState<IntelligenceResults | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
   const [networkError, setNetworkError] = useState(false);
   const { openModal, closeModal, isOpen } = useModal();
 
   const analyzeContract = async () => {
     setLoading(true);
     setError(null);
+    setWarnings([]);
     setNetworkError(false);
     
     // Start polling for workflow status
@@ -83,13 +86,16 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       });
       
       if (!response.ok) {
-        if (response.status === 404) {
-          throw new Error('Contract not found. Please verify the contract ID.');
-        }
-        if (response.status >= 500) {
-          throw new Error('Server error. Please try again later.');
-        }
-        throw new Error(`Analysis failed: ${response.statusText}`);
+        // The server's own explanation first. A spent model quota, a rejected
+        // API key and a missing contract all used to collapse into "Server
+        // error. Please try again later." — advice that is wrong for two of
+        // the three. The status-based text is only the fallback now.
+        const fallback = response.status === 404
+          ? 'Contract not found. Please verify the contract ID.'
+          : response.status >= 500
+            ? 'The analysis service could not complete this request.'
+            : `Analysis failed: ${response.statusText}`;
+        throw new Error(await errorMessage(response, fallback));
       }
       
       const data = await response.json();
@@ -99,6 +105,7 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       }
       
       setResults(data.results);
+      setWarnings(Array.isArray(data.warnings) ? data.warnings : []);
       
       // Report analysis completion with full results
       if (data.results?.risk_assessment) {
@@ -246,17 +253,26 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
        (!results.violations || results.violations.length === 0) && 
        !results.risk_assessment && renderEmptyResults()}
 
-      {/* Partial Results Warning */}
-      {results && hasPartialResults(results) && (
+      {/* Partial Results Warning. `warnings` is the server naming the stages
+          that degraded and why — "Redlines could not be drafted: OpenRouter is
+          rate-limiting this key" — which is the difference between a contract
+          with no findings and an analysis that never ran. */}
+      {results && (warnings.length > 0 || hasPartialResults(results)) && (
         <Card className="border-yellow-200 bg-yellow-50">
           <CardContent className="pt-6">
             <div className="flex items-center gap-2 text-yellow-700">
               <AlertTriangle className="h-4 w-4" />
               <span className="font-medium">Partial Analysis Results</span>
             </div>
-            <p className="text-sm text-yellow-600 mt-1">
-              Some analysis components may have failed. Results shown are incomplete.
-            </p>
+            {warnings.length > 0 ? (
+              <ul className="text-sm text-yellow-700 mt-2 space-y-1 list-disc list-inside">
+                {warnings.map((warning, index) => <li key={index}>{warning}</li>)}
+              </ul>
+            ) : (
+              <p className="text-sm text-yellow-600 mt-1">
+                Some analysis components may have failed. Results shown are incomplete.
+              </p>
+            )}
           </CardContent>
         </Card>
       )}

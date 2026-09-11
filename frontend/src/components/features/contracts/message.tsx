@@ -19,6 +19,14 @@ export function ChatMessage({ message }: Props) {
                                 <summary>Tool call</summary>
                                 <code className="block p-1 bg-muted rounded-sm overflow-x-auto font-mono text-sm">{content}</code>
                             </details>
+                        case "error":
+                            // The backend sends this when a turn could not be
+                            // produced — a spent model quota, a rejected key,
+                            // a blocked prompt. It is the answer, so it is
+                            // shown in place rather than swallowed.
+                            return <p key={index} className="my-2 rounded-md border border-red-200 bg-red-50 p-2 text-sm text-red-700">
+                                {content as string}
+                            </p>
                         case "tool_message":
                             return <details key={index} className="my-3 cursor-pointer">
                                 <summary>Tool message</summary>
