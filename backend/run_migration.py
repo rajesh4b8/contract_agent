@@ -45,6 +45,7 @@ def main():
             from migrations.clause_schema_migration import run_migration as clause_migration
             from migrations.audit_error_schema_migration import run_migration as audit_migration
             from migrations.phase2_phase3_schema import run_migration as phase_migration
+            from migrations.redline_schema_migration import run_migration as redline_migration
 
             failures = []
             for name, migrate in [
@@ -52,6 +53,7 @@ def main():
                 ("clauses + clause types", clause_migration),
                 ("audit + error tracking", audit_migration),
                 ("phase 2/3 schema", phase_migration),
+                ("redline review schema", redline_migration),
             ]:
                 logger.info(f"Running migration: {name}")
                 try:

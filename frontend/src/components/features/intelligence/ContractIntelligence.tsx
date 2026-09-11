@@ -5,6 +5,7 @@ import { Badge } from '../../shared/ui/badge';
 import { Clock, Brain, XCircle, FileText, AlertTriangle, Shield, Wifi, RefreshCw } from 'lucide-react';
 import { DetailModal } from './DetailModal';
 import { ClausesDetail } from './ClausesDetail';
+import { RedlineReview } from './RedlineReview';
 import { ViolationsDetail } from './ViolationsDetail';
 import { RiskDetail } from './RiskDetail';
 import { useModal } from '../../../lib/useModal';
@@ -264,7 +265,10 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       {results && results.risk_assessment && (
         <div className="space-y-4">
           {/* Overview Cards - Clickable */}
-          <div className="grid grid-cols-3 gap-4">
+          {/* This panel sits in a half-width column on the Intelligence page,
+              so four cards across leaves ~100px each and every label wraps.
+              Two by two here; four only where there is genuinely room. */}
+          <div className="grid grid-cols-2 2xl:grid-cols-4 gap-4">
             <Card 
               className="border-slate-200 cursor-pointer hover:shadow-md hover:border-blue-300 transition-all duration-200"
               onClick={() => openModal('risk')}
@@ -321,6 +325,36 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
                 </div>
                 <p className="text-xs text-slate-500 mt-1">Key clauses extracted</p>
                 <p className="text-xs text-green-600 mt-1 font-medium">Click for details →</p>
+              </CardContent>
+            </Card>
+
+            <Card
+              className="border-slate-200 cursor-pointer hover:shadow-md hover:border-purple-300 transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-purple-400"
+              role="button"
+              tabIndex={0}
+              aria-label="Open redline review"
+              onClick={() => openModal('redlines')}
+              onKeyDown={(e) => {
+                // A Card renders a div, so it has none of a button's keyboard
+                // behaviour until it is given some.
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault();
+                  openModal('redlines');
+                }
+              }}
+            >
+              <CardHeader className="pb-2">
+                <CardTitle className="text-sm text-slate-600 flex items-center gap-2">
+                  <FileText className="h-4 w-4" />
+                  Redlines
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="text-2xl font-bold text-slate-800">
+                  {results.redlines?.length || 0}
+                </div>
+                <p className="text-xs text-slate-500 mt-1">Suggested edits to review</p>
+                <p className="text-xs text-purple-600 mt-1 font-medium">Review edits →</p>
               </CardContent>
             </Card>
           </div>
@@ -381,6 +415,14 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
             <p className="text-slate-600">No policy violations detected in this contract.</p>
           </div>
         )}
+      </DetailModal>
+
+      <DetailModal
+        isOpen={isOpen('redlines')}
+        onClose={closeModal}
+        title="Redline Review"
+      >
+        <RedlineReview contractId={contractId} />
       </DetailModal>
 
       <DetailModal

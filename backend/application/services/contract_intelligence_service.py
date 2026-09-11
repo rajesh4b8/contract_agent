@@ -135,38 +135,36 @@ class ContractIntelligenceService:
             return
 
         try:
-            self.repository.graph.query(
-                """
-                MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
-                      -[:HAS_REDLINE]->(r:Redline)
-                WITH collect(r) AS old
-                FOREACH (redline IN old | DETACH DELETE redline)
-                """,
-                {"contract_id": contract_id, "tenant_id": tenant_id},
-            )
-
-            for index, redline in enumerate(redlines):
+            # A redline is identified by the breach it fixes, not by its
+            # position in the list. Positional ids ("_000") are not stable
+            # between runs: the same breach could be written under a different
+            # id, or two redlines could collide on one.
+            for redline in redlines:
+                redline_id = self._redline_id(contract_id, redline)
                 self.repository.graph.query(
                     """
                     MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
-                    CREATE (r:Redline {
-                        redline_id: $redline_id,
-                        rule_id: $rule_id,
-                        clause_index: $clause_index,
-                        clause_type: $clause_type,
-                        original_text: $original_text,
-                        suggested_text: $suggested_text,
-                        justification: $justification,
-                        priority: $priority,
-                        tenant_id: $tenant_id,
-                        created_at: datetime()
-                    })
-                    CREATE (c)-[:HAS_REDLINE]->(r)
+                    MERGE (r:Redline {redline_id: $redline_id, tenant_id: $tenant_id})
+                    // A reviewed redline is left exactly as the reviewer left it.
+                    // Re-running the model is not grounds for discarding their
+                    // judgement, nor for quietly changing the text they approved.
+                    ON CREATE SET r.status = 'PENDING'
+                    WITH c, r
+                    WHERE coalesce(r.status, 'PENDING') = 'PENDING'
+                    SET r.rule_id = $rule_id,
+                        r.clause_index = $clause_index,
+                        r.clause_type = $clause_type,
+                        r.original_text = $original_text,
+                        r.suggested_text = $suggested_text,
+                        r.justification = $justification,
+                        r.priority = $priority,
+                        r.updated_at = datetime()
+                    MERGE (c)-[:HAS_REDLINE]->(r)
                     """,
                     {
                         "contract_id": contract_id,
                         "tenant_id": tenant_id,
-                        "redline_id": f"{contract_id}_redline_{index:03d}",
+                        "redline_id": redline_id,
                         "rule_id": redline.rule_id,
                         "clause_index": redline.clause_index,
                         "clause_type": redline.clause_type,
@@ -176,6 +174,25 @@ class ContractIntelligenceService:
                         "priority": redline.priority,
                     },
                 )
+
+            # Drop undecided drafts for breaches this run no longer reports —
+            # the clause may have been re-extracted differently, and a stale
+            # draft would sit in the reviewer's queue forever.
+            self.repository.graph.query(
+                """
+                MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
+                      -[:HAS_REDLINE]->(r:Redline)
+                WHERE coalesce(r.status, 'PENDING') = 'PENDING'
+                  AND NOT r.redline_id IN $current_ids
+                WITH collect(r) AS stale
+                FOREACH (redline IN stale | DETACH DELETE redline)
+                """,
+                {
+                    "contract_id": contract_id,
+                    "tenant_id": tenant_id,
+                    "current_ids": [self._redline_id(contract_id, r) for r in redlines],
+                },
+            )
 
             logger.info(f"Stored {len(redlines)} redlines for contract {contract_id}")
         except Exception as e:
@@ -192,11 +209,164 @@ class ContractIntelligenceService:
                    r.clause_index AS clause_index,
                    r.clause_type AS clause_type, r.original_text AS original_text,
                    r.suggested_text AS suggested_text, r.justification AS justification,
-                   r.priority AS priority
+                   r.priority AS priority,
+                   coalesce(r.status, 'PENDING') AS status,
+                   r.final_text AS final_text,
+                   r.decision_note AS decision_note,
+                   r.decided_by AS decided_by,
+                   toString(r.decided_at) AS decided_at
             ORDER BY r.redline_id
             """,
             {"contract_id": contract_id, "tenant_id": tenant_id},
         )
+
+
+
+    @staticmethod
+    def _redline_id(contract_id: str, redline) -> str:
+        """Stable id: one breach of one rule on one clause has one redline.
+
+        Keyed on the clause *text*, not its position. `clause_index` is an offset
+        into whatever list the last extraction produced — re-extraction can
+        return the same clauses in a different order, or find one more, and every
+        index after that point shifts. The redline would then get a new id, be
+        recreated as PENDING, and the reviewer's decision would be orphaned on a
+        row nothing reads: exactly the guarantee this increment exists to provide,
+        broken by a reordering.
+
+        Hashing the normalised clause text keeps the id stable across reordering
+        and across whitespace differences from re-extraction.
+        """
+        import hashlib
+
+        normalised = " ".join((redline.original_text or "").split()).casefold()
+        digest = hashlib.sha1(normalised.encode("utf-8")).hexdigest()[:10]
+        return f"{contract_id}_{redline.rule_id}_{digest}"
+
+    def record_redline_decision(self, redline_id: str, tenant_id: str,
+                                status, edited_text=None, note: str = "",
+                                decided_by: str = "unknown") -> dict:
+        """Apply a reviewer's decision to one redline.
+
+        Returns the updated redline, including the previous status so the caller
+        can tell a first decision from a change of mind. Raises LookupError when
+        the redline does not exist *for this tenant* — a foreign id is reported
+        as missing rather than forbidden, so the endpoint does not confirm that
+        someone else's redline exists.
+        """
+        from backend.domain.redline_decision import build_decision
+
+        found = self.repository.graph.query(
+            """
+            MATCH (r:Redline {redline_id: $redline_id, tenant_id: $tenant_id})
+            RETURN r.original_text AS original_text, r.suggested_text AS suggested_text,
+                   coalesce(r.status, 'PENDING') AS status
+            """,
+            {"redline_id": redline_id, "tenant_id": tenant_id},
+        )
+        if not found:
+            raise LookupError(f"No redline {redline_id!r} for this tenant")
+
+        current = found[0]
+        # Validate before writing: an unapplicable decision must never reach the
+        # database, and the reviewer gets a specific reason instead of a 500.
+        decision = build_decision(
+            status,
+            original_text=current["original_text"] or "",
+            suggested_text=current["suggested_text"] or "",
+            edited_text=edited_text,
+            note=note,
+            decided_by=decided_by,
+        )
+
+        # Read the prior status and write the new one in a single statement. Two
+        # separate queries let concurrent reviewers both observe PENDING, so the
+        # second decision silently replaced the first while both responses
+        # claimed to be the first. It also left a window where re-analysis could
+        # delete the row between the read and the write.
+        updated = self.repository.graph.query(
+            """
+            MATCH (r:Redline {redline_id: $redline_id, tenant_id: $tenant_id})
+            WITH r, coalesce(r.status, 'PENDING') AS previous_status
+            SET r.status = $status,
+                r.final_text = $final_text,
+                r.decision_note = $note,
+                r.decided_by = $decided_by,
+                r.decided_at = datetime()
+            RETURN r.redline_id AS redline_id, r.rule_id AS rule_id,
+                   r.clause_index AS clause_index, r.status AS status,
+                   r.final_text AS final_text, r.decision_note AS decision_note,
+                   r.decided_by AS decided_by, toString(r.decided_at) AS decided_at,
+                   previous_status
+            """,
+            {
+                "redline_id": redline_id,
+                "tenant_id": tenant_id,
+                "status": decision.status.value,
+                "final_text": decision.final_text,
+                "note": decision.note,
+                "decided_by": decision.decided_by,
+            },
+        )
+        if not updated:
+            # The row went away between the two statements — a concurrent
+            # re-analysis dropping a pending draft, most likely.
+            raise LookupError(f"Redline {redline_id!r} no longer exists")
+
+        result = dict(updated[0])
+        logger.info(
+            f"Redline {redline_id}: {result['previous_status']} -> {decision.status.value} "
+            f"by {decision.decided_by}"
+        )
+        self._audit_decision(redline_id, tenant_id, result, decision)
+        return result
+
+    def _audit_decision(self, redline_id: str, tenant_id: str, result: dict, decision) -> None:
+        """Record the decision in the audit trail.
+
+        A ruling on contract language is exactly what an audit log is for, and
+        the API advertises one. Deciding twice overwrites the redline's own
+        fields, so without this the earlier ruling would leave no trace.
+        """
+        try:
+            from backend.infrastructure.audit_logger import AuditLogger, AuditEventType
+
+            AuditLogger().log_event(
+                event_type=AuditEventType.USER_INTERACTION,
+                resource_id=redline_id,
+                action=f"redline_{decision.status.value.lower()}",
+                status="success",
+                user_id=decision.decided_by,
+                tenant_id=tenant_id,
+                metadata={
+                    "rule_id": result.get("rule_id"),
+                    "previous_status": result.get("previous_status"),
+                    "new_status": decision.status.value,
+                    "note": decision.note,
+                },
+            )
+        except Exception as e:
+            # Never fail a recorded decision because the audit write failed.
+            logger.error(f"Could not audit decision on {redline_id}: {e}")
+
+    def redline_review_summary(self, contract_id: str, tenant_id: str) -> dict:
+        """Counts by status, for showing review progress."""
+        rows = self.repository.graph.query(
+            """
+            MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
+                  -[:HAS_REDLINE]->(r:Redline)
+            RETURN coalesce(r.status, 'PENDING') AS status, count(r) AS count
+            """,
+            {"contract_id": contract_id, "tenant_id": tenant_id},
+        )
+        counts = {row["status"]: row["count"] for row in rows}
+        return {
+            "total": sum(counts.values()),
+            "pending": counts.get("PENDING", 0),
+            "approved": counts.get("APPROVED", 0),
+            "modified": counts.get("MODIFIED", 0),
+            "rejected": counts.get("REJECTED", 0),
+        }
 
     def _get_llm_for_model(self, model: str):
         """Get a raw chat model for the requested id.

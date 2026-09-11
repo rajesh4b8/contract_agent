@@ -20,6 +20,10 @@ class Permission(str, Enum):
     VIEW_REPORTS = "VIEW_REPORTS"
     MANAGE_POLICIES = "MANAGE_POLICIES"
     VIEW_AUDIT = "VIEW_AUDIT"
+    # Ruling on a redline changes what goes into a contract. It is deliberately
+    # not covered by ANALYZE, which VIEWER holds — being able to run an analysis
+    # is not the same as being able to accept its output.
+    APPROVE_REDLINE = "APPROVE_REDLINE"
 
 class RBACManager:
     """
@@ -33,7 +37,8 @@ class RBACManager:
         UserRole.LEGAL_REVIEWER: {
             Permission.ANALYZE,
             Permission.UPLOAD,
-            Permission.VIEW_REPORTS
+            Permission.VIEW_REPORTS,
+            Permission.APPROVE_REDLINE
         },
         UserRole.AUDITOR: {
             Permission.VIEW_REPORTS,
@@ -111,14 +116,19 @@ async def get_current_tenant(
 ) -> str:
     """Resolve the tenant whose data this request may touch.
 
-    Tenant comes from the caller, never from a query parameter. Accepting it
-    from the query string means anyone holding a read permission can read any
-    tenant's data by editing the URL — role checks say *what* you may do, not
-    *whose* data you may do it to.
+    **This is not tenant isolation, and must not be described as such.** The
+    header is supplied by the caller and nothing validates it, so anyone who can
+    reach the API can name any tenant. Moving it off the query string removed the
+    most casual form of the problem — a URL you could edit and share — but the
+    guarantee is only as good as the header, and the header is not trusted.
 
-    As with `get_current_user_role`, this is mock auth: production requires the
-    header, development falls back to DEV_DEFAULT_TENANT so the UI (which sends
-    no header yet) keeps working. Replace with a claim from a validated token.
+    Real isolation needs the tenant to come from a claim in a validated token,
+    i.e. it is blocked on authentication existing at all. Until then treat every
+    tenant-scoped endpoint as open, and do not deploy this to real client data.
+
+    Development falls back to DEV_DEFAULT_TENANT so the UI works; production
+    requires the header, which at least makes the caller state an intent that
+    lands in the audit log.
     """
     if x_tenant_id:
         return x_tenant_id

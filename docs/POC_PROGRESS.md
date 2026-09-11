@@ -1,7 +1,7 @@
 # POC Progress Tracker
 
-**Resume point: Increment 3 — `awaiting your test`.**
-Run `make test`, analyse a contract, then `GET /api/intelligence/contracts/{id}/redlines`.
+**Resume point: Increment 4 — `awaiting your test`.**
+Run `make test`, then open the Redlines card on the Intelligence page and approve / edit / reject.
 
 This file is the live state of the POC work. It is committed, so any session on any machine can
 pick up by reading it first. The detailed reasoning behind the plan lives in the session that
@@ -24,8 +24,8 @@ produced it; this file is what you and I actually work from.
 | 0 | Make the repo testable | accepted |
 | 1 | Real clause extraction against a schema | accepted |
 | 2 | Ground policy checks in one real playbook | accepted |
-| 3 | Redlines that are real and persisted | **awaiting your test** |
-| 4 | Human-in-the-loop approve / edit / reject | not started |
+| 3 | Redlines that are real and persisted | accepted |
+| 4 | Human-in-the-loop approve / edit / reject | **awaiting your test** |
 | 5 | One measurable outcome | not started |
 
 ---
@@ -242,6 +242,44 @@ clauses identical: False        (it was True before this increment)
 ```
 
 All 9 evidence spans were checked back against the contract text stored in Neo4j: **9/9 verbatim.**
+
+### Making the loop fast enough to iterate on
+
+Analysis is slow because it is three sequential model calls, and nothing else. Measured on the
+32,885-character Shuttle contract with `free-large`:
+
+| step | time |
+|---|---|
+| extract clauses | 41.6s |
+| check policies | 60.1s |
+| generate redlines | 16.4s |
+| risk, CUAD mitigation, validation | 0–8ms |
+
+Two levers, and they compound:
+
+**A small fixture.** `sample-contracts/TinyContract-Fast.txt` (and `.pdf`) is a 1,058-character
+contract that deliberately breaches **all seven playbook rules** — Net 90 payment, a fixed $50k
+liability cap, indemnity for the other party's own negligence, immediate termination with no
+payment for work in progress, and assignment of pre-existing IP. It is both faster *and* better
+coverage than the real samples, which trip one rule between them.
+
+**A faster model.** On that fixture, with identical output (5 clauses, 6 violations):
+
+| model | time |
+|---|---|
+| `gemini-flash-lite` | **11s** |
+| `free-large` (OpenRouter) | 64s |
+| `free-large` on the 32.9k contract | 118s |
+
+So `TinyContract-Fast.pdf` + `?model=gemini-flash-lite` is roughly **11× faster** than the
+combination used up to now. Mind the 20-requests/day Gemini cap: `gemini-flash` was exhausted again
+during this measurement and returned zero clauses after its retries.
+
+Regenerate the PDF after editing the text with:
+
+```bash
+python scripts/make_sample_pdf.py sample-contracts/TinyContract-Fast.txt
+```
 
 ### Model options, and the quota trap
 
@@ -498,19 +536,107 @@ Four findings, all valid:
 
 ### Your feedback
 
-_(write here — anything that should change before Increment 4)_
+_Merged in PR #3 on 2026-09-10. Accepted._
 
 ---
 
 ## Increment 4 — Human-in-the-loop approve / edit / reject
 
-POC scope item #5 in the design doc, entirely absent from the UI. Add a status field, three
-endpoints, and controls in `frontend/src/components/features/intelligence/ClausesDetail.tsx`
-(read-only today). Replace the free-form `legal_decision: str` (`feedback_api.py:20`) with an enum.
+**Goal:** the design doc makes human approval a POC deliverable. Until now a decision could be
+POSTed as a free-form string to a detached `(:LegalDecision)` node that gated nothing — the redline
+itself carried no state, and the UI had no way to act on one.
+
+### Failure cases were designed first
+
+This is the first increment where a wrong failure mode loses *human* work rather than machine
+output, so these were settled before the happy path:
+
+| case | behaviour |
+|---|---|
+| decide on a redline that does not exist | 404, never a silent no-op |
+| decide on another tenant's redline | 404 — a 403 would confirm it exists |
+| `MODIFIED` with no replacement text | 422; there is nothing to apply |
+| `APPROVED`/`REJECTED` *with* replacement text | 422; guessing either way discards what they typed |
+| decide twice | allowed, last wins, and the response names the prior status |
+| re-analysis after a decision | the decision is preserved |
+| a viewer attempting to approve | 403 |
+
+### What changed
+
+**Decisions live on the redline.** `status` is `PENDING` → `APPROVED` / `MODIFIED` / `REJECTED`,
+with `final_text`, `decision_note`, `decided_by` and `decided_at`. `final_text` is resolved once at
+decision time — the suggestion for APPROVED, the reviewer's wording for MODIFIED, the original
+clause for REJECTED — so nothing downstream has to reconstruct "what did they actually agree to"
+from a status plus three text fields.
+
+**A dedicated permission.** `APPROVE_REDLINE`, held by ADMIN and LEGAL_REVIEWER. Deliberately not
+`ANALYZE`: VIEWER holds that, and being able to run an analysis is not the same as being able to
+accept its output.
+
+**Re-analysis no longer discards judgement.** This was flagged as a risk when Increment 3 landed.
+Reviewed redlines are left exactly as the reviewer left them; only undecided drafts are refreshed,
+and drafts for breaches no longer reported are dropped so the queue does not accumulate stale items.
+
+**Redline ids are identity-based.** Live testing showed positional ids (`_redline_000`) collide
+across runs — two redlines ended up sharing one. An id is now
+`{contract_id}_{rule_id}_c{clause_index}`: one breach of one rule on one clause has one redline,
+and persistence MERGEs on it rather than deleting and recreating.
+
+**UI.** A Redlines card on the Intelligence page opens a review panel showing current vs suggested
+text, the rule, priority and status, with Approve / Edit / Reject and an optional reason. Rejected
+API messages are shown verbatim, since they usually tell the reviewer what to do differently.
+
+### How to test
+
+```bash
+make test    # 204 passed, 3 skipped
+```
+
+With the stack up: analyse a contract, open the **Redlines** card, and try each action. Then
+re-analyse and confirm your decision is still there.
+
+**Verified on 2026-09-10** (default route throughout):
+
+- VIEWER approving → 403; LEGAL_REVIEWER → 200, `PENDING -> APPROVED`
+- `MODIFIED` with no text, `APPROVED` with text, and `PENDING` → 422 with a specific reason
+- unknown redline → 404; another tenant's redline → 404
+- a `MODIFIED` redline survived **two** re-analyses with its text and note intact, while a newly
+  found breach was added alongside it as `PENDING`
+
+### Addressed in review (Copilot, PR #4)
+
+Nine findings. Eight fixed, one honestly downgraded:
+
+- **Redline identity was positional.** `clause_index` is an offset into whichever list the last
+  extraction produced, so a reordering would orphan a reviewer's decision — breaking the guarantee
+  this increment exists to give. Ids are now keyed on a hash of the normalised clause text.
+- **The decision was a read-then-write race**, and an empty result crashed with `IndexError` → 500.
+  It is now one statement that reports the status it replaced, and a vanished row raises a 404.
+- **No uniqueness constraint** backed the MERGE. Added `redline_schema_migration` with a
+  `redline_id` uniqueness constraint and a de-duplication pass, wired into `run_migration upgrade`.
+- **Decisions are now audited.** The field description promised an audit trail that did not exist.
+- **The note box was shared across every row** — typing a reason for one populated all of them, and
+  deciding on another row submitted the wrong reason. Keyed per redline.
+- **A failed load rendered as "No redlines"**, telling the reviewer to re-run analysis when the real
+  answer was a 401 or a 500. The error is shown first, with a retry.
+- **The panel sent no identity headers**, so it could not work in production at all. Added
+  `frontend/src/lib/apiClient.ts` as the single place the frontend states who it is.
+- **The new card was not keyboard-operable.** `role`, `tabIndex`, Enter/Space and a focus ring.
+
+**Not fixed — the tenant header is not trusted.** `get_current_tenant` reads `X-Tenant-ID` and
+nothing validates it, so any caller can name any tenant. Moving it off the query string removed the
+casual form of the problem but not the problem. There is no honest fix without authentication, so
+the claim has been downgraded everywhere rather than dressed up: this is **not** tenant isolation
+and the system should not see real client data until auth exists.
+
+**A residual limitation worth knowing.** Content-hashed ids are stable under reordering, but the
+extractor is non-deterministic — a re-run can produce a slightly different span for the same clause
+and therefore a new redline alongside the decided one. Stale *pending* drafts are cleaned up on the
+next run; decided ones are kept deliberately. Quantifying that variance is Increment 5's job.
 
 ### Your feedback
 
-_(not started)_
+_(write here — anything that should change before Increment 5)_
 
 ---
 
