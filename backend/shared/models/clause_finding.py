@@ -88,3 +88,22 @@ class ClauseExtraction(BaseModel):
 
 def _normalise(text: str) -> str:
     return " ".join(text.split()).casefold()
+
+
+class PolicyBreach(BaseModel):
+    """One clause breaching one playbook rule, as reported by the model.
+
+    Deliberately narrow: the model says *which* rule and *which* clause and why.
+    Severity and the suggested redline come from the playbook rule itself, so
+    they cannot drift between runs.
+    """
+
+    rule_id: str = Field(description="Id of the breached rule, exactly as given")
+    clause_index: int = Field(description="Index of the breaching clause in the supplied list")
+    issue: str = Field(description="What this clause does that the rule forbids")
+
+
+class PolicyAssessment(BaseModel):
+    """Wrapper so the parser has a single root object to target."""
+
+    violations: List[PolicyBreach] = Field(default_factory=list)

@@ -3,7 +3,7 @@ from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 from typing import Type, Dict, Any, List
 from backend.domain.entities import ContractClause, PolicyViolation, RiskAssessment, RedlineRecommendation
-from backend.shared.models.clause_finding import ClauseExtraction
+from backend.shared.models.clause_finding import ClauseExtraction, PolicyAssessment
 from backend.shared.utils.message_content import content_to_text, strip_code_fence
 import json
 import logging
@@ -140,98 +140,107 @@ CONTRACT:
 class PolicyCheckerInput(BaseModel):
     clauses_json: str = Field(description="JSON string of extracted clauses")
 
+
 class PolicyCheckerTool(BaseTool):
+    """Check clauses against the playbook rules loaded from the graph.
+
+    This previously matched hardcoded keywords against an in-code dict, so a
+    finding could say "payment terms exceed company policy" but could not name
+    the rule, and changing policy meant changing Python. Rules now arrive as
+    data and every violation carries the id of the rule that produced it.
+    """
+
     name: str = "policy_checker"
-    description: str = "Check clauses against company policies"
+    description: str = "Check clauses against the tenant's policy playbook"
     args_schema: Type[BaseModel] = PolicyCheckerInput
-    
+    llm: Any = None
+    rules: List[Any] = Field(default_factory=list)
+
     def _run(self, clauses_json: str) -> str:
-        """Check clauses against policies"""
-        try:
-            clauses = json.loads(clauses_json)
-            violations = []
-            
-            for clause in clauses:
-                clause_type = clause.get("clause_type", "").lower()
-                content = clause.get("content", "").lower()
-                
-                # Check payment terms against company policy
-                if "payment" in clause_type:
-                    if any(term in content for term in ["60 days", "90 days", "net 60", "net 90"]):
-                        violations.append({
-                            "clause_type": clause["clause_type"],
-                            "issue": "Payment terms exceed company policy (Net 30 preferred, Net 45 max with approval)",
-                            "severity": "CRITICAL",
-                            "suggested_fix": COMPANY_POLICIES["payment_terms"]["redline_text"],
-                            "clause_content": clause["content"]
-                        })
-                    elif any(term in content for term in ["45 days", "net 45"]):
-                        violations.append({
-                            "clause_type": clause["clause_type"],
-                            "issue": "Payment terms require Delivery Director approval (Net 45)",
-                            "severity": "MEDIUM",
-                            "suggested_fix": "Obtain Delivery Director approval or " + COMPANY_POLICIES["payment_terms"]["redline_text"],
-                            "clause_content": clause["content"]
-                        })
-                
-                # Check liability caps against company policy
-                if "liability" in clause_type:
-                    if any(term in content for term in ["unlimited", "indirect", "consequential", "special damages"]):
-                        violations.append({
-                            "clause_type": clause["clause_type"],
-                            "issue": "Liability policy violation - unlimited or indirect/consequential damages exposure",
-                            "severity": "CRITICAL",
-                            "suggested_fix": COMPANY_POLICIES["liability_cap"]["redline_text"],
-                            "clause_content": clause["content"]
-                        })
-                    elif any(amount in content for amount in ["50,000", "25,000", "$50k", "$25k"]):
-                        violations.append({
-                            "clause_type": clause["clause_type"],
-                            "issue": "Liability cap not linked to SOW fees and below minimum threshold",
-                            "severity": "HIGH",
-                            "suggested_fix": COMPANY_POLICIES["liability_cap"]["redline_text"],
-                            "clause_content": clause["content"]
-                        })
-                
-                # Check indemnification against company policy
-                if "indemnif" in clause_type.lower() or "indemnit" in content:
-                    if any(term in content for term in ["broad", "client negligence", "misuse", "open-ended"]):
-                        violations.append({
-                            "clause_type": "Indemnification",
-                            "issue": "Broad indemnification or client negligence coverage violates company policy",
-                            "severity": "CRITICAL",
-                            "suggested_fix": COMPANY_POLICIES["indemnification"]["redline_text"],
-                            "clause_content": clause["content"]
-                        })
-                
-                # Check termination against company policy
-                if "terminat" in clause_type.lower():
-                    if any(term in content for term in ["immediate", "no notice", "0 days"]):
-                        violations.append({
-                            "clause_type": clause["clause_type"],
-                            "issue": "Immediate termination without notice violates company policy",
-                            "severity": "HIGH",
-                            "suggested_fix": COMPANY_POLICIES["termination"]["redline_text"],
-                            "clause_content": clause["content"]
-                        })
-                
-                # Check IP ownership against company policy
-                if "ip" in clause_type.lower() or "intellectual property" in clause_type.lower():
-                    if any(term in content for term in ["client owns all", "assignment of rights", "company ip to client"]):
-                        violations.append({
-                            "clause_type": clause["clause_type"],
-                            "issue": "IP assignment without carve-outs for company pre-existing IP",
-                            "severity": "CRITICAL",
-                            "suggested_fix": COMPANY_POLICIES["ip_ownership"]["redline_text"],
-                            "clause_content": clause["content"]
-                        })
-            
-            logger.info(f"Found {len(violations)} policy violations")
-            return json.dumps(violations)
-            
-        except Exception as e:
-            logger.error(f"Policy checking failed: {e}")
+        clauses = json.loads(clauses_json)
+        # Config checks come first: an unseeded tenant must fail even when the
+        # contract yielded no clauses, or "nothing to check" is indistinguishable
+        # from "nothing configured to check against".
+        if not self.rules:
+            # No playbook seeded. Reporting zero violations would read as "this
+            # contract is compliant", which is a different claim entirely.
+            raise ValueError(
+                "No policy rules available for this tenant. Seed a playbook with "
+                "`make seed-playbook` before running compliance checks."
+            )
+        if self.llm is None:
+            raise ValueError("PolicyCheckerTool requires an llm to evaluate clauses")
+        if not clauses:
             return json.dumps([])
+
+        by_id = {rule.id: rule for rule in self.rules}
+        parser = PydanticOutputParser(pydantic_object=PolicyAssessment)
+
+        rules_block = "\n".join(
+            f"- {r.id} [{r.severity}] ({r.section_reference}): {r.rule_text}"
+            for r in self.rules
+        )
+        clauses_block = "\n".join(
+            f"- clause {i} [{c.get('clause_type', 'Unknown')}]: "
+            f"{' '.join((c.get('evidence_span') or c.get('content') or '').split())}"
+            for i, c in enumerate(clauses)
+        )
+
+        prompt = f"""You are a contract compliance reviewer. Decide which clauses
+breach which playbook rules.
+
+PLAYBOOK RULES:
+{rules_block}
+
+CONTRACT CLAUSES:
+{clauses_block}
+
+Report one entry per genuine breach. Use `rule_id` exactly as written above and
+`clause_index` for the clause number. A clause may breach more than one rule, and
+most clauses breach none — returning an empty list is the correct answer for a
+compliant contract. Do not report a breach merely because a topic is mentioned.
+In `issue`, say specifically what the clause does that the rule forbids.
+
+{parser.get_format_instructions()}"""
+
+        response = self.llm.invoke(prompt)
+        assessment = parser.parse(strip_code_fence(content_to_text(response.content)))
+
+        violations, discarded = [], []
+        for finding in assessment.violations:
+            rule = by_id.get(finding.rule_id)
+            if rule is None or not 0 <= finding.clause_index < len(clauses):
+                discarded.append(finding.rule_id)
+                continue
+            clause = clauses[finding.clause_index]
+            violations.append({
+                "rule_id": rule.id,
+                # Kept so clauses are stamped by index rather than by matching
+                # text: two clauses can share an evidence span, and a text join
+                # would cite a breach on both.
+                "clause_index": finding.clause_index,
+                "clause_type": clause.get("clause_type", "Unknown"),
+                "issue": finding.issue,
+                # Severity comes from the playbook, not the model: it drives the
+                # risk score and must not drift run to run.
+                "severity": rule.severity,
+                "suggested_fix": rule.redline_text,
+                "clause_content": clause.get("evidence_span") or clause.get("content", ""),
+                "section_reference": rule.section_reference,
+            })
+
+        if discarded:
+            logger.warning(
+                f"Discarded {len(discarded)} violation(s) citing unknown rules or "
+                f"clauses: {discarded}"
+            )
+
+        logger.info(
+            f"Checked {len(clauses)} clauses against {len(self.rules)} rules: "
+            f"{len(violations)} violations"
+        )
+        return json.dumps(violations)
+
 
 # Risk Assessment Agent Tools
 class RiskCalculatorInput(BaseModel):

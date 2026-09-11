@@ -19,16 +19,26 @@ class ClauseSchemaMigration:
     def __init__(self):
         self.repository = Neo4jContractRepository()
     
-    def migrate(self):
-        """Apply clause schema migration"""
+    def migrate(self, include_sample_data: bool = False):
+        """Apply clause schema migration.
+
+        Sample data is opt-in. `_create_sample_clauses` uses CREATE, so running
+        it against a database that already has sections injects duplicate
+        fabricated clauses into real contracts on every upgrade.
+        """
         try:
-            self._create_clause_indexes()
-            self._create_cuad_type_nodes()
-            self._create_sample_clauses()
+            self.migrate_schema_only()
+            if include_sample_data:
+                self._create_sample_clauses()
             logger.info("Clause schema migration completed")
         except Exception as e:
             logger.error(f"Migration failed: {e}")
             raise
+
+    def migrate_schema_only(self):
+        """Indexes and (:ClauseType) nodes — no data. Safe to re-run."""
+        self._create_clause_indexes()
+        self._create_cuad_type_nodes()
     
     def _create_clause_indexes(self):
         """Create indexes for Clause nodes"""
@@ -191,10 +201,10 @@ class ClauseSchemaMigration:
             print(f"❌ Migration verification failed: {e}")
             return False
 
-def run_migration():
-    """Run the clause schema migration"""
+def run_migration(include_sample_data: bool = False):
+    """Run the clause schema migration. Sample data is opt-in."""
     migration = ClauseSchemaMigration()
-    migration.migrate()
+    migration.migrate(include_sample_data=include_sample_data)
     
     if migration.verify_migration():
         print("✅ Clause schema migration completed successfully")

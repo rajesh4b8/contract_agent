@@ -65,11 +65,18 @@ class ContractClause:
 
 @dataclass
 class PolicyViolation:
+    """A clause breaching a playbook rule.
+
+    ``rule_id`` is the citation: it names the playbook entry that produced this
+    finding, which is what makes the result auditable rather than an opinion.
+    """
     clause_type: str
     issue: str
-    severity: str  # LOW, MEDIUM, HIGH, CRITICAL
+    severity: str  # LOW, MEDIUM, HIGH, CRITICAL — taken from the rule, not the model
     suggested_fix: str
     clause_content: str = ""
+    rule_id: Optional[str] = None     # playbook rule this cites
+    section_reference: str = ""       # where in the playbook it sits
 
 @dataclass
 class RiskAssessment:
