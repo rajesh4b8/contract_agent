@@ -1,0 +1,47 @@
+# Ground truth for the evaluation set.
+#
+# Each contract lists the playbook rules a correct review should raise. These
+# three are synthetic on purpose: the breaches are written into the text, so the
+# right answer is a matter of construction rather than opinion. That is what
+# makes the score meaningful — a labelled real contract would need a lawyer, not
+# an engineer, and guessing at one would produce a number that looks objective
+# and is not.
+#
+# `clean` is the one that matters most. Anything can score well on a document
+# stuffed with breaches; only a compliant contract shows whether the system
+# invents violations that are not there.
+#
+# Rule ids refer to data/playbooks/default_playbook.yaml.
+
+contracts:
+  - file: breaching.pdf
+    description: >-
+      Every clause drafted to breach. Net 90 payment, a fixed $50k liability cap
+      unconnected to fees, indemnity covering the other party's own negligence,
+      immediate termination with no payment for work in progress, and assignment
+      of the provider's pre-existing IP.
+    expected_rules: [PAY-001, LIA-001, LIA-002, IND-001, TRM-001, IPR-001]
+    notes: >-
+      CON-001 is deliberately absent from the expectation. There is no
+      confidentiality clause in the document, and the checker evaluates clauses
+      that exist rather than detecting missing ones — so flagging it would be a
+      false positive today. Detecting absent-but-required clauses is a separate
+      capability, and this label records that it is not claimed.
+
+  - file: partial.pdf
+    description: >-
+      Compliant except for two clauses: Net 60 payment, and immediate
+      termination without notice or payment for work in progress.
+    expected_rules: [PAY-001, TRM-001]
+    notes: >-
+      The discriminating case. Liability, indemnity, IP and confidentiality are
+      all drafted to the playbook, so anything raised against them is a false
+      positive.
+
+  - file: clean.pdf
+    description: >-
+      Drafted to comply with every rule in the playbook.
+    expected_rules: []
+    notes: >-
+      A correct review raises nothing. This is the only fixture that can fail by
+      the system being too eager, which is the failure mode a demo never shows.

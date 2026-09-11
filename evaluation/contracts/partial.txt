@@ -1,0 +1,30 @@
+SERVICES AGREEMENT
+
+This Agreement is made between Fabrikam Inc ("Customer") and
+Contoso Services LLC ("Provider").
+
+1. SERVICES. Provider shall supply the managed services described in the
+applicable Statement of Work.
+
+2. FEES AND PAYMENT. Customer shall pay each undisputed invoice within
+sixty (60) days of invoice receipt.
+
+3. LIMITATION OF LIABILITY. Each party's aggregate liability under this
+Agreement shall not exceed the total fees paid or payable under the
+applicable Statement of Work.
+
+4. INDEMNIFICATION. Each party shall indemnify the other solely for
+third-party claims arising from its gross negligence, willful misconduct, or
+infringement of intellectual property under this Agreement.
+
+5. TERMINATION. Provider may terminate this Agreement immediately and
+without notice, and no payment shall be due for work in progress.
+
+6. INTELLECTUAL PROPERTY. Customer owns the deliverables created
+specifically for this engagement. Provider retains ownership of its
+pre-existing intellectual property, reusable tools and methodologies.
+
+7. CONFIDENTIALITY. Each party shall protect the other party's proprietary
+information using no less than reasonable care.
+
+8. GOVERNING LAW. This Agreement is governed by the laws of England and Wales.
