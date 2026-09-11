@@ -3,9 +3,13 @@ PY := backend/.venv/bin/python
 # container. Host-run scripts reach the published port instead. Override to
 # point at a remote instance: `make seed-playbook HOST_NEO4J_URI=neo4j+s://...`
 HOST_NEO4J_URI ?= bolt://localhost:7687
+# Evaluation fixtures are uploaded here rather than a real tenant: there is no
+# delete endpoint, so isolation is what keeps repeated runs from silting up
+# a tenant's reports and search with synthetic contracts.
+EVAL_TENANT ?= evaluation-tenant
 
 .DEFAULT_GOAL := help
-.PHONY: help install test test-integration test-all run stop logs smoke seed-playbook check-playbook eval eval-stability
+.PHONY: help install test test-integration test-all run stop logs smoke seed-playbook seed-eval-playbook check-playbook eval eval-stability
 
 help:  ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -26,10 +30,13 @@ test-all:  ## Everything, offline and integration
 seed-playbook:  ## Load data/playbooks/default_playbook.yaml into Neo4j (needs the stack up)
 	NEO4J_URI=$(HOST_NEO4J_URI) $(PY) scripts/seed_playbook.py
 
-eval:  ## Score the pipeline against evaluation/ (needs the stack up + playbook seeded)
+seed-eval-playbook:  ## Seed the playbook into the evaluation tenant (idempotent)
+	NEO4J_URI=$(HOST_NEO4J_URI) $(PY) scripts/seed_playbook.py --tenant $(EVAL_TENANT)
+
+eval: seed-eval-playbook  ## Score the pipeline against evaluation/ (needs the stack up)
 	$(PY) scripts/evaluate_pipeline.py $(ARGS)
 
-eval-stability:  ## Same, three passes per contract, to see how much the answer moves
+eval-stability: seed-eval-playbook  ## Same, three passes per contract, to see how much the answer moves
 	$(PY) scripts/evaluate_pipeline.py --runs 3 $(ARGS)
 
 check-playbook:  ## Validate the playbook file without touching the database

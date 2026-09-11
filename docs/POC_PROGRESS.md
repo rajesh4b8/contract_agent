@@ -707,13 +707,36 @@ have different reliability, which nothing before this increment could have told 
   hallucinated (2/5 instead of 5/5). A measurement bug that looked exactly like a product bug —
   which is its own lesson about trusting a new metric before checking it.
 
+### Review round on PR #5
+
+Copilot raised five findings on the harness, all of them real, all now fixed:
+
+- **A clause with no evidence scored as grounded.** The empty string is a substring of every
+  contract, so `"" in source` passed — the one metric meant to catch a hole in the extractor's
+  grounding guard was blind to the worst case of it. Blank spans now count as ungrounded and are
+  reported separately.
+- **Eval fixtures were uploaded into `default-tenant` and never removed.** There is no delete
+  endpoint to clean up with, so isolation is the fix: fixtures go to `evaluation-tenant`, which
+  `make eval` seeds the playbook into first. `default-tenant` had accumulated 40 contracts from
+  earlier runs before this.
+- **Failed runs were dropped from the stability check.** Three requested passes of which two
+  errored would summarise as one run and print no stability line at all — a flaky provider made to
+  look stable. Failures are now counted, and the report says when a check was incomplete.
+- **Per-run redline coverage was thrown away.** Only the last run survived, so the harness could
+  not reproduce its own headline finding — the same violations detected every time, language
+  drafted for them only sometimes. Drafting variance is now tracked and reported apart from
+  detection stability.
+- **`make eval` exited 0 when nothing was scored.** The exit check looked only at false positives,
+  so an evaluation that ran zero contracts read as an evaluation that passed — loudest exactly
+  when the provider is down. Any unscored contract now fails the command.
+
 ### How to test
 
 ```bash
-make test            # 228 passed, 3 skipped — scorer arithmetic, offline
+make test            # 237 passed, 3 skipped — scorer arithmetic, offline
 ```
 
-With the stack up and `make seed-playbook` done:
+With the stack up (`make eval` seeds the evaluation tenant itself):
 
 ```bash
 make eval ARGS="--model gemini-flash-lite"      # one pass, ~2 minutes

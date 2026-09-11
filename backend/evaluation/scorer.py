@@ -97,16 +97,28 @@ def groundedness(clauses: Sequence[Dict[str, Any]], contract_text: str) -> Dict[
 
     The extractor already drops ungrounded spans, so a number below 1.0 here
     means that guard has a hole — which is worth knowing rather than assuming.
+
+    A clause that carries no evidence at all counts as ungrounded, not grounded.
+    The containment test alone would pass it — the empty string is a substring of
+    every contract — so a clause the extractor returned with a blank span would
+    score as perfectly evidenced by the one metric meant to catch that.
     """
     if not clauses:
-        return {"grounded": 0, "total": 0, "rate": 1.0}
+        return {"grounded": 0, "total": 0, "blank": 0, "rate": 1.0}
 
     source = _normalise(contract_text)
-    grounded = sum(
-        1 for clause in clauses
-        if _normalise(clause.get("evidence_span") or clause.get("content") or "") in source
-    )
-    return {"grounded": grounded, "total": len(clauses), "rate": grounded / len(clauses)}
+    evidence = [
+        _normalise(clause.get("evidence_span") or clause.get("content") or "")
+        for clause in clauses
+    ]
+    blank = sum(1 for span in evidence if not span)
+    grounded = sum(1 for span in evidence if span and span in source)
+    return {
+        "grounded": grounded,
+        "total": len(clauses),
+        "blank": blank,
+        "rate": grounded / len(clauses),
+    }
 
 
 def redline_coverage(violations: Sequence[Dict], redlines: Sequence[Dict]) -> Dict[str, float]:
@@ -135,13 +147,32 @@ class StabilityReport:
     """
 
     runs: List[Set[str]] = field(default_factory=list)
+    requested: int = 0
+    failed: int = 0
 
     def add(self, found: Iterable[str]) -> None:
         self.runs.append(set(found))
 
+    def add_failure(self) -> None:
+        """Record a run that never produced an answer.
+
+        A dropped failure is worse than a reported one: three requested passes
+        of which two error out would otherwise summarise as a single run and be
+        read as agreement. Stability measured over the runs that happened to
+        succeed is exactly the number a flaky provider makes look good.
+        """
+        self.failed += 1
+
     def summarise(self) -> Dict[str, Any]:
+        base = {
+            "runs": len(self.runs),
+            "requested": self.requested or len(self.runs) + self.failed,
+            "failed": self.failed,
+        }
+        base["complete"] = base["runs"] == base["requested"]
+
         if len(self.runs) < 2:
-            return {"runs": len(self.runs), "identical": None, "jaccard": None}
+            return {**base, "identical": None, "jaccard": None}
 
         always = set.intersection(*self.runs)
         ever = set.union(*self.runs)
@@ -150,13 +181,34 @@ class StabilityReport:
             for i, a in enumerate(self.runs) for b in self.runs[i + 1:]
         ]
         return {
-            "runs": len(self.runs),
+            **base,
             "identical": all(r == self.runs[0] for r in self.runs),
             "jaccard": mean(pairs) if pairs else 1.0,
             "stable_rules": sorted(always),
             "flapping_rules": sorted(ever - always),
-            "count_spread": pstdev([len(r) for r in self.runs]) if len(self.runs) > 1 else 0.0,
+            "count_spread": pstdev([len(r) for r in self.runs]),
         }
+
+
+def coverage_variability(coverages: Sequence[Dict[str, float]]) -> Dict[str, Any]:
+    """How much redline drafting moved across runs of the same contract.
+
+    Kept separate from detection stability because the two are separate
+    reliabilities: a run can find the same violations every time and still fail
+    to draft language for one of them. Reporting only the last run's coverage
+    hides exactly that, which is the variance worth knowing about.
+    """
+    rates = [c["rate"] for c in coverages]
+    if not rates:
+        return {"runs": 0, "identical": None, "rates": [], "min": None, "max": None}
+    return {
+        "runs": len(rates),
+        "identical": all(r == rates[0] for r in rates),
+        "rates": rates,
+        "min": min(rates),
+        "max": max(rates),
+        "drafted": [f"{c['covered']}/{c['total']}" for c in coverages],
+    }
 
 
 def _normalise(text: str) -> str:

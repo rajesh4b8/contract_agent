@@ -3,6 +3,7 @@ import pytest
 
 from backend.evaluation.scorer import (
     StabilityReport,
+    coverage_variability,
     groundedness,
     micro_average,
     redline_coverage,
@@ -127,6 +128,32 @@ class TestGroundedness:
     def test_no_clauses_is_not_scored_as_a_failure(self):
         assert groundedness([], CONTRACT)["rate"] == 1.0
 
+    def test_a_clause_with_no_evidence_is_not_grounded(self):
+        """The empty string is a substring of every contract.
+
+        Without an explicit guard a clause the extractor returned with a blank
+        span scores as perfectly evidenced by the one metric that exists to
+        catch exactly that.
+        """
+        result = groundedness([{"evidence_span": ""}], CONTRACT)
+
+        assert result["rate"] == 0.0
+        assert result["blank"] == 1
+
+    def test_a_missing_evidence_field_is_not_grounded_either(self):
+        result = groundedness([{"evidence_span": None, "content": None}, {}], CONTRACT)
+
+        assert result["rate"] == 0.0
+        assert result["blank"] == 2
+
+    def test_blank_clauses_drag_down_a_real_one(self):
+        result = groundedness(
+            [{"evidence_span": "ninety (90) days"}, {"evidence_span": "   "}], CONTRACT
+        )
+
+        assert result["grounded"] == 1
+        assert result["rate"] == 0.5
+
 
 class TestRedlineCoverage:
     def test_every_violation_redlined(self):
@@ -181,3 +208,72 @@ class TestStability:
         report.add({"PAY-001"})
 
         assert report.summarise()["identical"] is None
+
+    def test_a_failed_run_is_reported_not_dropped(self):
+        """Three requested passes of which two error out are not agreement.
+
+        Silently scoring the survivors turns a flaky provider into a stable
+        result — the reading that makes the metric worthless.
+        """
+        report = StabilityReport(requested=3)
+        report.add({"PAY-001"})
+        report.add_failure()
+        report.add_failure()
+
+        summary = report.summarise()
+
+        assert summary["requested"] == 3
+        assert summary["runs"] == 1
+        assert summary["failed"] == 2
+        assert summary["complete"] is False
+
+    def test_runs_that_all_succeed_are_marked_complete(self):
+        report = StabilityReport(requested=2)
+        report.add({"PAY-001"})
+        report.add({"PAY-001"})
+
+        summary = report.summarise()
+
+        assert summary["complete"] is True
+        assert summary["failed"] == 0
+
+    def test_failures_are_visible_even_when_every_run_failed(self):
+        report = StabilityReport(requested=2)
+        report.add_failure()
+        report.add_failure()
+
+        summary = report.summarise()
+
+        assert summary["runs"] == 0
+        assert summary["complete"] is False
+
+
+class TestCoverageVariability:
+    def test_identical_drafting_across_runs(self):
+        runs = [{"covered": 2, "total": 2, "rate": 1.0}] * 3
+
+        summary = coverage_variability(runs)
+
+        assert summary["identical"] is True
+        assert summary["min"] == summary["max"] == 1.0
+
+    def test_drafting_that_moves_is_flagged_separately_from_detection(self):
+        """The same violations found every time, drafted for only sometimes.
+
+        Reporting the last run's coverage alone hides this, which is the whole
+        reason drafting is tracked apart from detection.
+        """
+        runs = [
+            {"covered": 2, "total": 2, "rate": 1.0},
+            {"covered": 1, "total": 2, "rate": 0.5},
+        ]
+
+        summary = coverage_variability(runs)
+
+        assert summary["identical"] is False
+        assert summary["min"] == 0.5
+        assert summary["max"] == 1.0
+        assert summary["drafted"] == ["2/2", "1/2"]
+
+    def test_no_runs_says_nothing(self):
+        assert coverage_variability([])["identical"] is None
