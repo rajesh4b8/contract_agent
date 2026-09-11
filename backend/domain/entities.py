@@ -87,10 +87,13 @@ class RiskAssessment:
 
 @dataclass
 class RedlineRecommendation:
+    """Proposed replacement language for a clause that breaches a rule."""
     original_text: str
     suggested_text: str
     justification: str
-    priority: str  # LOW, MEDIUM, HIGH
+    priority: str  # LOW, MEDIUM, HIGH, CRITICAL — follows the rule's severity
+    rule_id: Optional[str] = None   # the rule this remediates
+    clause_type: str = ""
 
 @dataclass
 class ContractIntelligence:

@@ -236,7 +236,7 @@ class IntelligenceOrchestrator:
         )
         
         try:
-            tool = RedlineGeneratorTool()
+            tool = RedlineGeneratorTool(llm=self.llm)
             violations_json = json.dumps(state["policy_violations"])
             redlines_json = tool._run(violations_json)
             redlines_list = json.loads(redlines_json)

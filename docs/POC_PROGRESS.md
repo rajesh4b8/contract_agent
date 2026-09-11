@@ -1,7 +1,7 @@
 # POC Progress Tracker
 
-**Resume point: Increment 2 — `awaiting your test`.**
-Run `make test`, then `make seed-playbook` and analyse a contract. Write under *Your feedback*.
+**Resume point: Increment 3 — `awaiting your test`.**
+Run `make test`, analyse a contract, then `GET /api/intelligence/contracts/{id}/redlines`.
 
 This file is the live state of the POC work. It is committed, so any session on any machine can
 pick up by reading it first. The detailed reasoning behind the plan lives in the session that
@@ -23,8 +23,8 @@ produced it; this file is what you and I actually work from.
 |---|-----------|--------|
 | 0 | Make the repo testable | accepted |
 | 1 | Real clause extraction against a schema | accepted |
-| 2 | Ground policy checks in one real playbook | **awaiting your test** |
-| 3 | Redlines that are real and persisted | not started |
+| 2 | Ground policy checks in one real playbook | accepted |
+| 3 | Redlines that are real and persisted | **awaiting your test** |
 | 4 | Human-in-the-loop approve / edit / reject | not started |
 | 5 | One measurable outcome | not started |
 
@@ -416,19 +416,72 @@ Ten findings, all valid. The consequential ones:
 
 ### Your feedback
 
-_(write here — anything that should change before Increment 3)_
+_Merged in PR #2 on 2026-09-10. Accepted._
 
 ---
 
 ## Increment 3 — Redlines that are real and persisted
 
-Generate redlines with the LLM grounded in the violated rule, replacing the five-branch constant
-lookup at `intelligence_tools.py:288-341`. Persist them — today only `redlines_count` is stored
-(`contract_intelligence_service.py:187`), so the redline bodies vanish with the HTTP response.
+**Goal:** redlines came from a five-branch `if/elif` on clause type that returned a constant, so
+every payment violation in every contract produced the same sentence. And they were never stored —
+only `redlines_count` was persisted, so the drafted language existed solely in the HTTP response
+and was gone on refresh.
+
+### What changed
+
+**Redlines are drafted for the clause in hand.** `RedlineGeneratorTool` now receives the violated
+clause, the rule's requirement and the breach, and rewrites *that* clause. The prompt asks it to
+keep the contract's own defined terms, party names and numbering, to change only what the rule
+requires, and to preserve protections the rule does not object to.
+
+The difference is the point of the increment. A real result from the Acme MSA, `IND-001`:
+
+> **before** — Provider shall defend and indemnify Customer against third-party claims alleging that
+> the Services infringe a United States patent, copyright, or trade secret. Customer shall defend and
+> indemnify Provider against third-party claims arising from **Customer Data or Customer's unlawful
+> use of the Services**. The indemnified Party must give prompt written notice and reasonable
+> cooperation.
+>
+> **after** — …Customer shall defend and indemnify Provider against third-party claims arising from
+> **Customer's gross negligence, willful misconduct, or infringement of intellectual property under
+> this Agreement**. …
+
+Both compliant sentences are untouched; only the offending scope is rewritten, in the contract's own
+terms. The old constant would have replaced the whole clause with generic wording a lawyer had to
+redraft.
+
+**Grounding, as with the earlier increments.** Only violations that cite a rule can be redlined —
+the rule is what defines "fixed". `original_text` is the clause as extracted, not the model's
+paraphrase. `priority` follows the rule's severity, so it cannot drift. Redlines citing an unknown
+rule are discarded.
+
+**They are persisted.** `(:Contract)-[:HAS_REDLINE]->(:Redline)` with the rule id, both texts,
+justification and priority. Re-analysing replaces the set rather than accumulating duplicates.
+`GET /api/intelligence/contracts/{id}/redlines` reads them back — which is also what Increment 4's
+approve/reject flow will act on.
+
+### How to test
+
+```bash
+make test    # 180 passed, 3 skipped
+```
+
+With the stack up and the playbook seeded, analyse a contract, then:
+
+```bash
+curl "http://localhost:8000/api/intelligence/contracts/<id>/redlines"
+```
+
+**Verified on 2026-09-10** against the **default** API route (no `use_planning` param — the path
+the product actually uses, which the last review showed I had not been exercising):
+
+- 6 clauses, 1 violation, 1 redline citing `IND-001` at CRITICAL
+- backend restarted, redline read back intact from `(:Redline)`
+- re-analysed: still 1 redline, not 2
 
 ### Your feedback
 
-_(not started)_
+_(write here — anything that should change before Increment 4)_
 
 ---
 

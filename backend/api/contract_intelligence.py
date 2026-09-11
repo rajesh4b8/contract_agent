@@ -94,6 +94,8 @@ async def analyze_contract_intelligence(
                 },
                 "redlines": [
                     {
+                        "rule_id": redline.rule_id,
+                        "clause_type": redline.clause_type,
                         "original_text": redline.original_text,
                         "suggested_text": redline.suggested_text,
                         "justification": redline.justification,
@@ -263,4 +265,26 @@ async def get_available_models():
         "available_models": [m["id"] for m in models if m["available"]],
         "default_model": DEFAULT_MODEL_ID,
         "recommended_models": [m["id"] for m in models if m["recommended"]],
+    }
+
+
+@router.get("/contracts/{contract_id}/redlines",
+            dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])
+async def get_contract_redlines(
+    contract_id: str,
+    tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
+    llm_mgr: LLMManager = Depends(get_llm_manager),
+):
+    """Read back the redlines stored for a contract.
+
+    Redlines used to exist only in the analysis response, so refreshing lost
+    them. They are persisted as (:Redline) nodes and served from here, which is
+    also what the approve/reject flow will act on.
+    """
+    service = ContractIntelligenceServiceFactory.create_service(llm_mgr)
+    redlines = service.get_redlines(contract_id, tenant_id)
+    return {
+        "contract_id": contract_id,
+        "count": len(redlines),
+        "redlines": redlines,
     }

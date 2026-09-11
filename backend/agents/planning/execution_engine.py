@@ -40,7 +40,7 @@ class StepExecutor:
             # _execute_policy_check rather than held here.
             StepType.CHECK_POLICIES: PolicyCheckerTool(llm=llm),
             StepType.ASSESS_RISK: RiskCalculatorTool(),
-            StepType.GENERATE_REDLINES: RedlineGeneratorTool()
+            StepType.GENERATE_REDLINES: RedlineGeneratorTool(llm=llm)
         }
     
     async def execute_step(self, step: ExecutionStep, context: Dict[str, Any]) -> ExecutionResult:
