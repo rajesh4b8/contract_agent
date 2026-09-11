@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends, Request
-from backend.governance.rbac import Permission, requires_permission
+from backend.governance.rbac import Permission, get_current_tenant, requires_permission
 from fastapi.responses import StreamingResponse
 from backend.application.services.contract_intelligence_service import ContractIntelligenceServiceFactory
 from backend.llm_manager import LLMManager
@@ -95,6 +95,7 @@ async def analyze_contract_intelligence(
                 "redlines": [
                     {
                         "rule_id": redline.rule_id,
+                        "clause_index": redline.clause_index,
                         "clause_type": redline.clause_type,
                         "original_text": redline.original_text,
                         "suggested_text": redline.suggested_text,
@@ -272,7 +273,7 @@ async def get_available_models():
             dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])
 async def get_contract_redlines(
     contract_id: str,
-    tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
+    tenant_id: str = Depends(get_current_tenant),
     llm_mgr: LLMManager = Depends(get_llm_manager),
 ):
     """Read back the redlines stored for a contract.
@@ -280,6 +281,9 @@ async def get_contract_redlines(
     Redlines used to exist only in the analysis response, so refreshing lost
     them. They are persisted as (:Redline) nodes and served from here, which is
     also what the approve/reject flow will act on.
+
+    The tenant comes from the caller, not a query parameter: a role check says
+    what you may do, not whose data you may do it to.
     """
     service = ContractIntelligenceServiceFactory.create_service(llm_mgr)
     redlines = service.get_redlines(contract_id, tenant_id)

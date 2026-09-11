@@ -118,6 +118,11 @@ class RedlineSuggestion(BaseModel):
     """
 
     rule_id: str = Field(description="Id of the rule being remediated, exactly as given")
+    clause_index: int = Field(
+        description="Index of the breaching clause, exactly as given. The same rule "
+                    "can be breached by several clauses, so the rule alone does not "
+                    "identify which one this redline rewrites."
+    )
     suggested_text: str = Field(
         description="Replacement language for this specific clause, written to fit "
                     "the contract's own defined terms and drafting style"

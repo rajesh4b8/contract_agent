@@ -14,6 +14,7 @@ class IntelligenceState(TypedDict):
     policy_violations: List[dict] 
     risk_data: dict
     redline_suggestions: List[dict]
+    redline_generation_failed: str   # set when drafting errored; blocks overwrite
     
     # CUAD mitigation results (Phase 1 extension)
     cuad_deviations: List[dict]

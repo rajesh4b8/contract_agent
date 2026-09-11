@@ -250,8 +250,15 @@ class IntelligenceOrchestrator:
                 "processing_result": {"status": "success", "message": "Intelligence analysis completed"}
             }
         except Exception as e:
+            # Flag the failure. An empty list here is indistinguishable from
+            # "nothing needed redlining", and persistence would then delete
+            # drafts a reviewer may already be working from.
             workflow_tracker.error_agent(execution, f"Redline generation failed: {e}")
-            return {**state, "redline_suggestions": [], "is_complete": True}
+            return {**state,
+                "redline_suggestions": [],
+                "redline_generation_failed": str(e),
+                "is_complete": True,
+            }
     
     def _cuad_mitigation(self, state: IntelligenceState) -> IntelligenceState:
         """Enhanced CUAD mitigation analysis - Phase 2 implementation"""
@@ -556,6 +563,7 @@ class IntelligenceOrchestrator:
             "violations": final_state["policy_violations"],
             "risk_assessment": final_state["risk_data"],
             "redlines": final_state["redline_suggestions"],
+            "redlines_generated": not final_state.get("redline_generation_failed"),
             "cuad_deviations": final_state.get("cuad_deviations", []),
             "jurisdiction_info": final_state.get("jurisdiction_info", {}),
             "precedent_matches": final_state.get("precedent_matches", []),

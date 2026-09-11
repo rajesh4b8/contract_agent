@@ -479,6 +479,23 @@ the product actually uses, which the last review showed I had not been exercisin
 - backend restarted, redline read back intact from `(:Redline)`
 - re-analysed: still 1 redline, not 2
 
+### Addressed in review (Copilot, PR #3)
+
+Four findings, all valid:
+
+- **A failed draft destroyed good redlines.** `_generate_redlines` catches errors and returns `[]`,
+  which persistence could not distinguish from "none needed" — so one rate-limited call wiped the
+  stored set. The state now records the failure and persistence refuses to replace on it.
+- **Two clauses breaching the same rule were conflated.** The redline join keyed on `rule_id` alone,
+  so both collapsed to the last one and a redline drafted for one clause was stored against
+  another's text. Reproduced it, then keyed the join by `(rule_id, clause_index)` with the index in
+  the model contract. `clause_index` now flows through to the graph and the API — Increment 4 needs
+  it to anchor approvals.
+- **The redlines endpoint let any reader pick a tenant.** It accepted `tenant_id` from the query
+  string while RBAC only checked the role. Added `get_current_tenant`, which takes the tenant from
+  the caller (header in production, `DEV_DEFAULT_TENANT` in development) and ignores the query
+  parameter entirely.
+
 ### Your feedback
 
 _(write here — anything that should change before Increment 4)_

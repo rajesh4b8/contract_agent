@@ -111,7 +111,8 @@ class ContractIntelligenceService:
             return None
     
 
-    def _store_redlines(self, contract_id: str, tenant_id: str, redlines) -> None:
+    def _store_redlines(self, contract_id: str, tenant_id: str, redlines,
+                        replace: bool = True) -> None:
         """Persist redlines as (:Contract)-[:HAS_REDLINE]->(:Redline).
 
         Only `redlines_count` used to be stored, so the drafted language existed
@@ -120,7 +121,19 @@ class ContractIntelligenceService:
 
         Redlines for the contract are replaced wholesale: re-analysing supersedes
         the previous set rather than accumulating duplicates alongside it.
+
+        `replace=False` when drafting failed. An empty list then means "we could
+        not draft", not "none were needed", and wiping the stored set on the
+        strength of a transient model error would destroy drafts a reviewer may
+        already be working from.
         """
+        if not replace:
+            logger.warning(
+                f"Redline drafting failed for {contract_id}; keeping the previously "
+                f"stored redlines rather than replacing them"
+            )
+            return
+
         try:
             self.repository.graph.query(
                 """
@@ -139,6 +152,7 @@ class ContractIntelligenceService:
                     CREATE (r:Redline {
                         redline_id: $redline_id,
                         rule_id: $rule_id,
+                        clause_index: $clause_index,
                         clause_type: $clause_type,
                         original_text: $original_text,
                         suggested_text: $suggested_text,
@@ -154,6 +168,7 @@ class ContractIntelligenceService:
                         "tenant_id": tenant_id,
                         "redline_id": f"{contract_id}_redline_{index:03d}",
                         "rule_id": redline.rule_id,
+                        "clause_index": redline.clause_index,
                         "clause_type": redline.clause_type,
                         "original_text": redline.original_text,
                         "suggested_text": redline.suggested_text,
@@ -174,6 +189,7 @@ class ContractIntelligenceService:
             MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
                   -[:HAS_REDLINE]->(r:Redline)
             RETURN r.redline_id AS redline_id, r.rule_id AS rule_id,
+                   r.clause_index AS clause_index,
                    r.clause_type AS clause_type, r.original_text AS original_text,
                    r.suggested_text AS suggested_text, r.justification AS justification,
                    r.priority AS priority
@@ -251,6 +267,7 @@ class ContractIntelligenceService:
                 justification=redline_data.get("justification", ""),
                 priority=redline_data.get("priority", "LOW"),
                 rule_id=redline_data.get("rule_id"),
+                clause_index=redline_data.get("clause_index"),
                 clause_type=redline_data.get("clause_type", "")
             ))
         
@@ -259,7 +276,8 @@ class ContractIntelligenceService:
             clauses=clauses,
             violations=violations,
             risk_assessment=risk_assessment,
-            redlines=redlines
+            redlines=redlines,
+            redlines_generated=analysis_result.get("redlines_generated", True),
         )
         
         # Add CUAD fields if present
@@ -321,7 +339,10 @@ class ContractIntelligenceService:
                 **intelligence_data
             })
 
-            self._store_redlines(contract_id, tenant_id, intelligence.redlines)
+            self._store_redlines(
+                contract_id, tenant_id, intelligence.redlines,
+                replace=intelligence.redlines_generated,
+            )
             
             # Store performance metrics
             self._store_performance_metrics(contract_id, tenant_id, intelligence)

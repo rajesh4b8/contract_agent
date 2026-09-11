@@ -349,14 +349,19 @@ class RedlineGeneratorTool(BaseTool):
             logger.warning("No violations cite a rule; nothing to redline")
             return json.dumps([])
 
-        by_rule = {v["rule_id"]: v for v in citable}
+        # Keyed by (rule, clause): the same rule can be breached by several
+        # clauses, and keying on the rule alone would collapse them — every
+        # suggestion for that rule would then attach to whichever breach came
+        # last, persisting a redline against the wrong clause text.
+        by_breach = {(v["rule_id"], v.get("clause_index")): v for v in citable}
         parser = PydanticOutputParser(pydantic_object=RedlineSet)
 
         block = "\n\n".join(
+            f"BREACH {i}: rule {v['rule_id']}, clause_index {v.get('clause_index')}\n"
             f"RULE {v['rule_id']} requires: {v.get('suggested_fix') or '(no standard wording given)'}\n"
-            f"BREACH: {v.get('issue', '')}\n"
+            f"WHAT IS WRONG: {v.get('issue', '')}\n"
             f"CURRENT CLAUSE: {' '.join((v.get('clause_content') or '').split())}"
-            for v in citable
+            for i, v in enumerate(citable)
         )
 
         prompt = f"""You are a contract lawyer preparing redlines. For each breach
@@ -372,7 +377,8 @@ Keep every protection the current clause already provides that the rule does not
 object to.
 
 In `justification`, state what the rule requires and what you changed. Use
-`rule_id` exactly as written above.
+`rule_id` and `clause_index` exactly as written above, so each redline is matched
+back to the breach it fixes — the same rule may appear more than once.
 
 {parser.get_format_instructions()}"""
 
@@ -381,12 +387,13 @@ In `justification`, state what the rule requires and what you changed. Use
 
         redlines, unknown = [], []
         for suggestion in drafted.redlines:
-            violation = by_rule.get(suggestion.rule_id)
+            violation = by_breach.get((suggestion.rule_id, suggestion.clause_index))
             if violation is None:
-                unknown.append(suggestion.rule_id)
+                unknown.append(f"{suggestion.rule_id}@{suggestion.clause_index}")
                 continue
             redlines.append({
                 "rule_id": suggestion.rule_id,
+                "clause_index": suggestion.clause_index,
                 "clause_type": violation.get("clause_type", ""),
                 "original_text": violation.get("clause_content", ""),
                 "suggested_text": suggestion.suggested_text,
@@ -396,7 +403,7 @@ In `justification`, state what the rule requires and what you changed. Use
             })
 
         if unknown:
-            logger.warning(f"Discarded redlines citing unknown rules: {unknown}")
+            logger.warning(f"Discarded redlines citing unknown rule/clause pairs: {unknown}")
 
         logger.info(f"Drafted {len(redlines)} redlines for {len(citable)} violations")
         return json.dumps(redlines)
