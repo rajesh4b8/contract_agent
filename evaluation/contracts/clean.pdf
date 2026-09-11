@@ -1,0 +1,66 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 1580 >>
+stream
+BT /F1 10.5 Tf 56 736 Td 14.5 TL
+(SERVICES AGREEMENT) Tj T*
+T*
+(This Agreement is made between Northwind Traders Ltd \("Customer"\) and) Tj T*
+(Contoso Services LLC \("Provider"\).) Tj T*
+T*
+(1. SERVICES. Provider shall supply the managed services described in the) Tj T*
+(applicable Statement of Work.) Tj T*
+T*
+(2. FEES AND PAYMENT. Customer shall pay each undisputed invoice within) Tj T*
+(thirty \(30\) days of invoice receipt.) Tj T*
+T*
+(3. LIMITATION OF LIABILITY. Each party's aggregate liability under this) Tj T*
+(Agreement shall not exceed the total fees paid or payable under the) Tj T*
+(applicable Statement of Work.) Tj T*
+T*
+(4. INDEMNIFICATION. Each party shall indemnify the other solely for) Tj T*
+(third-party claims arising from its gross negligence, willful misconduct, or) Tj T*
+(infringement of intellectual property under this Agreement.) Tj T*
+T*
+(5. TERMINATION. Either party may terminate this Agreement on thirty \(30\)) Tj T*
+(days' prior written notice. All completed work shall be payable upon) Tj T*
+(termination.) Tj T*
+T*
+(6. INTELLECTUAL PROPERTY. Customer owns the deliverables created) Tj T*
+(specifically for this engagement. Provider retains ownership of its) Tj T*
+(pre-existing intellectual property, reusable tools and methodologies.) Tj T*
+T*
+(7. CONFIDENTIALITY. Each party shall protect the other party's proprietary) Tj T*
+(information using no less than reasonable care, and shall not disclose it to) Tj T*
+(third parties.) Tj T*
+T*
+(8. GOVERNING LAW. This Agreement is governed by the laws of the State of) Tj T*
+(Delaware.) Tj T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000185 00000 n 
+0000000311 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1943
+%%EOF

@@ -1,7 +1,7 @@
 # POC Progress Tracker
 
-**Resume point: Increment 4 — `awaiting your test`.**
-Run `make test`, then open the Redlines card on the Intelligence page and approve / edit / reject.
+**Resume point: Increment 5 — `awaiting your test`.**
+Run `make test`, then `make eval` with the stack up and the playbook seeded.
 
 This file is the live state of the POC work. It is committed, so any session on any machine can
 pick up by reading it first. The detailed reasoning behind the plan lives in the session that
@@ -25,8 +25,8 @@ produced it; this file is what you and I actually work from.
 | 1 | Real clause extraction against a schema | accepted |
 | 2 | Ground policy checks in one real playbook | accepted |
 | 3 | Redlines that are real and persisted | accepted |
-| 4 | Human-in-the-loop approve / edit / reject | **awaiting your test** |
-| 5 | One measurable outcome | not started |
+| 4 | Human-in-the-loop approve / edit / reject | accepted |
+| 5 | One measurable outcome | **awaiting your test** |
 
 ---
 
@@ -636,20 +636,108 @@ next run; decided ones are kept deliberately. Quantifying that variance is Incre
 
 ### Your feedback
 
-_(write here — anything that should change before Increment 5)_
+_Merged in PR #4 on 2026-09-10. Accepted._
 
 ---
 
 ## Increment 5 — One measurable outcome
 
-Label 20–30 clauses from the checked-in sample contracts as ground truth; score clause-type
-accuracy, risk precision/recall, and groundedness. The metric classes in
-`training/scripts/evaluate.py:43-155` are sound and can be reused — they are just currently
-pointed at local Qwen checkpoints instead of the product.
+**Goal:** every claim about quality so far has been anecdotal — "the redline looks good", "it found
+the right rule". The design doc asks for a measurable outcome, and without one there is no way to
+tell a prompt change that helped from one that did not.
+
+### What makes this measurable
+
+The playbook supplies an objectively correct answer. For a labelled contract there is a specific
+set of rule ids a correct review should raise, so precision and recall over those ids mean
+something concrete — unlike a generic "clause accuracy" figure.
+
+`evaluation/` holds three contracts, written so the right answer is a matter of construction rather
+than opinion:
+
+| fixture | expects | why it is there |
+|---|---|---|
+| `breaching` | 6 rules | every clause drafted to breach |
+| `partial` | `PAY-001`, `TRM-001` | the discriminating case — most clauses are compliant |
+| `clean` | nothing | **the one that matters**: only a compliant contract can show whether the system invents violations |
+
+They are synthetic deliberately. Labelling a real contract needs a lawyer, and a number produced
+from an engineer's guess at the right answer would look objective without being it.
+
+### Metrics
+
+Set-based precision / recall / F1 over rule ids, **micro-averaged** so a one-rule contract does not
+weigh as much as a six-rule one, and so the compliant fixture cannot inflate the score by doing
+nothing. Plus groundedness (evidence spans genuinely present in the contract), redline coverage
+(violations that produced replacement language), and stability across repeated runs.
+
+The scorer is pure functions in `backend/evaluation/scorer.py` with 22 unit tests, so the
+arithmetic is checkable without a stack running. The harness that drives the live API is thin.
+
+### Results — `gemini-flash-lite`, 3 runs per contract
+
+```
+  breaching.pdf    exact  P 1.00  R 1.00  F1 1.00   71s
+                   grounded 5/5   redlined 6/6      across 3 runs: identical
+  partial.pdf      exact  P 1.00  R 1.00  F1 1.00   33s
+                   grounded 6/6   redlined 1/2      across 3 runs: identical
+  clean.pdf        exact  P 1.00  R 1.00  F1 1.00   11s
+                   grounded 6/6   redlined 0/0      across 3 runs: identical
+
+  Overall   precision 1.00   recall 1.00   F1 1.00
+            8 correct, 0 invented, 0 missed
+            3/3 contracts exactly right
+```
+
+**Rule detection is stable.** Identical across three runs on all three contracts, including raising
+nothing on the compliant one. That contradicts what I had assumed from watching `free-large` on
+long contracts, and is worth knowing before optimising anything.
+
+**Redline drafting is not.** `partial.pdf` scored 2/2 coverage on one pass and 1/2 on another: the
+same two violations, but one run failed to draft language for one of them. Detection and drafting
+have different reliability, which nothing before this increment could have told us.
+
+### Two bugs the evaluation found immediately
+
+- **Violations carried `clause_index: None`** through the API while redlines carried the real
+  index, so nothing could join a violation to its redline — redline coverage read 0/6 when it was
+  really 6/6. A real product bug that four increments of inspection had not surfaced.
+- **The harness scored grounding against the source `.txt`** rather than the PDF-extracted text the
+  system actually saw. Punctuation differs between the two, so genuine clauses were reported as
+  hallucinated (2/5 instead of 5/5). A measurement bug that looked exactly like a product bug —
+  which is its own lesson about trusting a new metric before checking it.
+
+### How to test
+
+```bash
+make test            # 228 passed, 3 skipped — scorer arithmetic, offline
+```
+
+With the stack up and `make seed-playbook` done:
+
+```bash
+make eval ARGS="--model gemini-flash-lite"      # one pass, ~2 minutes
+make eval-stability ARGS="--model gemini-flash-lite"   # three passes
+```
+
+`make eval` exits non-zero if the pipeline invented a breach that is not in the contract — a false
+positive on a compliant clause is the failure that costs a reviewer's trust, so it is the one worth
+failing a build over.
+
+### Honest limits of this number
+
+- **Three synthetic contracts is a floor, not a benchmark.** It catches gross regressions; it says
+  nothing about long real-world contracts with unusual drafting.
+- **Scoring the rule set does not score the redline's quality.** Coverage counts whether language
+  was drafted, not whether a lawyer would accept it. The human override rate from Increment 4's
+  decisions is the natural next metric and needs real reviewer use to accumulate.
+- **1.00 across the board says the fixtures are not yet hard enough.** A benchmark everything
+  passes has stopped providing information — the next useful move is adversarial fixtures
+  (ambiguous drafting, breaches split across clauses, near-miss wording) rather than more of these.
 
 ### Your feedback
 
-_(not started)_
+_(write here)_
 
 ---
 

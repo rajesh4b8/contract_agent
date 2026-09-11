@@ -1,0 +1,33 @@
+SERVICES AGREEMENT
+
+This Agreement is made between Northwind Traders Ltd ("Customer") and
+Contoso Services LLC ("Provider").
+
+1. SERVICES. Provider shall supply the managed services described in the
+applicable Statement of Work.
+
+2. FEES AND PAYMENT. Customer shall pay each undisputed invoice within
+thirty (30) days of invoice receipt.
+
+3. LIMITATION OF LIABILITY. Each party's aggregate liability under this
+Agreement shall not exceed the total fees paid or payable under the
+applicable Statement of Work.
+
+4. INDEMNIFICATION. Each party shall indemnify the other solely for
+third-party claims arising from its gross negligence, willful misconduct, or
+infringement of intellectual property under this Agreement.
+
+5. TERMINATION. Either party may terminate this Agreement on thirty (30)
+days' prior written notice. All completed work shall be payable upon
+termination.
+
+6. INTELLECTUAL PROPERTY. Customer owns the deliverables created
+specifically for this engagement. Provider retains ownership of its
+pre-existing intellectual property, reusable tools and methodologies.
+
+7. CONFIDENTIALITY. Each party shall protect the other party's proprietary
+information using no less than reasonable care, and shall not disclose it to
+third parties.
+
+8. GOVERNING LAW. This Agreement is governed by the laws of the State of
+Delaware.

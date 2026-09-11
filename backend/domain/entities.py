@@ -76,6 +76,7 @@ class PolicyViolation:
     suggested_fix: str
     clause_content: str = ""
     rule_id: Optional[str] = None     # playbook rule this cites
+    clause_index: Optional[int] = None  # which clause breached it
     section_reference: str = ""       # where in the playbook it sits
 
 @dataclass

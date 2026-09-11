@@ -1,0 +1,61 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 1286 >>
+stream
+BT /F1 10.5 Tf 56 736 Td 14.5 TL
+(SERVICES AGREEMENT) Tj T*
+T*
+(This Agreement is made between Northwind Traders Ltd \("Customer"\) and) Tj T*
+(Contoso Services LLC \("Provider"\).) Tj T*
+T*
+(1. SERVICES. Provider shall supply the managed services described in the) Tj T*
+(applicable Statement of Work.) Tj T*
+T*
+(2. FEES AND PAYMENT. Customer shall pay each undisputed invoice within) Tj T*
+(ninety \(90\) days of receipt.) Tj T*
+T*
+(3. LIMITATION OF LIABILITY. Provider's aggregate liability under this) Tj T*
+(Agreement shall not exceed fifty thousand dollars \($50,000\), regardless of) Tj T*
+(the fees paid.) Tj T*
+T*
+(4. INDEMNIFICATION. Customer shall defend and indemnify Provider against any) Tj T*
+(and all claims arising from the Services, including claims caused by) Tj T*
+(Provider's own negligence.) Tj T*
+T*
+(5. TERMINATION. Provider may terminate this Agreement immediately and) Tj T*
+(without notice, and no payment shall be due for work in progress.) Tj T*
+T*
+(6. INTELLECTUAL PROPERTY. Customer shall own all intellectual property) Tj T*
+(created or used by Provider under this Agreement, including Provider's) Tj T*
+(pre-existing tools and methodologies.) Tj T*
+T*
+(7. GOVERNING LAW. This Agreement is governed by the laws of the State of) Tj T*
+(Delaware.) Tj T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000185 00000 n 
+0000000311 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+1649
+%%EOF

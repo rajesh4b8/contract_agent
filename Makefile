@@ -5,7 +5,7 @@ PY := backend/.venv/bin/python
 HOST_NEO4J_URI ?= bolt://localhost:7687
 
 .DEFAULT_GOAL := help
-.PHONY: help install test test-integration test-all run stop logs smoke seed-playbook check-playbook
+.PHONY: help install test test-integration test-all run stop logs smoke seed-playbook check-playbook eval eval-stability
 
 help:  ## Show this help
 	@grep -hE '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) \
@@ -25,6 +25,12 @@ test-all:  ## Everything, offline and integration
 
 seed-playbook:  ## Load data/playbooks/default_playbook.yaml into Neo4j (needs the stack up)
 	NEO4J_URI=$(HOST_NEO4J_URI) $(PY) scripts/seed_playbook.py
+
+eval:  ## Score the pipeline against evaluation/ (needs the stack up + playbook seeded)
+	$(PY) scripts/evaluate_pipeline.py $(ARGS)
+
+eval-stability:  ## Same, three passes per contract, to see how much the answer moves
+	$(PY) scripts/evaluate_pipeline.py --runs 3 $(ARGS)
 
 check-playbook:  ## Validate the playbook file without touching the database
 	$(PY) scripts/seed_playbook.py --check

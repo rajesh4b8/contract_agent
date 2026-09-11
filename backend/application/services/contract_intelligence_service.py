@@ -416,6 +416,7 @@ class ContractIntelligenceService:
                 suggested_fix=violation_data.get("suggested_fix", ""),
                 clause_content=violation_data.get("clause_content", ""),
                 rule_id=violation_data.get("rule_id"),
+                clause_index=violation_data.get("clause_index"),
                 section_reference=violation_data.get("section_reference", ""),
             ))
         
