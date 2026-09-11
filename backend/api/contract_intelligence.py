@@ -1,5 +1,14 @@
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks, Depends, Request
-from backend.governance.rbac import Permission, get_current_tenant, requires_permission
+from backend.governance.rbac import (
+    Permission,
+    UserRole,
+    get_current_tenant,
+    get_current_user_role,
+    requires_permission,
+)
+from backend.domain.redline_decision import InvalidDecision, RedlineStatus
+from pydantic import BaseModel, Field
+from typing import Optional
 from fastapi.responses import StreamingResponse
 from backend.application.services.contract_intelligence_service import ContractIntelligenceServiceFactory
 from backend.llm_manager import LLMManager
@@ -292,3 +301,65 @@ async def get_contract_redlines(
         "count": len(redlines),
         "redlines": redlines,
     }
+
+
+class RedlineDecisionRequest(BaseModel):
+    """A reviewer's ruling on one redline."""
+
+    decision: RedlineStatus = Field(
+        description="APPROVED takes the suggestion as drafted, MODIFIED "
+                    "substitutes edited_text, REJECTED keeps the original clause"
+    )
+    edited_text: Optional[str] = Field(
+        default=None,
+        description="Required for MODIFIED, and rejected for the others",
+    )
+    note: str = Field(default="", description="Optional reason, shown in the audit trail")
+
+
+@router.post("/redlines/{redline_id}/decision",
+             dependencies=[Depends(requires_permission(Permission.APPROVE_REDLINE))])
+async def decide_redline(
+    redline_id: str,
+    request: RedlineDecisionRequest,
+    tenant_id: str = Depends(get_current_tenant),
+    role: UserRole = Depends(get_current_user_role),
+    llm_mgr: LLMManager = Depends(get_llm_manager),
+):
+    """Approve, modify or reject a drafted redline.
+
+    Guarded by APPROVE_REDLINE rather than ANALYZE: being able to run an analysis
+    is not the same as being able to accept its output, and VIEWER holds ANALYZE.
+
+    A decision is durable. Re-analysing the contract replaces undecided drafts
+    only — it will not discard a judgement already made here.
+    """
+    service = ContractIntelligenceServiceFactory.create_service(llm_mgr)
+
+    try:
+        return service.record_redline_decision(
+            redline_id,
+            tenant_id,
+            request.decision,
+            edited_text=request.edited_text,
+            note=request.note,
+            decided_by=role.value,
+        )
+    except LookupError:
+        # Also the answer for another tenant's redline: reporting 403 would
+        # confirm that it exists.
+        raise HTTPException(status_code=404, detail=f"Redline {redline_id} not found")
+    except InvalidDecision as e:
+        raise HTTPException(status_code=422, detail=str(e))
+
+
+@router.get("/contracts/{contract_id}/review-summary",
+            dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])
+async def get_review_summary(
+    contract_id: str,
+    tenant_id: str = Depends(get_current_tenant),
+    llm_mgr: LLMManager = Depends(get_llm_manager),
+):
+    """How far through review this contract's redlines are."""
+    service = ContractIntelligenceServiceFactory.create_service(llm_mgr)
+    return {"contract_id": contract_id, **service.redline_review_summary(contract_id, tenant_id)}

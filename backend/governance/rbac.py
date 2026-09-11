@@ -20,6 +20,10 @@ class Permission(str, Enum):
     VIEW_REPORTS = "VIEW_REPORTS"
     MANAGE_POLICIES = "MANAGE_POLICIES"
     VIEW_AUDIT = "VIEW_AUDIT"
+    # Ruling on a redline changes what goes into a contract. It is deliberately
+    # not covered by ANALYZE, which VIEWER holds — being able to run an analysis
+    # is not the same as being able to accept its output.
+    APPROVE_REDLINE = "APPROVE_REDLINE"
 
 class RBACManager:
     """
@@ -33,7 +37,8 @@ class RBACManager:
         UserRole.LEGAL_REVIEWER: {
             Permission.ANALYZE,
             Permission.UPLOAD,
-            Permission.VIEW_REPORTS
+            Permission.VIEW_REPORTS,
+            Permission.APPROVE_REDLINE
         },
         UserRole.AUDITOR: {
             Permission.VIEW_REPORTS,

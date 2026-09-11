@@ -1,7 +1,7 @@
 # POC Progress Tracker
 
-**Resume point: Increment 3 — `awaiting your test`.**
-Run `make test`, analyse a contract, then `GET /api/intelligence/contracts/{id}/redlines`.
+**Resume point: Increment 4 — `awaiting your test`.**
+Run `make test`, then open the Redlines card on the Intelligence page and approve / edit / reject.
 
 This file is the live state of the POC work. It is committed, so any session on any machine can
 pick up by reading it first. The detailed reasoning behind the plan lives in the session that
@@ -24,8 +24,8 @@ produced it; this file is what you and I actually work from.
 | 0 | Make the repo testable | accepted |
 | 1 | Real clause extraction against a schema | accepted |
 | 2 | Ground policy checks in one real playbook | accepted |
-| 3 | Redlines that are real and persisted | **awaiting your test** |
-| 4 | Human-in-the-loop approve / edit / reject | not started |
+| 3 | Redlines that are real and persisted | accepted |
+| 4 | Human-in-the-loop approve / edit / reject | **awaiting your test** |
 | 5 | One measurable outcome | not started |
 
 ---
@@ -498,19 +498,76 @@ Four findings, all valid:
 
 ### Your feedback
 
-_(write here — anything that should change before Increment 4)_
+_Merged in PR #3 on 2026-09-10. Accepted._
 
 ---
 
 ## Increment 4 — Human-in-the-loop approve / edit / reject
 
-POC scope item #5 in the design doc, entirely absent from the UI. Add a status field, three
-endpoints, and controls in `frontend/src/components/features/intelligence/ClausesDetail.tsx`
-(read-only today). Replace the free-form `legal_decision: str` (`feedback_api.py:20`) with an enum.
+**Goal:** the design doc makes human approval a POC deliverable. Until now a decision could be
+POSTed as a free-form string to a detached `(:LegalDecision)` node that gated nothing — the redline
+itself carried no state, and the UI had no way to act on one.
+
+### Failure cases were designed first
+
+This is the first increment where a wrong failure mode loses *human* work rather than machine
+output, so these were settled before the happy path:
+
+| case | behaviour |
+|---|---|
+| decide on a redline that does not exist | 404, never a silent no-op |
+| decide on another tenant's redline | 404 — a 403 would confirm it exists |
+| `MODIFIED` with no replacement text | 422; there is nothing to apply |
+| `APPROVED`/`REJECTED` *with* replacement text | 422; guessing either way discards what they typed |
+| decide twice | allowed, last wins, and the response names the prior status |
+| re-analysis after a decision | the decision is preserved |
+| a viewer attempting to approve | 403 |
+
+### What changed
+
+**Decisions live on the redline.** `status` is `PENDING` → `APPROVED` / `MODIFIED` / `REJECTED`,
+with `final_text`, `decision_note`, `decided_by` and `decided_at`. `final_text` is resolved once at
+decision time — the suggestion for APPROVED, the reviewer's wording for MODIFIED, the original
+clause for REJECTED — so nothing downstream has to reconstruct "what did they actually agree to"
+from a status plus three text fields.
+
+**A dedicated permission.** `APPROVE_REDLINE`, held by ADMIN and LEGAL_REVIEWER. Deliberately not
+`ANALYZE`: VIEWER holds that, and being able to run an analysis is not the same as being able to
+accept its output.
+
+**Re-analysis no longer discards judgement.** This was flagged as a risk when Increment 3 landed.
+Reviewed redlines are left exactly as the reviewer left them; only undecided drafts are refreshed,
+and drafts for breaches no longer reported are dropped so the queue does not accumulate stale items.
+
+**Redline ids are identity-based.** Live testing showed positional ids (`_redline_000`) collide
+across runs — two redlines ended up sharing one. An id is now
+`{contract_id}_{rule_id}_c{clause_index}`: one breach of one rule on one clause has one redline,
+and persistence MERGEs on it rather than deleting and recreating.
+
+**UI.** A Redlines card on the Intelligence page opens a review panel showing current vs suggested
+text, the rule, priority and status, with Approve / Edit / Reject and an optional reason. Rejected
+API messages are shown verbatim, since they usually tell the reviewer what to do differently.
+
+### How to test
+
+```bash
+make test    # 204 passed, 3 skipped
+```
+
+With the stack up: analyse a contract, open the **Redlines** card, and try each action. Then
+re-analyse and confirm your decision is still there.
+
+**Verified on 2026-09-10** (default route throughout):
+
+- VIEWER approving → 403; LEGAL_REVIEWER → 200, `PENDING -> APPROVED`
+- `MODIFIED` with no text, `APPROVED` with text, and `PENDING` → 422 with a specific reason
+- unknown redline → 404; another tenant's redline → 404
+- a `MODIFIED` redline survived **two** re-analyses with its text and note intact, while a newly
+  found breach was added alongside it as `PENDING`
 
 ### Your feedback
 
-_(not started)_
+_(write here — anything that should change before Increment 5)_
 
 ---
 
