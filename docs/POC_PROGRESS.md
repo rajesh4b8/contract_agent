@@ -243,6 +243,44 @@ clauses identical: False        (it was True before this increment)
 
 All 9 evidence spans were checked back against the contract text stored in Neo4j: **9/9 verbatim.**
 
+### Making the loop fast enough to iterate on
+
+Analysis is slow because it is three sequential model calls, and nothing else. Measured on the
+32,885-character Shuttle contract with `free-large`:
+
+| step | time |
+|---|---|
+| extract clauses | 41.6s |
+| check policies | 60.1s |
+| generate redlines | 16.4s |
+| risk, CUAD mitigation, validation | 0–8ms |
+
+Two levers, and they compound:
+
+**A small fixture.** `sample-contracts/TinyContract-Fast.txt` (and `.pdf`) is a 1,058-character
+contract that deliberately breaches **all seven playbook rules** — Net 90 payment, a fixed $50k
+liability cap, indemnity for the other party's own negligence, immediate termination with no
+payment for work in progress, and assignment of pre-existing IP. It is both faster *and* better
+coverage than the real samples, which trip one rule between them.
+
+**A faster model.** On that fixture, with identical output (5 clauses, 6 violations):
+
+| model | time |
+|---|---|
+| `gemini-flash-lite` | **11s** |
+| `free-large` (OpenRouter) | 64s |
+| `free-large` on the 32.9k contract | 118s |
+
+So `TinyContract-Fast.pdf` + `?model=gemini-flash-lite` is roughly **11× faster** than the
+combination used up to now. Mind the 20-requests/day Gemini cap: `gemini-flash` was exhausted again
+during this measurement and returned zero clauses after its retries.
+
+Regenerate the PDF after editing the text with:
+
+```bash
+python scripts/make_sample_pdf.py sample-contracts/TinyContract-Fast.txt
+```
+
 ### Model options, and the quota trap
 
 `gemini-flash` is capped at **20 requests/day** on the free tier. A handful of analysis runs
