@@ -21,12 +21,28 @@ export function identityHeaders(): Record<string, string> {
   };
 }
 
-/** `fetch`, with the caller's identity attached. */
+/**
+ * A fresh correlation id for one user action.
+ *
+ * The backend's tracing middleware honours `X-Correlation-ID` and stamps it on
+ * every log line and debug event the request produces. Sending our own means
+ * the debug panel can group a two-minute analysis into one run instead of a
+ * flat list of steps.
+ */
+export function newCorrelationId(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID();
+  }
+  return `fe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** `fetch`, with the caller's identity and a correlation id attached. */
 export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
   return fetch(path, {
     ...init,
     headers: {
       ...identityHeaders(),
+      'X-Correlation-ID': newCorrelationId(),
       ...(init.headers ?? {}),
     },
   });

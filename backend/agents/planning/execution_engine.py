@@ -16,6 +16,7 @@ from backend.infrastructure.playbook_loader import (
     load_rules_for_tenant,
 )
 from backend.shared.errors import LLMErrorInfo, LLMProviderError, classify_llm_error
+from backend.shared.debug import atrace_step, note
 import json
 
 from backend.shared.utils.logger import get_logger
@@ -55,11 +56,31 @@ class StepExecutor:
         
         # Implement timeout
         try:
-            return await asyncio.wait_for(
-                self._execute_step_with_retry(step, context),
-                timeout=step.timeout_seconds
-            )
+            async with atrace_step(
+                "analysis",
+                step.step_type.value,
+                step_id=step.step_id,
+                timeout_s=step.timeout_seconds,
+                model=self.model_id,
+            ) as traced:
+                result = await asyncio.wait_for(
+                    self._execute_step_with_retry(step, context),
+                    timeout=step.timeout_seconds
+                )
+                traced.set(success=result.success, error=result.error_message)
+                return result
         except asyncio.TimeoutError:
+            # The step's own 30s budget, not the provider's. Naming it separately
+            # matters: a timeout here and a provider refusal look identical from
+            # the UI but need completely different fixes.
+            note(
+                "analysis",
+                step.step_type.value,
+                "error",
+                step_id=step.step_id,
+                error_type="StepTimeout",
+                error=f"exceeded the step's own {step.timeout_seconds}s budget",
+            )
             return ExecutionResult(
                 step_id=step.step_id,
                 success=False,
@@ -86,6 +107,14 @@ class StepExecutor:
             try:
                 if attempt > 0:
                     logger.info(f"Retrying step {step.step_id}, attempt {attempt + 1}")
+                    note(
+                        "analysis",
+                        f"{step.step_type.value}.retry",
+                        step_id=step.step_id,
+                        attempt=attempt + 1,
+                        of=max_retries + 1,
+                        backoff_s=attempt * 0.5,
+                    )
                     await asyncio.sleep(attempt * 0.5)  # Exponential backoff
                 
                 logger.info(f"🔧 STEP EXEC 2: Executing {step.step_type} for {step.step_id}")
@@ -126,6 +155,14 @@ class StepExecutor:
                 if provider_failure is not None:
                     execution_time = int((datetime.now() - start_time).total_seconds() * 1000)
                     workflow_tracker.error_agent(execution, provider_failure.message)
+                    note(
+                        "analysis",
+                        f"{step.step_type.value}.provider_refused",
+                        step_id=step.step_id,
+                        kind=provider_failure.failure.value,
+                        provider=provider_failure.provider,
+                        detail=provider_failure.message,
+                    )
                     logger.error(f"Step {step.step_id} hit a provider failure: {provider_failure.detail}")
                     return ExecutionResult(
                         step_id=step.step_id,
@@ -375,6 +412,15 @@ class PlanExecutionEngine:
         """Execute the complete analysis plan"""
         logger.info(f"🚀 EXEC STEP 1: Starting plan execution {plan.plan_id} with {len(plan.steps)} steps")
         logger.info(f"🚀 EXEC STEP 2: Contract text length: {len(contract_text)} characters")
+        note(
+            "analysis",
+            "plan",
+            plan_id=plan.plan_id,
+            steps=len(plan.steps),
+            chars=len(contract_text),
+            tenant=tenant_id,
+            sequence=" → ".join(s.step_type.value for s in plan.steps),
+        )
         
         # Initialize execution context
         self.execution_context = {

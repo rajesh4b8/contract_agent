@@ -9,6 +9,7 @@ from backend.infrastructure.audit_logger import AuditLogger, AuditEventType, aud
 from backend.infrastructure.content_validator import ContentValidationService
 from backend.infrastructure.error_tracker import ErrorTracker, ErrorCategory, ErrorSeverity, error_tracking_context
 from backend.shared.errors import classify_llm_error, describe_llm_error, raise_if_provider_error
+from backend.shared.debug import note, trace_step
 from backend.agents.chunking_agent import ChunkingAgent
 from backend.infrastructure.chunking.storage_service import ChunkStorageService
 import os
@@ -117,29 +118,36 @@ async def upload_pdf(
         metadata={"model": model}
     ) as error_context:
         try:
+            note("upload", "received", filename=file.filename, model=model, tenant=tenant_id)
+
             # Input validation
             logger.info(f"Step 1: Input validation for file: {file.filename}")
-            if not file.filename:
-                logger.error("No filename provided")
-                raise HTTPException(status_code=400, detail="No filename provided")
-            
-            if not file.filename.lower().endswith('.pdf'):
-                logger.error(f"Invalid file type: {file.filename}")
-                raise HTTPException(status_code=400, detail="Only PDF files are supported")
+            with trace_step("upload", "validate_filename", filename=file.filename):
+                if not file.filename:
+                    logger.error("No filename provided")
+                    raise HTTPException(status_code=400, detail="No filename provided")
+
+                if not file.filename.lower().endswith('.pdf'):
+                    logger.error(f"Invalid file type: {file.filename}")
+                    raise HTTPException(status_code=400, detail="Only PDF files are supported")
 
             # Check file size (50MB limit)
             logger.info("Step 2: Reading file content")
-            file_content = await file.read()
+            with trace_step("upload", "read_file") as _step:
+                file_content = await file.read()
+                _step.set(bytes=len(file_content))
             logger.info(f"File size: {len(file_content)} bytes")
-            
+
             # Validate file metadata
             validation_data = {
                 "filename": file.filename,
                 "file_size": len(file_content)
             }
-            
-            validation_result = validator.validate_file_upload(validation_data)
-            
+
+            with trace_step("upload", "validate_metadata") as _step:
+                validation_result = validator.validate_file_upload(validation_data)
+                _step.set(valid=validation_result["is_valid"])
+
             if not validation_result["is_valid"]:
                 audit_logger.log_event(
                     event_type=AuditEventType.VALIDATION_FAILURE,
@@ -167,15 +175,18 @@ async def upload_pdf(
 
             # Simple duplicate check by filename
             try:
-                existing_query = "MATCH (c:Contract) WHERE c.file_id CONTAINS $filename RETURN c.file_id LIMIT 1"
-                existing = repo.graph.query(existing_query, {"filename": file.filename.replace(".pdf", "")})
+                with trace_step("upload", "duplicate_check") as _step:
+                    existing_query = "MATCH (c:Contract) WHERE c.file_id CONTAINS $filename RETURN c.file_id LIMIT 1"
+                    existing = repo.graph.query(existing_query, {"filename": file.filename.replace(".pdf", "")})
+                    _step.set(matches=len(existing) if existing else 0)
                 logger.info(f"Duplicate check completed. Found: {len(existing) if existing else 0} matches")
             except Exception as query_error:
                 logger.error(f"Duplicate check query failed: {query_error}")
                 # Continue without duplicate check
                 existing = []
-            
+
             if existing:
+                note("upload", "duplicate_skipped", filename=file.filename)
                 return {
                     "message": "Duplicate file detected",
                     "filename": file.filename,
@@ -190,8 +201,9 @@ async def upload_pdf(
             temp_path = f"/tmp/{temp_filename}"
             
             try:
-                with open(temp_path, "wb") as temp_file:
-                    temp_file.write(file_content)
+                with trace_step("upload", "save_temp", bytes=len(file_content)):
+                    with open(temp_path, "wb") as temp_file:
+                        temp_file.write(file_content)
                 logger.info(f"File saved successfully: {file.filename} -> {temp_path}")
             except Exception as save_error:
                 logger.error(f"Failed to save file: {save_error}")
@@ -202,11 +214,17 @@ async def upload_pdf(
             try:
                 from backend.infrastructure.text_extractors import TextExtractionService
                 text_extractor = TextExtractionService()
-                full_text = text_extractor.extract_with_fallback(temp_path)
+                # Worth knowing when reading the timeline: the PDF is extracted a
+                # second time inside the processing agent's `extract_text` node.
+                with trace_step("upload", "pdf_extract") as _step:
+                    full_text = text_extractor.extract_with_fallback(temp_path)
+                    _step.set(chars=len(full_text))
                 logger.info(f"Text extraction completed. Length: {len(full_text)} characters")
-                
+
                 # Validate content quality
-                content_validation = validator.validate({"full_text": full_text})
+                with trace_step("upload", "content_validate", chars=len(full_text)) as _step:
+                    content_validation = validator.validate({"full_text": full_text})
+                    _step.set(has_errors=content_validation["has_errors"])
                 
                 if content_validation["has_errors"]:
                     audit_logger.log_event(
@@ -222,67 +240,86 @@ async def upload_pdf(
                 
                 # Step 5.5: Enhanced Intelligent Chunking with Embeddings
                 logger.info("Step 5.5: Enhanced intelligent chunking with embeddings")
+                # This block dominates an upload's wall clock: chunk embedding makes
+                # one network call per chunk. The per-batch `chunking.embed` progress
+                # events come from the embedding optimizer underneath it, so the
+                # panel shows movement instead of a minute of silence.
                 try:
                     # Initialize embedding service
                     from backend.shared.utils.gemini_embedding_service import GeminiEmbeddingService
                     embedding_service = GeminiEmbeddingService()
-                    
+
                     chunking_agent = ChunkingAgent(embedding_service)
                     contract_id = file.filename.replace('.pdf', '')
-                    
+
                     # Try async enhanced chunking first
                     try:
-                        chunking_result = await chunking_agent.process_document(
-                            document_id=contract_id,
-                            content=full_text,
-                            metadata={
-                                "filename": file.filename,
-                                "document_type": "contract",
-                                "file_size": len(full_text)
-                            }
-                        )
-                        
-                        if chunking_result["success"]:
+                        with trace_step("upload", "chunking", chars=len(full_text)) as step:
+                            chunking_result = await chunking_agent.process_document(
+                                document_id=contract_id,
+                                content=full_text,
+                                metadata={
+                                    "filename": file.filename,
+                                    "document_type": "contract",
+                                    "file_size": len(full_text)
+                                }
+                            )
+
+                            if not chunking_result["success"]:
+                                logger.warning("Enhanced chunking failed, falling back to sync method")
+                                raise Exception("Enhanced chunking failed")
+
                             _plan = chunking_result.get('plan') or {}
                             _strategy = _plan.get('strategy_type') if isinstance(_plan, dict) else getattr(_plan, 'strategy_type', None)
+                            _quality = chunking_result['quality_assessment']['overall_quality']
+                            step.set(
+                                chunks=chunking_result['chunk_count'],
+                                strategy=str(_strategy),
+                                quality=round(_quality, 2),
+                            )
                             logger.info(f"Enhanced chunking completed: {chunking_result['chunk_count']} chunks, "
                                       f"strategy: {_strategy}, "
-                                      f"quality: {chunking_result['quality_assessment']['overall_quality']:.2f}")
-                            
+                                      f"quality: {_quality:.2f}")
+
                             # Log document analysis insights
                             doc_analysis = chunking_result.get('document_analysis', {})
                             if doc_analysis.get('is_legal_document'):
                                 logger.info(f"Legal document detected - sections: {doc_analysis.get('section_count', 0)}, "
                                           f"clauses: {doc_analysis.get('clause_count', 0)}")
-                        else:
-                            logger.warning("Enhanced chunking failed, falling back to sync method")
-                            raise Exception("Enhanced chunking failed")
-                            
+
                     except Exception as async_error:
                         logger.warning(f"Async chunking failed: {async_error}, trying sync method")
-                        
+                        note("upload", "chunking_fallback", reason=str(async_error))
+
                         # Fallback to synchronous chunking
-                        chunking_result = chunking_agent.process_document_sync(
-                            content=full_text,
-                            metadata={
-                                "filename": file.filename,
-                                "document_type": "contract"
-                            }
-                        )
-                        
-                        # Store chunks using existing schema for backward compatibility
-                        storage_service = ChunkStorageService()
-                        chunk_ids = storage_service.store_chunks(
-                            contract_id=contract_id,
-                            chunks=chunking_result["chunks"]
-                        )
-                        
-                        logger.info(f"Sync chunking completed: {len(chunk_ids)} chunks, "
-                                  f"strategy: {chunking_result['strategy_used']}, "
-                                  f"quality: {chunking_result['quality_score']:.2f}")
-                    
+                        with trace_step("upload", "chunking_sync", chars=len(full_text)) as step:
+                            chunking_result = chunking_agent.process_document_sync(
+                                content=full_text,
+                                metadata={
+                                    "filename": file.filename,
+                                    "document_type": "contract"
+                                }
+                            )
+
+                            # Store chunks using existing schema for backward compatibility
+                            storage_service = ChunkStorageService()
+                            chunk_ids = storage_service.store_chunks(
+                                contract_id=contract_id,
+                                chunks=chunking_result["chunks"]
+                            )
+                            step.set(
+                                chunks=len(chunk_ids),
+                                strategy=str(chunking_result['strategy_used']),
+                                quality=round(chunking_result['quality_score'], 2),
+                            )
+
+                            logger.info(f"Sync chunking completed: {len(chunk_ids)} chunks, "
+                                      f"strategy: {chunking_result['strategy_used']}, "
+                                      f"quality: {chunking_result['quality_score']:.2f}")
+
                 except Exception as chunking_error:
                     logger.warning(f"All chunking methods failed, continuing without chunking: {chunking_error}")
+                    note("upload", "chunking_skipped", reason=str(chunking_error))
                     # System continues normally without chunking - no breaking changes
                 
             except Exception as extract_error:
@@ -314,30 +351,34 @@ async def upload_pdf(
                 enable_enhanced = processing_request.processing_options.get("enable_enhanced", False)
                 
                 if enable_enhanced:
-                    # Use enhanced processor with sections/clauses
-                    from backend.factories.document_processor_factory import DocumentProcessorFactory
-                    # get_model_by_name, not agents[model]: the raw lookup raises a
-                    # bare KeyError whose whole message is the model id, which
-                    # surfaced as "Processing failed: 'gemini-flash'".
-                    processor = DocumentProcessorFactory.create_processor(
-                        "full", llm_mgr.get_model_by_name(model)
-                    )
-                    # Ensure tenant_id is passed in options
-                    processing_request.processing_options["tenant_id"] = tenant_id
-                    result = await processor.process_document(temp_path, processing_request.processing_options)
+                    with trace_step("upload", "process_enhanced", model=model):
+                        # Use enhanced processor with sections/clauses
+                        from backend.factories.document_processor_factory import DocumentProcessorFactory
+                        # get_model_by_name, not agents[model]: the raw lookup raises a
+                        # bare KeyError whose whole message is the model id, which
+                        # surfaced as "Processing failed: 'gemini-flash'".
+                        processor = DocumentProcessorFactory.create_processor(
+                            "full", llm_mgr.get_model_by_name(model)
+                        )
+                        # Ensure tenant_id is passed in options
+                        processing_request.processing_options["tenant_id"] = tenant_id
+                        result = await processor.process_document(temp_path, processing_request.processing_options)
                     
-                    # Convert to expected format
-                    if result["status"] == "success":
-                        result = {
-                            "status": "success",
-                            "contract_id": result["contract_id"],
-                            "final_result": f"SUCCESS: Enhanced processing completed. Sections: {result['sections_extracted']}, Clauses: {result['clauses_extracted']}, CUAD: {result['cuad_classifications']}"
-                        }
+                        # Convert to expected format
+                        if result["status"] == "success":
+                            result = {
+                                "status": "success",
+                                "contract_id": result["contract_id"],
+                                "final_result": f"SUCCESS: Enhanced processing completed. Sections: {result['sections_extracted']}, Clauses: {result['clauses_extracted']}, CUAD: {result['cuad_classifications']}"
+                            }
                 else:
-                    # Use existing basic processing
-                    document_service = DocumentServiceFactory.create_service(llm_mgr)
-                    result = await document_service.process_pdf_upload(processing_request)
-                
+                    # The PDF agent: a second text extraction, then the model call
+                    # that pulls out parties and dates, then the Neo4j write.
+                    with trace_step("upload", "process_pdf", model=model) as step:
+                        document_service = DocumentServiceFactory.create_service(llm_mgr)
+                        result = await document_service.process_pdf_upload(processing_request)
+                        step.set(status=str(result.get("status")))
+
                 logger.info(f"Document processing completed successfully: {result}")
             except Exception as proc_error:
                 logger.error(f"Document processing failed: {str(proc_error)}")
@@ -358,6 +399,12 @@ async def upload_pdf(
                 # is the only field the upload panel shows, so it carries the
                 # explanation: for a model failure that is "the day's Gemini
                 # quota is gone, pick a Free · model", not a stack trace.
+                note(
+                    "upload",
+                    "processing_failed",
+                    error_type=type(proc_error).__name__,
+                    error=str(proc_error),
+                )
                 llm_error = classify_llm_error(proc_error, model)
                 response = {
                     "message": "PDF processing failed",
@@ -390,6 +437,8 @@ async def upload_pdf(
                 metadata={"filename": file.filename, "model": model}
             )
             
+            note("upload", "completed", contract_id=contract_id, status=result["status"])
+
             return {
                 "message": "PDF processing completed",
                 "filename": file.filename,

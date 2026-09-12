@@ -18,6 +18,7 @@ services:
       - GEMINI_PRO_MODEL=${GEMINI_PRO_MODEL-gemini-pro-latest}
       - DEFAULT_MODEL_ID=${DEFAULT_MODEL_ID-gemini-flash}
       - LOG_LEVEL=${LOG_LEVEL-INFO}
+      - DEBUG_EVENTS=${DEBUG_EVENTS-false}
       - PHOENIX_COLLECTOR_ENDPOINT=http://phoenix:6006/v1/traces
     depends_on:
       neo4j:

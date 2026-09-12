@@ -9,7 +9,7 @@ import { RedlineReview } from './RedlineReview';
 import { ViolationsDetail } from './ViolationsDetail';
 import { RiskDetail } from './RiskDetail';
 import { useModal } from '../../../lib/useModal';
-import { errorMessage } from '../../../lib/apiClient';
+import { apiFetch, errorMessage } from '../../../lib/apiClient';
 
 interface ContractClause {
   clause_type: string;
@@ -81,7 +81,10 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
     }, 500);
     
     try {
-      const response = await fetch(`/api/intelligence/contracts/${contractId}/analyze?model=${model}`, {
+      // apiFetch attaches the identity headers this call has always needed in
+      // production, and a correlation id that ties every step of the analysis
+      // together in the debug panel.
+      const response = await apiFetch(`/api/intelligence/contracts/${contractId}/analyze?model=${model}`, {
         method: 'POST',
       });
       

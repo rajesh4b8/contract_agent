@@ -1,6 +1,7 @@
 from backend.domain.entities import IContractRepository
 from backend.shared.utils.contract_search_tool import graph, embedding
 from backend.shared.utils.utils import parse_date_to_iso
+from backend.shared.debug import trace_step
 from typing import Dict, Any
 import uuid
 from datetime import datetime
@@ -76,7 +77,10 @@ class Neo4jContractRepository(IContractRepository):
             
             if summary_text:
                 try:
-                    contract_embedding = self.embedding_service.embed_query(summary_text)
+                    # A network round trip, separate from the chunk embeddings.
+                    with trace_step("upload", "embed_summary", chars=len(summary_text)) as step:
+                        contract_embedding = self.embedding_service.embed_query(summary_text)
+                        step.set(dimensions=len(contract_embedding))
                     logger.info(f"Generated embedding with {len(contract_embedding)} dimensions")
                 except Exception as e:
                     logger.warning(f"Failed to generate embedding: {e}")
@@ -116,8 +120,9 @@ class Neo4jContractRepository(IContractRepository):
             logger.info(f"Executing Neo4j query with params: {list(contract_params.keys())}")
             
             # Execute contract creation
-            result = self.graph.query(contract_query, contract_params)
-            
+            with trace_step("upload", "neo4j.create_contract", contract_id=contract_id):
+                result = self.graph.query(contract_query, contract_params)
+
             if not result:
                 raise Exception("Failed to create contract node")
             
@@ -127,7 +132,8 @@ class Neo4jContractRepository(IContractRepository):
             # Create party relationships
             parties = contract_data.get("parties", [])
             logger.info(f"Creating {len(parties)} party relationships")
-            self._create_party_relationships(created_contract_id, tenant_id, parties)
+            with trace_step("upload", "neo4j.link_parties", parties=len(parties)):
+                self._create_party_relationships(created_contract_id, tenant_id, parties)
             
             # Create governing law relationship
             governing_law = contract_data.get("governing_law")

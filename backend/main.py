@@ -24,6 +24,7 @@ from backend.governance.output_guard import OutputGuard
 from backend.governance.rbac import Permission, requires_permission
 from backend.infrastructure.audit_logger import AuditLogger
 from backend.shared.errors import LLMProviderError, describe_llm_error
+from backend.shared.debug import note, trace_step
 
 logger = get_logger(__name__)
 
@@ -122,6 +123,11 @@ app.include_router(policy_router)
 debug_router = create_debug_router()
 conditionally_include_router(app, debug_router, is_development())
 
+# Developer debug event stream. Always mounted so `/api/debug/status` can answer
+# "debug is off" — the stream endpoints themselves 404 unless DEBUG_EVENTS is set.
+from backend.api.debug_events import router as debug_events_router
+app.include_router(debug_events_router)
+
 @app.get("/api/workflow/status", dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])
 async def get_workflow_status():
     """Get current multi-agent workflow status for executive dashboard"""
@@ -213,9 +219,13 @@ async def _run_chat_turn(model: str, prompt: str, history: str, llm_mgr: LLMMana
     # 0. Log User Interaction
     agent_audit.log_user_interaction(user_id="user", prompt=prompt, session_id=session_id)
 
+    note("chat", "turn_started", model=model, prompt_chars=len(prompt), role=user_role)
+
     # 1. Prompt Guard Pre-Check
     guard = PromptGuard(audit_logger=audit_logger)
-    guard_result = guard.validate(prompt, context_metadata=context_metadata)
+    with trace_step("chat", "prompt_guard") as step:
+        guard_result = guard.validate(prompt, context_metadata=context_metadata)
+        step.set(safe=guard_result.is_safe, violation=guard_result.violation_type)
     
     # Log Prompt Guard Check
     agent_audit.log_guard_check(
@@ -227,6 +237,7 @@ async def _run_chat_turn(model: str, prompt: str, history: str, llm_mgr: LLMMana
 
     if not guard_result.is_safe:
         logger.error(f"Prompt blocked by Guard: {guard_result.violation_type}")
+        note("chat", "blocked", reason=str(guard_result.violation_type))
         yield f"data: {json.dumps({'content': guard_result.message, 'type': 'error'})}\n\n"
         yield f"data: {json.dumps({'content': '', 'type': 'end'})}\n\n"
         return
@@ -255,8 +266,15 @@ async def _run_chat_turn(model: str, prompt: str, history: str, llm_mgr: LLMMana
     
     # Buffer for post-check
     ai_full_content = ""
+    # Time to first token is the number that decides whether the chat feels
+    # broken: everything after it streams, everything before it is a blank box.
+    first_token_seen = False
+    note("chat", "stream_started", model=model)
 
     async for message in messages:
+        if not first_token_seen:
+            first_token_seen = True
+            note("chat", "first_token", model=model)
         if message[0] == "messages":
             chunk = message[1]
 
@@ -306,8 +324,12 @@ async def _run_chat_turn(model: str, prompt: str, history: str, llm_mgr: LLMMana
     if tool_contents:
         context_metadata["source_text"] = "\n---\n".join(tool_contents)
 
+    note("chat", "stream_ended", response_chars=len(ai_full_content))
+
     output_guard = OutputGuard(audit_logger=audit_logger)
-    post_check_result = output_guard.validate(ai_full_content, context_metadata=context_metadata)
+    with trace_step("chat", "output_guard") as step:
+        post_check_result = output_guard.validate(ai_full_content, context_metadata=context_metadata)
+        step.set(safe=post_check_result.is_safe, violation=post_check_result.violation_type)
     
     # Log Output Guard Check
     agent_audit.log_guard_check(

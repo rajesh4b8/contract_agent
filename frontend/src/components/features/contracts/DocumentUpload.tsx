@@ -2,7 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { Button } from '../../shared/ui/button';
 import { Card } from '../../shared/ui/card';
 import { Loader } from '../../shared/ui/loader';
-import { errorMessage } from '../../../lib/apiClient';
+import { apiFetch, errorMessage } from '../../../lib/apiClient';
 
 interface DocumentUploadProps {
   onUploadComplete?: (result: UploadResult) => void;
@@ -67,7 +67,10 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
       formData.append('file', file);
       formData.append('model', modelSelection);
 
-      const response = await fetch('/api/documents/upload', {
+      // apiFetch, not fetch: it attaches the role and tenant headers this call
+      // has always needed in production, and a correlation id so the debug
+      // panel can group every step of this upload into one run.
+      const response = await apiFetch('/api/documents/upload', {
         method: 'POST',
         body: formData
       });

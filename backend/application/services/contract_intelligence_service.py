@@ -3,6 +3,7 @@ from backend.domain.entities import ContractIntelligence, ContractClause, Policy
 from backend.infrastructure.contract_repository import Neo4jContractRepository
 from backend.llm_manager import LLMManager
 from backend.shared.errors import LLMProviderError, raise_if_provider_error
+from backend.shared.debug import atrace_step, note, trace_step
 import json
 import logging
 import time
@@ -87,8 +88,10 @@ class ContractIntelligenceService:
         
         try:
             # Get contract text from database
-            contract_data = await self.repository.get_contract_by_id(contract_id, tenant_id)
-            
+            async with atrace_step("analysis", "load_contract", contract_id=contract_id) as step:
+                contract_data = await self.repository.get_contract_by_id(contract_id, tenant_id)
+                step.set(found=bool(contract_data))
+
             if not contract_data:
                 logger.error(f"Contract not found: {contract_id}")
                 return None
@@ -114,8 +117,21 @@ class ContractIntelligenceService:
             )
             
             # Store intelligence results back to database
-            self._store_intelligence_results(contract_id, tenant_id, intelligence)
-            
+            with trace_step("analysis", "store_results", contract_id=contract_id) as step:
+                self._store_intelligence_results(contract_id, tenant_id, intelligence)
+                step.set(
+                    clauses=len(intelligence.clauses or []),
+                    violations=len(intelligence.violations or []),
+                )
+
+            note(
+                "analysis",
+                "completed",
+                contract_id=contract_id,
+                clauses=len(intelligence.clauses or []),
+                violations=len(intelligence.violations or []),
+                processing_s=round(intelligence.processing_time or 0, 2),
+            )
             return intelligence
             
         except Exception as e:
@@ -210,9 +226,18 @@ class ContractIntelligenceService:
             )
 
             logger.info(f"Stored {len(redlines)} redlines for contract {contract_id}")
+            note("analysis", "store_redlines", contract_id=contract_id, redlines=len(redlines))
         except Exception as e:
             # Non-fatal: the analysis itself succeeded and is already saved.
             logger.error(f"Failed to store redlines for {contract_id}: {e}")
+            note(
+                "analysis",
+                "store_redlines",
+                "error",
+                contract_id=contract_id,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
 
     def get_redlines(self, contract_id: str, tenant_id: str = "default-tenant") -> list:
         """Read back the stored redlines for a contract."""

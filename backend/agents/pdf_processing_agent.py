@@ -6,6 +6,8 @@ from backend.infrastructure.text_extractors import TextExtractionService
 from backend.infrastructure.contract_analyzer import LLMContractAnalyzer
 from backend.infrastructure.contract_repository import Neo4jContractRepository
 from backend.shared.errors import describe_llm_error
+from backend.shared.debug import trace_step
+import inspect
 import logging
 import json
 
@@ -136,11 +138,40 @@ def get_pdf_processing_agent(llm):
             return "analyze_contract"
         return "store_contract"
     
+    def traced(name, node):
+        """Report the node's timing to the debug panel.
+
+        Wrapped at registration so the node bodies, which each handle failure
+        their own way, stay as they are. `store_contract` is a coroutine
+        function and the other two are not, so the wrapper has to preserve
+        which kind it was — LangGraph awaits a node only if it is awaitable.
+        """
+        def record(step, result):
+            text = (result or {}).get("extracted_text")
+            if isinstance(text, str):
+                step.set(chars=len(text))
+            return result
+
+        if inspect.iscoroutinefunction(node):
+            async def run_async(state: PDFProcessingState) -> PDFProcessingState:
+                with trace_step("upload", f"pdf_agent.{name}") as step:
+                    return record(step, await node(state))
+
+            return run_async
+
+        def run(state: PDFProcessingState) -> PDFProcessingState:
+            with trace_step("upload", f"pdf_agent.{name}") as step:
+                return record(step, node(state))
+
+        return run
+
     # Build graph with proper state management
     builder = StateGraph(PDFProcessingState)
-    builder.add_node("extract_text", extract_text_node)
-    builder.add_node("analyze_contract", analyze_contract_node)
-    builder.add_node("store_contract", store_contract_node)
+    # Note `extract_text`: the API already extracted this PDF once before the
+    # agent ran, so the timeline shows the same work twice.
+    builder.add_node("extract_text", traced("extract_text", extract_text_node))
+    builder.add_node("analyze_contract", traced("analyze_contract", analyze_contract_node))
+    builder.add_node("store_contract", traced("store_contract", store_contract_node))
     
     builder.add_edge(START, "extract_text")
     builder.add_conditional_edges("extract_text", should_continue)

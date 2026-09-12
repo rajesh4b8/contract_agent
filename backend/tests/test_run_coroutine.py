@@ -35,3 +35,24 @@ def test_exceptions_propagate():
         assert "inner failure" in str(e)
     else:
         raise AssertionError("exception should propagate to the caller")
+
+
+async def test_the_correlation_id_survives_the_thread_hop():
+    """`ThreadPoolExecutor.submit` drops contextvars unless the context is copied.
+
+    Everything the analysis does runs behind this hop, so without the copy the
+    request's correlation id is absent from its logs and its debug events — the
+    two places you go looking when an analysis takes two minutes.
+    """
+    from backend.shared.utils.logger import correlation_id_var
+
+    async def read_it():
+        return correlation_id_var.get()
+
+    token = correlation_id_var.set("run-abc")
+    try:
+        seen = await asyncio.to_thread(lambda: run_coroutine(read_it()))
+    finally:
+        correlation_id_var.reset(token)
+
+    assert seen == "run-abc"
