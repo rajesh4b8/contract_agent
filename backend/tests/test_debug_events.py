@@ -14,6 +14,8 @@ from backend.shared.debug.instrument import atrace_step, note, trace_step
 @pytest.fixture
 def on(monkeypatch):
     monkeypatch.setenv("DEBUG_EVENTS", "true")
+    # Explicit, because the flag alone is not enough: production ignores it.
+    monkeypatch.setenv("ENVIRONMENT", "development")
 
 
 @pytest.fixture
@@ -43,6 +45,29 @@ class TestEnableFlag:
 
     def test_unset_is_off(self, off):
         assert debug_events_enabled() is False
+
+    def test_production_ignores_the_flag(self, monkeypatch):
+        """The events name filenames, tenants and contract ids, and the endpoint
+        serving them is unauthenticated. "Development only" has to be enforced,
+        not documented — a flag set by mistake in production must be inert."""
+        monkeypatch.setenv("DEBUG_EVENTS", "true")
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        assert debug_events_enabled() is False
+
+    def test_production_buffers_nothing(self, monkeypatch, bus):
+        """Checked at the gate rather than at the router, so there is nothing to
+        leak however the endpoints are reached."""
+        monkeypatch.setenv("DEBUG_EVENTS", "true")
+        monkeypatch.setenv("ENVIRONMENT", "production")
+        with trace_step("upload", "read_file") as step:
+            step.set(filename="client-contract.pdf")
+        note("upload", "received", tenant="acme")
+        assert bus.size() == 0
+
+    def test_development_with_the_flag_is_on(self, monkeypatch):
+        monkeypatch.setenv("DEBUG_EVENTS", "true")
+        monkeypatch.setenv("ENVIRONMENT", "development")
+        assert debug_events_enabled() is True
 
     def test_emit_is_a_no_op_when_off(self, off, bus):
         assert bus.emit("upload", "read_file", "start") is None

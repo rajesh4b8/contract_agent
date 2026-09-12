@@ -158,11 +158,18 @@ function runLabel(events: DebugEvent[]): string {
   return subject ? `${phases.join(' + ')} · ${subject}` : phases.join(' + ');
 }
 
-/** Steps still open: a `start` with no matching `end` or `error` yet. */
+/**
+ * Steps still open: a `start` with no matching `end` or `error` yet.
+ *
+ * Keyed by run as well as by step. This looks at every event the panel holds,
+ * which spans concurrent runs — without the correlation id, one run finishing
+ * `upload/process_pdf` would clear the running indicator for another run still
+ * inside it.
+ */
 export function inFlightSteps(events: DebugEvent[]): DebugEvent[] {
   const open = new Map<string, DebugEvent>();
   for (const event of events) {
-    const key = `${event.phase}/${event.step}`;
+    const key = `${event.correlation_id}|${event.phase}/${event.step}`;
     if (event.status === 'start') open.set(key, event);
     else if (event.status === 'end' || event.status === 'error') open.delete(key);
   }

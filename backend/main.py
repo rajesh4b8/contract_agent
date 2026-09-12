@@ -123,10 +123,14 @@ app.include_router(policy_router)
 debug_router = create_debug_router()
 conditionally_include_router(app, debug_router, is_development())
 
-# Developer debug event stream. Always mounted so `/api/debug/status` can answer
-# "debug is off" — the stream endpoints themselves 404 unless DEBUG_EVENTS is set.
+# Developer debug event stream. Mounted in development only, and the event
+# endpoints additionally require DEBUG_EVENTS — they carry filenames, tenant ids
+# and contract ids to an unauthenticated caller, so the environment gate is
+# enforced in three places rather than promised in the docs: here, in the
+# endpoints, and in `debug_events_enabled()`, which also stops a misconfigured
+# production process from buffering anything at all.
 from backend.api.debug_events import router as debug_events_router
-app.include_router(debug_events_router)
+conditionally_include_router(app, debug_events_router, is_development())
 
 @app.get("/api/workflow/status", dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])
 async def get_workflow_status():
@@ -272,9 +276,6 @@ async def _run_chat_turn(model: str, prompt: str, history: str, llm_mgr: LLMMana
     note("chat", "stream_started", model=model)
 
     async for message in messages:
-        if not first_token_seen:
-            first_token_seen = True
-            note("chat", "first_token", model=model)
         if message[0] == "messages":
             chunk = message[1]
 
@@ -308,6 +309,12 @@ async def _run_chat_turn(model: str, prompt: str, history: str, llm_mgr: LLMMana
         if message[0] == "messages":
             chunk = message[1][0]
             if isinstance(chunk, AIMessageChunk):
+                # Only a real token counts. The stream also carries `updates`
+                # frames and tool-call chunks, and marking the first of those
+                # would report a time-to-first-token that had not happened yet.
+                if not first_token_seen and chunk.content:
+                    first_token_seen = True
+                    note("chat", "first_token", model=model)
                 ai_full_content += chunk.content
 
     # 2. Llama Guard Post-Check

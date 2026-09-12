@@ -41,12 +41,27 @@ _MAX_FIELD_CHARS = 300
 
 
 def debug_events_enabled() -> bool:
-    """Whether the debug event stream is turned on, from ``DEBUG_EVENTS``.
+    """Whether the debug event stream is on: ``DEBUG_EVENTS``, and not production.
+
+    The environment check is not belt-and-braces. These events name filenames,
+    tenant ids, contract ids and provider errors, and the endpoint that serves
+    them is unauthenticated — so "development only" has to be something the code
+    enforces, not something the documentation asks for. Setting the flag on a
+    production deployment must be inert rather than an exfiltration endpoint.
+
+    Checking here rather than at the router means a misconfigured production
+    process does not even *buffer* the events, so there is nothing to leak
+    however the endpoints are reached.
 
     Read per call rather than cached at import so tests (and a reloaded worker)
-    can flip it with ``monkeypatch.setenv``. It is one dict lookup.
+    can flip it with ``monkeypatch.setenv``. It is two dict lookups.
     """
-    return os.getenv("DEBUG_EVENTS", "").strip().lower() in ("1", "true", "yes", "on")
+    if os.getenv("DEBUG_EVENTS", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    # Imported lazily to keep this module's imports to the standard library.
+    from backend.shared.utils.route_utils import is_production
+
+    return not is_production()
 
 
 def _clean_fields(fields: Dict[str, Any]) -> Dict[str, Any]:

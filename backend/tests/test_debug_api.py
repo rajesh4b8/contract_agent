@@ -33,6 +33,8 @@ def bus(monkeypatch):
 @pytest.fixture
 def on(monkeypatch):
     monkeypatch.setenv("DEBUG_EVENTS", "true")
+    # Explicit, because the flag alone is not enough: production ignores it.
+    monkeypatch.setenv("ENVIRONMENT", "development")
 
 
 @pytest.fixture

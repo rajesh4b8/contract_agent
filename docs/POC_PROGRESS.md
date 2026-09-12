@@ -935,7 +935,7 @@ agent's `extract_text` node.
 ### How to test
 
 ```bash
-make test    # 349 passed, 3 skipped
+make test    # 355 passed, 3 skipped
 ```
 
 I have set `DEBUG_EVENTS=true` in your `.env` and restarted the backend, so it is on now. In the app:
@@ -950,6 +950,32 @@ I have set `DEBUG_EVENTS=true` in your `.env` and restarted the backend, so it i
 ```bash
 curl -N http://localhost:8000/api/debug/events/stream   # the raw feed, no UI
 ```
+
+### Addressed in review (Copilot, PR #7)
+
+Four findings, all valid:
+
+- **"Development only" was documentation, not code.** The router was mounted unconditionally, so
+  `DEBUG_EVENTS=true` on a production deployment would have exposed filenames, tenant ids, contract
+  ids and provider errors to an unauthenticated caller. The gate now lives in
+  `debug_events_enabled()` itself, so a misconfigured production process does not even *buffer* the
+  events — there is nothing to leak however the endpoints are reached — and the router is mounted
+  only in development on top of that.
+- **Which uncovered a real deployment hole.** `ENVIRONMENT` was never passed into the backend
+  container, and the root `.env` is not copied into the image — so the container has always run as
+  `development`. That is why the production gate did nothing until compose was fixed, and it means
+  **RBAC's fail-closed-to-VIEWER path has never been reachable in this stack either.**
+- **Time to first token was measured from the wrong frame.** The stream carries `updates` frames and
+  tool-call chunks, and the flag was set on the first item of any kind — so the number reported was
+  earlier than the first token. It now waits for a non-empty `AIMessageChunk`.
+- **The test pinning the correlation-id fix did not exercise the branch it claimed to.**
+  `asyncio.to_thread` propagates the context itself and leaves the worker with no running loop, so
+  `run_coroutine` took the plain `asyncio.run` path and the test passed with or without the fix.
+  Called directly from the loop thread now — verified to fail when `copy_context` is reverted. The
+  pre-existing test above it had the same flaw and the same fix.
+- **Concurrent runs cancelled each other's "running" indicator.** `inFlightSteps` keyed on
+  `phase/step` across every run the panel holds, so one run finishing `upload/process_pdf` cleared it
+  for another still inside it. Keyed by correlation id as well.
 
 ### Limits
 

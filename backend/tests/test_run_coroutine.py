@@ -21,8 +21,15 @@ def test_runs_when_no_loop_is_active():
 
 
 async def test_runs_when_called_from_inside_a_running_loop():
-    """The server case: a sync callee reached from async code."""
-    assert await asyncio.to_thread(lambda: run_coroutine(_answer())) == 42
+    """The server case: a sync callee reached from async code.
+
+    Called directly from the loop's own thread, so `get_running_loop` succeeds
+    and the executor branch is the one under test. Going through
+    `asyncio.to_thread` would put the call in a worker with no running loop,
+    which takes the plain `asyncio.run` path instead — passing without ever
+    touching the code this is meant to cover.
+    """
+    assert run_coroutine(_answer()) == 42
 
 
 def test_exceptions_propagate():
@@ -51,7 +58,11 @@ async def test_the_correlation_id_survives_the_thread_hop():
 
     token = correlation_id_var.set("run-abc")
     try:
-        seen = await asyncio.to_thread(lambda: run_coroutine(read_it()))
+        # Directly, not via `asyncio.to_thread`: this has to be the executor
+        # branch. `to_thread` propagates the context itself and leaves no
+        # running loop in the worker, so the test would pass either way and
+        # pin nothing.
+        seen = run_coroutine(read_it())
     finally:
         correlation_id_var.reset(token)
 
