@@ -3,6 +3,9 @@
 **Resume point: Increment 5 — `awaiting your test`.**
 Run `make test`, then `make eval` with the stack up and the playbook seeded.
 
+Also awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
+(out-of-increment bug fix, from your report of an unexplained "processing error").
+
 This file is the live state of the POC work. It is committed, so any session on any machine can
 pick up by reading it first. The detailed reasoning behind the plan lives in the session that
 produced it; this file is what you and I actually work from.
@@ -757,6 +760,84 @@ failing a build over.
 - **1.00 across the board says the fixtures are not yet hard enough.** A benchmark everything
   passes has stopped providing information — the next useful move is adversarial fixtures
   (ambiguous drafting, breaches split across clauses, near-miss wording) rather than more of these.
+
+### Your feedback
+
+_(write here)_
+
+---
+
+## Fix — model failures now say what happened
+
+**Status: `awaiting your test`.** Not an increment — reported while testing: *"I am getting a
+processing error without a clear error message in case the AI agent quota expired or the agent is
+giving a forbidden or something else."*
+
+### What was actually wrong
+
+Three separate failures, all with the same symptom:
+
+1. **The message was the exception.** An upload rendered `Processing error: 429 You exceeded your
+   current quota ... [violations { quota_metric: ... }]`, or just `Processing failed: 'gemini-flash'`
+   — a bare `KeyError` on `llm_mgr.agents[model]` when the picked model had no key configured.
+2. **The analysis did not report a failure at all.** This was the worse one. With planning on (the
+   default), a refused call failed one step, and execution carried on to the end: the API answered
+   **200** with no clauses, no violations, risk `UNKNOWN`. On screen that is indistinguishable from
+   a contract with nothing wrong in it. The non-planning path did the same at three layers, and
+   `analyze_contract_by_id` turned any exception into `None`, which the API reports as **404
+   contract not found**.
+3. **Refusals were retried.** A spent quota answered the same way three times, ~30s apart, and the
+   planning path then fell back and ran the whole analysis again against the same dead model.
+
+### What changed
+
+**`backend/shared/errors/provider_errors.py`** — one place that reads a provider exception and says
+what happened and what to do. It classifies quota exhaustion, per-minute throttling, a rejected
+key, a forbidden model, a retired model, context-length, safety blocks, timeouts and provider
+outages, by class name, HTTP status and message text — no provider SDK imports, so an
+uninstalled provider costs nothing. It returns `None` for anything that is not plainly a model
+failure, which is what keeps a Neo4j outage from being reported as "the AI provider is down".
+
+The messages name the model and the way out: *"Google Gemini (model 'gemini-flash') has no quota
+left on this API key. The Gemini free tier allows only a handful of requests per day and resets at
+midnight Pacific. Pick one of the 'Free ·' models in the dropdown to keep working, or enable
+billing on the key in GOOGLE_API_KEY."*
+
+- **The status code is the failure's own**, not a blanket 500: 429 for quota and throttling (with
+  `Retry-After`), 504 for a timeout, 502 for a provider outage, 422 for a document too long.
+  A *server-side* key problem answers **503, never 401/403** — those two are how this API says
+  "you are not allowed", and the reviewer is.
+- **A refused analysis raises instead of returning an empty one.** Clause extraction is the step
+  nothing can proceed without, so a refusal there stops the run in both the planned and the
+  traditional path. Later steps still degrade — a partial analysis is worth having — but the API
+  now returns `warnings` naming each stage that did not run and why, and the UI lists them in the
+  "Partial Analysis Results" panel instead of "Some analysis components may have failed".
+- **Refusals are not retried**, in either the step executor or the planning fallback.
+- **The chat stream** reports the reason as an `error` event rather than closing the connection and
+  leaving "Error: Failed to generate the response".
+- Search classifies too — semantic search embeds the query, so it hits the same quota.
+
+**One unrelated bug this uncovered:** the chat was broken outright. The prompt-injection validator
+matched its patterns against an undefined name (`prompt` instead of `input_text`), so *every* chat
+turn raised `NameError` inside the guard and killed the stream before a single token — which is
+exactly why it presented as "Error: Failed to generate the response". Fixed, with tests.
+
+### How to test
+
+```bash
+make test            # 282 passed, 3 skipped
+```
+
+To see it in the app, force a failure without waiting for a real quota to run out — put a bad key
+in `.env`, restart the backend, and upload a contract:
+
+```bash
+GOOGLE_API_KEY=not-a-real-key      # → "rejected the API key as invalid or expired. Check GOOGLE_API_KEY…"
+```
+
+Or pick a model whose provider has no key set at all (the dropdown marks these "API key not set")
+and analyse a contract: the panel should name the missing variable rather than showing an empty
+analysis. The real quota case is the Gemini free tier — a few analyses in a day will reach it.
 
 ### Your feedback
 

@@ -14,6 +14,7 @@ from backend.application.services.contract_intelligence_service import ContractI
 from backend.llm_manager import LLMManager
 from backend.shared.config.models import DEFAULT_MODEL_ID
 from backend.infrastructure.contract_repository import Neo4jContractRepository
+from backend.shared.errors import raise_if_provider_error
 import json
 import logging
 from typing import Optional
@@ -66,6 +67,10 @@ async def analyze_contract_intelligence(
             "processing_time": intelligence.processing_time,
             "model_used": model,
             "phase_used": "phase3_optimized",
+            # Stages that degraded (no playbook check, no redlines drafted, and
+            # why). The UI shows these above the results: an analysis missing
+            # half its steps must not look like a contract with no findings.
+            "warnings": intelligence.warnings,
             "results": {
                 "clauses": [
                     {
@@ -130,6 +135,9 @@ async def analyze_contract_intelligence(
     except HTTPException:
         raise
     except Exception as e:
+        # A model failure answers with its own status and explanation (429 and
+        # "the day's quota is gone"), not a blanket 500 carrying a stack trace.
+        raise_if_provider_error(e, model)
         logger.error(f"Intelligence analysis failed for contract {contract_id}: {e}")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 

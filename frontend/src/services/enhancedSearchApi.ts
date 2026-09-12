@@ -1,4 +1,5 @@
 import { EnhancedSearchParams } from '../components/search/EnhancedSearchInterface';
+import { errorMessage } from '../lib/apiClient';
 
 const API_BASE_URL = 'http://localhost:8000';
 
@@ -34,7 +35,10 @@ class EnhancedSearchApi {
     });
 
     if (!response.ok) {
-      throw new Error(`Search failed: ${response.statusText}`);
+      // Semantic search embeds the query, so it can fail for the same reasons
+      // an analysis does — a spent embedding quota reads as "Search failed:
+      // Internal Server Error" unless the server's own reason is used.
+      throw new Error(await errorMessage(response, 'Search failed'));
     }
 
     return response.json();

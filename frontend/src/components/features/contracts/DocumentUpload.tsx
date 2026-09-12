@@ -2,6 +2,7 @@ import React, { useState, useCallback } from 'react';
 import { Button } from '../../shared/ui/button';
 import { Card } from '../../shared/ui/card';
 import { Loader } from '../../shared/ui/loader';
+import { errorMessage } from '../../../lib/apiClient';
 
 interface DocumentUploadProps {
   onUploadComplete?: (result: UploadResult) => void;
@@ -72,9 +73,10 @@ export const DocumentUpload: React.FC<DocumentUploadProps> = ({
       });
 
       if (!response.ok) {
-        const errorText = await response.text();
-        // removed console error
-        throw new Error(`Upload failed: ${response.status} - ${errorText}`);
+        // The server explains a model failure in `detail` ("Gemini has no
+        // quota left on this API key — pick one of the Free · models"). The
+        // old text dumped the raw body next to a status code instead.
+        throw new Error(await errorMessage(response, 'Upload failed'));
       }
 
       const responseText = await response.text();

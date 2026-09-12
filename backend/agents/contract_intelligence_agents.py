@@ -12,6 +12,7 @@ from backend.infrastructure.playbook_loader import (
     attach_violated_policy as _attach_violated_policy,
     load_rules_for_tenant,
 )
+from backend.shared.errors import describe_llm_error, raise_if_provider_error
 import json
 import logging
 
@@ -38,14 +39,33 @@ def run_coroutine(coro):
         return executor.submit(asyncio.run, coro).result()
 
 
+def _stage_warnings(state: dict) -> list:
+    """What silently degraded during a run, in words a reviewer can act on.
+
+    A stage that fails on its own — the playbook check, the redline drafting —
+    leaves an empty list behind, and an empty list is indistinguishable from
+    "nothing to report". These warnings are what stop a rate-limited run from
+    being read as a clean contract.
+    """
+    stages = (
+        ("policy_check_failed", "Policy compliance could not be checked"),
+        ("risk_calculation_failed", "The risk score could not be calculated"),
+        ("redline_generation_failed", "Redlines could not be drafted"),
+    )
+    return [f"{label}: {state[key]}" for key, label in stages if state.get(key)]
+
+
 class IntelligenceOrchestrator:
     """Proper multi-agent orchestrator following SOLID principles"""
     
-    def __init__(self, llm):
+    def __init__(self, llm, model_id: str = None):
         self.llm = llm
+        # The public model id behind `llm`, carried only so a failure can name
+        # the model the reviewer picked rather than say "the AI provider".
+        self.model_id = model_id
         self.workflow = self._build_workflow()
         self.planning_agent = PlanningAgentFactory.create_planning_agent()
-        self.execution_engine = PlanExecutionEngine(llm)
+        self.execution_engine = PlanExecutionEngine(llm, model_id)
     
     def _build_workflow(self) -> StateGraph:
         """Build workflow with proper state management"""
@@ -95,6 +115,11 @@ class IntelligenceOrchestrator:
                 "current_step": "clause_extraction"
             }
         except Exception as e:
+            # Everything downstream reads the clauses, so when the model itself
+            # is unavailable the run cannot produce an analysis — only an empty
+            # one that reads like a clean bill of health. Fail loudly instead;
+            # the API turns this into the real reason and status code.
+            raise_if_provider_error(e, self.model_id)
             workflow_tracker.error_agent(execution, f"Clause extraction failed: {e}")
             return {**state,
                 "extracted_clauses": [],
@@ -192,10 +217,11 @@ class IntelligenceOrchestrator:
             workflow_tracker.error_agent(execution, f"Policy checking misconfigured: {e}")
             raise
         except Exception as e:
-            workflow_tracker.error_agent(execution, f"Policy checking failed: {e}")
+            reason = describe_llm_error(e, self.model_id, fallback=str(e))
+            workflow_tracker.error_agent(execution, f"Policy checking failed: {reason}")
             return {**state,
                 "policy_violations": [],
-                "policy_check_failed": str(e),
+                "policy_check_failed": reason,
             }
     
     def _calculate_risks(self, state: IntelligenceState) -> IntelligenceState:
@@ -223,8 +249,12 @@ class IntelligenceOrchestrator:
                 "current_step": "risk_calculation"
             }
         except Exception as e:
-            workflow_tracker.error_agent(execution, f"Risk calculation failed: {e}")
-            return {**state, "risk_data": {"overall_risk_score": 50.0, "risk_level": "MEDIUM"}}
+            reason = describe_llm_error(e, self.model_id, fallback=str(e))
+            workflow_tracker.error_agent(execution, f"Risk calculation failed: {reason}")
+            return {**state,
+                "risk_data": {"overall_risk_score": 50.0, "risk_level": "MEDIUM"},
+                "risk_calculation_failed": reason,
+            }
     
     def _generate_redlines(self, state: IntelligenceState) -> IntelligenceState:
         """Generate redlines - Single Responsibility"""
@@ -253,10 +283,11 @@ class IntelligenceOrchestrator:
             # Flag the failure. An empty list here is indistinguishable from
             # "nothing needed redlining", and persistence would then delete
             # drafts a reviewer may already be working from.
-            workflow_tracker.error_agent(execution, f"Redline generation failed: {e}")
+            reason = describe_llm_error(e, self.model_id, fallback=str(e))
+            workflow_tracker.error_agent(execution, f"Redline generation failed: {reason}")
             return {**state,
                 "redline_suggestions": [],
-                "redline_generation_failed": str(e),
+                "redline_generation_failed": reason,
                 "is_complete": True,
             }
     
@@ -457,13 +488,22 @@ class IntelligenceOrchestrator:
                             self._analyze_with_planning(contract_text, tenant_id, contract_type)
                         )
                 except Exception as planning_error:
+                    # Retrying the whole analysis against a model that just
+                    # refused the request only burns what is left of the quota
+                    # and fails again a minute later, so provider failures skip
+                    # the fallback and go straight back to the caller.
+                    raise_if_provider_error(planning_error, self.model_id)
                     logger.error(f"Planning agent failed: {planning_error}, falling back to traditional workflow")
                     return self._analyze_traditional(contract_text, tenant_id, contract_type)
             else:
                 return self._analyze_traditional(contract_text, tenant_id, contract_type)
             
         except Exception as e:
-            logger.error(f"Analysis failed: {e}")
+            # An empty analysis is a legitimate answer to "this contract has no
+            # findings" and an illegitimate one to "the model refused us".
+            # Never let the second masquerade as the first.
+            raise_if_provider_error(e, self.model_id)
+            logger.error(f"Analysis failed: {e}", exc_info=True)
             return {
                 "clauses": [],
                 "violations": [],
@@ -538,6 +578,7 @@ class IntelligenceOrchestrator:
             "contract_text": contract_text,
             "tenant_id": tenant_id,
             "contract_type": contract_type,
+            "model_id": self.model_id,
             "extracted_clauses": [],
             "policy_violations": [],
             "risk_data": {},
@@ -564,6 +605,7 @@ class IntelligenceOrchestrator:
             "risk_assessment": final_state["risk_data"],
             "redlines": final_state["redline_suggestions"],
             "redlines_generated": not final_state.get("redline_generation_failed"),
+            "warnings": _stage_warnings(final_state),
             "cuad_deviations": final_state.get("cuad_deviations", []),
             "jurisdiction_info": final_state.get("jurisdiction_info", {}),
             "precedent_matches": final_state.get("precedent_matches", []),
@@ -577,6 +619,6 @@ class ContractIntelligenceAgentFactory:
     """Factory following proper design patterns"""
     
     @staticmethod
-    def create_orchestrator(llm):
+    def create_orchestrator(llm, model_id: str = None):
         """Create orchestrator with proper architecture"""
-        return IntelligenceOrchestrator(llm)
+        return IntelligenceOrchestrator(llm, model_id)

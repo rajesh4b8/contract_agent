@@ -168,6 +168,27 @@ def provider_configured(provider: str) -> bool:
     return any(os.getenv(name) for name in _PROVIDER_KEY_ENV.get(provider, ()))
 
 
+def provider_key_env(provider: str) -> tuple[str, ...]:
+    """The env var names that hold ``provider``'s API key.
+
+    Error reporting uses this to name the variable an operator has to fix
+    instead of saying "the API key" and leaving them to guess.
+    """
+    return _PROVIDER_KEY_ENV.get(provider, ())
+
+
+def find_model(model_id: str | None) -> ModelOption | None:
+    """The catalogue entry for an id, or ``None`` when it is not one of ours.
+
+    Unlike :func:`get_model` this does not fall back to the default, so a
+    caller that needs to know *which* model failed cannot be handed the wrong
+    one's provider.
+    """
+    if not model_id:
+        return None
+    return _BY_ID.get(model_id) or _BY_ID.get(LEGACY_ALIASES.get(model_id, ""))
+
+
 def normalize_model_id(model_id: str | None) -> str:
     """Resolve legacy/blank ids to a current, known id.
 

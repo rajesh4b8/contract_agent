@@ -4,6 +4,7 @@ from backend.application.services.enhanced_document_processing_service import En
 from backend.domain.entities import DocumentProcessingRequest
 from backend.llm_manager import LLMManager
 from backend.shared.config.models import DEFAULT_MODEL_ID
+from backend.shared.errors import classify_llm_error, raise_if_provider_error
 import os
 import uuid
 import logging
@@ -141,16 +142,24 @@ async def upload_pdf_enhanced(
             import traceback
             logger.error(f"Processing traceback: {traceback.format_exc()}")
             
-            return {
+            # `details` is the only field the upload panel renders, so it gets
+            # the explanation rather than the exception's repr.
+            llm_error = classify_llm_error(proc_error, model)
+            response = {
                 "message": "Enhanced PDF processing failed",
                 "filename": file.filename,
                 "status": "error",
                 "contract_id": None,
-                "details": f"Processing error: {str(proc_error)}",
+                "details": llm_error.message if llm_error else f"Processing error: {proc_error}",
                 "model_used": model,
                 "enhanced_embeddings": False,
                 "error_type": type(proc_error).__name__
             }
+            if llm_error:
+                response["error_kind"] = llm_error.failure.value
+                response["provider"] = llm_error.provider
+                response["retry_after"] = llm_error.retry_after
+            return response
         
         logger.info(f"Enhanced PDF processing completed for {file.filename}: {result['status']}")
         
@@ -187,6 +196,7 @@ async def upload_pdf_enhanced(
             except Exception as cleanup_error:
                 logger.error(f"Failed to cleanup temp file: {cleanup_error}")
                 
+        raise_if_provider_error(e, model)
         raise HTTPException(status_code=500, detail=f"Enhanced processing failed: {str(e)}")
     finally:
         logger.info(f"=== ENHANCED UPLOAD END: {file.filename if file else 'unknown'} ===")

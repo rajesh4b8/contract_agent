@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from backend.domain.search_entities import SearchLevel, SearchParams
 from backend.application.services.enhanced_search_service import EnhancedSearchService
 from backend.shared.utils.search_mapper import SearchResponseMapper
+from backend.shared.errors import raise_if_provider_error
 import logging
 
 from backend.shared.utils.logger import get_logger
@@ -95,6 +96,9 @@ async def enhanced_contract_search(request: EnhancedSearchRequest):
         return response
         
     except Exception as e:
+        # Semantic search embeds the query, so it can hit the same quota
+        # and key failures an analysis does.
+        raise_if_provider_error(e)
         raise HTTPException(status_code=500, detail=f"Search failed: {str(e)}")
 
 @router.post("/search/clauses", dependencies=[Depends(requires_permission(Permission.ANALYZE))])
@@ -111,6 +115,7 @@ async def search_clauses(request: ClauseSearchRequest):
 
         
     except Exception as e:
+        raise_if_provider_error(e)
         raise HTTPException(status_code=500, detail=f"Clause search failed: {str(e)}")
 
 @router.post("/search/sections", dependencies=[Depends(requires_permission(Permission.ANALYZE))])
@@ -127,6 +132,7 @@ async def search_sections(request: SectionSearchRequest):
 
         
     except Exception as e:
+        raise_if_provider_error(e)
         raise HTTPException(status_code=500, detail=f"Section search failed: {str(e)}")
 
 @router.post("/search/relationships", dependencies=[Depends(requires_permission(Permission.ANALYZE))])
@@ -143,6 +149,7 @@ async def search_relationships(request: RelationshipSearchRequest):
 
         
     except Exception as e:
+        raise_if_provider_error(e)
         raise HTTPException(status_code=500, detail=f"Relationship search failed: {str(e)}")
 
 @router.get("/search/clause-types")

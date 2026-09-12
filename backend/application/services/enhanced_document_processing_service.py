@@ -4,6 +4,7 @@ from backend.domain.value_objects import ProcessingResult, ProcessingStatus
 from backend.agents.agent_workflow_tracker import workflow_tracker
 from backend.embeddings.orchestrator import EmbeddingOrchestrator
 from backend.embeddings.validator import EmbeddingValidator
+from backend.shared.errors import describe_llm_error
 from langchain_neo4j import Neo4jGraph
 import os
 import logging
@@ -85,6 +86,7 @@ class EnhancedDocumentProcessingService:
         # Create initial state
         initial_state = {
             "file_path": request.file_path,
+            "model_id": request.processing_options.get("model"),
             "extracted_text": None,
             "contract_data": None,
             "processing_result": None,
@@ -100,12 +102,16 @@ class EnhancedDocumentProcessingService:
             extracted_text = final_state.get("extracted_text", "")
             
             if not processing_result or not processing_result.contract_id:
-                workflow_tracker.error_agent(pdf_execution, "PDF processing failed")
+                # The node that failed already wrote the reason; pass it on
+                # rather than replacing it with a bare "PDF processing failed",
+                # which is the whole complaint this fix is about.
+                reason = getattr(processing_result, "error", None) or "PDF processing failed"
+                workflow_tracker.error_agent(pdf_execution, reason)
                 workflow_tracker.complete_workflow()
                 return {
                     "status": "error",
                     "filename": request.filename,
-                    "final_result": "PDF processing failed",
+                    "final_result": reason,
                     "contract_id": None
                 }
             
@@ -132,13 +138,17 @@ class EnhancedDocumentProcessingService:
             }
             
         except Exception as e:
-            workflow_tracker.error_agent(pdf_execution, f"Processing failed: {str(e)}")
+            reason = describe_llm_error(
+                e, request.processing_options.get("model"),
+                fallback=f"Enhanced processing failed: {e}",
+            )
+            workflow_tracker.error_agent(pdf_execution, reason)
             workflow_tracker.complete_workflow()
-            logger.error(f"Enhanced processing failed: {e}")
+            logger.error(f"Enhanced processing failed: {e}", exc_info=True)
             return {
                 "status": "error",
                 "filename": request.filename,
-                "final_result": f"Enhanced processing failed: {str(e)}",
+                "final_result": reason,
                 "contract_id": None
             }
     

@@ -18,7 +18,11 @@ class InjectionValidator(IGuardValidator):
 
     def validate(self, input_text: str, context: Optional[Dict[str, Any]] = None) -> GuardResult:
         for pattern in self.PATTERNS:
-            if re.search(pattern, prompt):
+            # `input_text`, not `prompt`: the undefined name raised a NameError
+            # on the first pattern of every chat turn, which killed the stream
+            # before a single token and left the UI on "Failed to generate the
+            # response" — the guard blocked everything, injection or not.
+            if re.search(pattern, input_text):
                 return GuardResult(
                     is_safe=False,
                     violation_type="PROMPT_INJECTION",

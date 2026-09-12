@@ -5,6 +5,7 @@ from backend.domain.value_objects import ProcessingResult, ProcessingStatus, Con
 from backend.infrastructure.text_extractors import TextExtractionService
 from backend.infrastructure.contract_analyzer import LLMContractAnalyzer
 from backend.infrastructure.contract_repository import Neo4jContractRepository
+from backend.shared.errors import describe_llm_error
 import logging
 import json
 
@@ -60,10 +61,13 @@ def get_pdf_processing_agent(llm):
             logger.info(f"Analysis complete: confidence={contract_data.confidence_score}")
             return {**state, "contract_data": contract_data}
         except Exception as e:
-            logger.error(f"Contract analysis failed: {e}")
+            logger.error(f"Contract analysis failed: {e}", exc_info=True)
+            # This error string is what the upload panel ends up showing, so a
+            # model failure is described rather than dumped: "the day's quota
+            # is gone" instead of a 4KB protobuf of quota violations.
             return {**state, "processing_result": ProcessingResult(
                 status=ProcessingStatus.ERROR,
-                error=f"Analysis failed: {str(e)}"
+                error=describe_llm_error(e, state.get("model_id"), fallback=f"Analysis failed: {e}")
             )}
     
     async def store_contract_node(state: PDFProcessingState) -> PDFProcessingState:
