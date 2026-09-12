@@ -4,6 +4,7 @@ from backend.infrastructure.contract_repository import Neo4jContractRepository
 from backend.llm_manager import LLMManager
 from backend.shared.errors import LLMProviderError, raise_if_provider_error
 from backend.shared.debug import atrace_step, note, trace_step
+import asyncio
 import json
 import logging
 import time
@@ -109,13 +110,26 @@ class ContractIntelligenceService:
                 logger.error(f"Contract data keys: {list(contract_data.keys())}")
                 return None
             
-            # Perform analysis with optional planning
-            intelligence = self.analyze_contract_intelligence(
+            # Perform analysis with optional planning.
+            #
+            # On a worker thread, because this is a minute of synchronous work —
+            # three sequential model calls — reached from a coroutine. Run
+            # in-line it blocks the event loop for its whole duration, and while
+            # it is blocked the server answers nothing at all: not the debug
+            # stream, not the 500ms `/api/workflow/status` poll this very page
+            # is making, not another user's request. Measured before this
+            # change: a trivial `/api/debug/status` call took 6.4s to answer
+            # because it waited for the analysis to finish.
+            #
+            # `to_thread` copies the context, so the correlation id still
+            # reaches the analysis and its debug events.
+            intelligence = await asyncio.to_thread(
+                self.analyze_contract_intelligence,
                 contract_text, model, use_planning,
-                tenant_id=tenant_id,
-                contract_type=contract_data.get("contract_type") or "general",
+                tenant_id,
+                contract_data.get("contract_type") or "general",
             )
-            
+
             # Store intelligence results back to database
             with trace_step("analysis", "store_results", contract_id=contract_id) as step:
                 self._store_intelligence_results(contract_id, tenant_id, intelligence)

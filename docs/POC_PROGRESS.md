@@ -935,7 +935,7 @@ agent's `extract_text` node.
 ### How to test
 
 ```bash
-make test    # 355 passed, 3 skipped
+make test    # 359 passed, 3 skipped
 ```
 
 I have set `DEBUG_EVENTS=true` in your `.env` and restarted the backend, so it is on now. In the app:
@@ -976,6 +976,26 @@ Four findings, all valid:
 - **Concurrent runs cancelled each other's "running" indicator.** `inFlightSteps` keyed on
   `phase/step` across every run the panel holds, so one run finishing `upload/process_pdf` cleared it
   for another still inside it. Keyed by correlation id as well.
+
+### Addressed from your manual testing
+
+**"Analysis events don't appear until it's finished."** The cause was not the panel — the analysis
+was running *on the event loop thread*. `analyze_contract_by_id` is a coroutine, but it called the
+synchronous `analyze_contract_intelligence` in line, so for the whole analysis the server answered
+nothing at all: not the debug stream, not the 500ms `/api/workflow/status` poll the page itself was
+making, not another user's request. Measured before the fix, a trivial `/api/debug/status` call took
+**6.4 seconds** to answer because it waited for the analysis to finish. It now runs via
+`asyncio.to_thread` (which copies the context, so the correlation id still reaches it). Measured
+after: probe latency stays at **2ms** throughout, and the first events land ~1s in.
+
+That is a product bug in its own right — the upload path already awaited properly, which is why its
+events always streamed.
+
+**"Show the latest first."** Runs were already newest-first; the steps inside a run now are too.
+`buildRows` still folds start/end pairs chronologically — only the display is reversed. While there:
+`chunking.embed.progress` events now fold into their parent row as a live `done=n total=m` instead of
+becoming one row per chunk, which on a real contract was a hundred lines of scrolling between you and
+everything else.
 
 ### Limits
 

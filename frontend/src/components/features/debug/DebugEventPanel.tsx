@@ -8,7 +8,7 @@
  *
  * Rendered only when the backend reports `DEBUG_EVENTS` on.
  */
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Card } from '../../shared/ui/card';
 import {
   DebugEvent,
@@ -148,12 +148,12 @@ export const DebugEventPanel: React.FC = () => {
 const RunTimeline: React.FC<{ run: DebugRun }> = ({ run }) => {
   const rows = useMemo(() => buildRows(run.events), [run.events]);
   const hasOpenStep = rows.some((r) => r.open);
-  const endRef = useRef<HTMLDivElement>(null);
 
-  // Follow the newest step, which is the one you are waiting on.
-  useEffect(() => {
-    endRef.current?.scrollIntoView({ block: 'nearest' });
-  }, [rows.length]);
+  // Newest first. The step you are waiting on is the one you came here to see,
+  // so it belongs at the top rather than at the end of a list you have to
+  // scroll. `buildRows` still folds start/end pairs in chronological order —
+  // only the display is reversed.
+  const newestFirst = useMemo(() => rows.slice().reverse(), [rows]);
 
   return (
     <div className="bg-white border border-slate-200 rounded-lg">
@@ -166,10 +166,9 @@ const RunTimeline: React.FC<{ run: DebugRun }> = ({ run }) => {
       </div>
 
       <div className="divide-y divide-slate-50">
-        {rows.map((row) => (
+        {newestFirst.map((row) => (
           <Row key={row.key} row={row} runStart={run.startedAt} />
         ))}
-        <div ref={endRef} />
       </div>
     </div>
   );
@@ -187,10 +186,14 @@ interface Row {
 }
 
 /**
- * Fold start/end pairs into one row each.
+ * Fold start/end pairs into one row each, chronologically.
  *
  * A step that has started but not finished stays `open`, which is what gets the
  * live timer — the whole reason this panel exists.
+ *
+ * Progress events fold into their own step's row rather than becoming rows of
+ * their own: chunk embedding emits one per chunk, and on a real contract that
+ * is a hundred lines of `done=n` between you and everything else.
  */
 function buildRows(events: DebugEvent[]): Row[] {
   const rows: Row[] = [];
@@ -223,7 +226,7 @@ function buildRows(events: DebugEvent[]): Row[] {
           durationMs: event.duration_ms,
           open: false,
           failed: event.status === 'error',
-          fields: event.fields,
+          fields: { ...rows[index].fields, ...event.fields },
         };
         return;
       }
@@ -241,7 +244,22 @@ function buildRows(events: DebugEvent[]): Row[] {
       return;
     }
 
-    // `info`: a point in time — progress inside a step, a note, a retry.
+    // `info`. A `<step>.progress` event updates the row for `<step>` in place.
+    const progressOf = event.step.endsWith('.progress')
+      ? openIndex.get(`${event.phase}/${event.step.slice(0, -'.progress'.length)}`)
+      : undefined;
+    if (progressOf !== undefined) {
+      const { elapsed_ms: _elapsed, ...rest } = event.fields;
+      rows[progressOf] = {
+        ...rows[progressOf],
+        fields: { ...rows[progressOf].fields, ...rest },
+      };
+      return;
+    }
+
+    // Otherwise a point in time of its own: a note or a retry. A one-off
+    // failure arrives with status `error` and is handled above, whether or not
+    // it had a matching `start`.
     rows.push({
       key: `${event.seq}`,
       phase: event.phase,
