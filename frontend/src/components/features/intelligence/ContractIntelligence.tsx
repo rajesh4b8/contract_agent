@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Button } from '../../shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../../shared/ui/card';
 import { Badge } from '../../shared/ui/badge';
@@ -10,6 +10,7 @@ import { ViolationsDetail } from './ViolationsDetail';
 import { RiskDetail } from './RiskDetail';
 import { useModal } from '../../../lib/useModal';
 import { apiFetch, errorMessage } from '../../../lib/apiClient';
+import { getStoredAnalysis, type AnalysisStatus } from '../../../services/mattersApi';
 
 interface ContractClause {
   clause_type: string;
@@ -45,7 +46,7 @@ interface ContractIntelligenceProps {
   contractId: string;
   model?: string;
   onWorkflowUpdate?: (status: any) => void;
-  onAnalysisComplete?: (contractId: string, riskScore?: number, riskLevel?: string) => void;
+  onAnalysisComplete?: (contractId: string, riskScore?: number, riskLevel?: string, results?: unknown) => void;
 }
 
 export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({ 
@@ -59,7 +60,46 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [networkError, setNetworkError] = useState(false);
+  const [restoring, setRestoring] = useState(true);
+  const [storedStatus, setStoredStatus] = useState<AnalysisStatus>('NOT_STARTED');
   const { openModal, closeModal, isOpen } = useModal();
+
+  /**
+   * Serve the stored review first.
+   *
+   * Findings, evidence spans and the risk narrative are on the graph now, so
+   * reopening a matter — or simply refreshing — costs one GET rather than two
+   * minutes and a model call. Before this, `results` was React state seeded
+   * only by pressing Analyse, so every refresh threw the review away.
+   */
+  const loadStored = useCallback(async () => {
+    setRestoring(true);
+    try {
+      const stored = await getStoredAnalysis(contractId);
+      if (!stored) return;
+      setStoredStatus(stored.analysis_status);
+      setWarnings(Array.isArray(stored.warnings) ? stored.warnings : []);
+      const hasFindings =
+        (stored.results?.clauses?.length ?? 0) > 0 ||
+        (stored.results?.violations?.length ?? 0) > 0 ||
+        (stored.results?.redlines?.length ?? 0) > 0;
+      if (hasFindings || stored.analysis_status === 'COMPLETE') {
+        setResults(stored.results as unknown as IntelligenceResults);
+      }
+    } catch {
+      // A missing stored review is not an error worth showing: the Analyse
+      // button is right there, and an unanalysed contract is the normal case.
+    } finally {
+      setRestoring(false);
+    }
+  }, [contractId]);
+
+  useEffect(() => {
+    setResults(null);
+    setWarnings([]);
+    setError(null);
+    void loadStored();
+  }, [loadStored]);
 
   const analyzeContract = async () => {
     setLoading(true);
@@ -84,7 +124,10 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       // apiFetch attaches the identity headers this call has always needed in
       // production, and a correlation id that ties every step of the analysis
       // together in the debug panel.
-      const response = await apiFetch(`/api/intelligence/contracts/${contractId}/analyze?model=${model}`, {
+      // An empty model means "whatever the backend's default is" — sending
+      // `model=` would otherwise be a request for a model called nothing.
+      const query = model ? `?model=${encodeURIComponent(model)}` : '';
+      const response = await apiFetch(`/api/intelligence/contracts/${contractId}/analyze${query}`, {
         method: 'POST',
       });
       
@@ -211,13 +254,41 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
         </div>
         <Button 
           onClick={analyzeContract} 
-          disabled={loading}
+          disabled={loading || restoring}
           className="flex items-center gap-2"
         >
           <Brain className="h-4 w-4" />
-          {loading ? 'Analyzing...' : 'Analyze'}
+          {loading ? 'Analyzing...' : results ? 'Re-analyse' : 'Analyze'}
         </Button>
       </div>
+
+      {/* Reading the stored review back, before anything else is decided. */}
+      {restoring && !results && (
+        <Card className="border-slate-200">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 text-slate-500">
+              <Clock className="h-4 w-4 animate-spin" />
+              <span>Loading the stored review…</span>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* An analysis that never ran is said out loud. Rendering it as an empty
+          result set would read as a contract with nothing wrong with it. */}
+      {!restoring && !results && storedStatus === 'FAILED' && (
+        <Card className="border-yellow-200 bg-yellow-50">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 text-yellow-700">
+              <AlertTriangle className="h-4 w-4" />
+              <span className="font-medium">The last analysis did not complete</span>
+            </div>
+            <p className="text-sm text-yellow-700 mt-1">
+              {warnings[0] ?? 'No findings were stored. Run the analysis again.'}
+            </p>
+          </CardContent>
+        </Card>
+      )}
 
       {/* Network Error State */}
       {networkError && renderNetworkError()}
@@ -251,7 +322,7 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       )}
 
       {/* Empty Results Fallback */}
-      {!loading && !error && results && 
+      {!loading && !restoring && !error && results && 
        (!results.clauses || results.clauses.length === 0) && 
        (!results.violations || results.violations.length === 0) && 
        !results.risk_assessment && renderEmptyResults()}

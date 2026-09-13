@@ -11,6 +11,7 @@ from langchain_core.messages import HumanMessage, ToolMessage, AIMessage, AIMess
 from backend.llm_manager import LLMManager
 from backend.api.document_upload import router as document_router
 from backend.api.contract_intelligence import router as intelligence_router
+from backend.api.matters import router as matters_router
 from backend.api.routes.debug import create_debug_router
 from backend.api.routes.production import create_production_router
 from backend.shared.utils.route_utils import is_development, conditionally_include_router
@@ -92,6 +93,7 @@ from backend.api.models_api import router as models_router
 app.include_router(models_router)
 app.include_router(document_router)
 app.include_router(intelligence_router)
+app.include_router(matters_router)
 app.include_router(enhanced_search_router, prefix="/api")
 app.include_router(enhanced_upload_router)
 

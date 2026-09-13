@@ -1,5 +1,8 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Query, Depends, Request
-from backend.governance.rbac import Permission, requires_permission
+from fastapi import (
+    APIRouter, UploadFile, File, Form, HTTPException, BackgroundTasks, Query,
+    Depends, Request,
+)
+from backend.governance.rbac import Permission, get_current_tenant, requires_permission
 from fastapi.responses import StreamingResponse
 from backend.application.services.document_processing_service import DocumentServiceFactory
 from backend.domain.entities import DocumentProcessingRequest
@@ -11,7 +14,18 @@ from backend.infrastructure.error_tracker import ErrorTracker, ErrorCategory, Er
 from backend.shared.errors import classify_llm_error, describe_llm_error, raise_if_provider_error
 from backend.shared.debug import note, trace_step
 from backend.agents.chunking_agent import ChunkingAgent
+from backend.domain.matter import (
+    counterparty_from_parties,
+    parse_status,
+    source_sha256,
+    suggest_title,
+)
 from backend.infrastructure.chunking.storage_service import ChunkStorageService
+from backend.infrastructure.matter_repository import (
+    MatterClosed,
+    MatterNotFound,
+    MatterRepository,
+)
 import os
 import uuid
 import json
@@ -29,14 +43,19 @@ def get_llm_manager(request: Request):
     return request.app.state.llm_manager
 
 @router.get("/debug/contracts", dependencies=[Depends(requires_permission(Permission.VIEW_AUDIT))])
-async def debug_contracts():
-    """Debug endpoint to see all contracts"""
+async def debug_contracts(tenant_id: str = Depends(get_current_tenant)):
+    """Debug endpoint to see all contracts.
+
+    Scoped to the caller's tenant, like everything else. `GET /api/matters` is
+    what the application navigates by; this stays a debugging aid, and is still
+    gated on VIEW_AUDIT, which the default LEGAL_REVIEWER role does not hold.
+    """
     try:
         from backend.infrastructure.contract_repository import Neo4jContractRepository
         repo = Neo4jContractRepository()
         
         query = """
-        MATCH (c:Contract)
+        MATCH (c:Contract {tenant_id: $tenant_id})
         RETURN c.file_id as contract_id, 
                c.contract_type as contract_type,
                c.summary as summary,
@@ -44,7 +63,7 @@ async def debug_contracts():
         ORDER BY c.upload_date DESC
         """
         
-        result = repo.graph.query(query)
+        result = repo.graph.query(query, {"tenant_id": tenant_id})
         
         contracts = []
         for row in result:
@@ -65,19 +84,19 @@ async def debug_contracts():
         return {"error": str(e)}
 
 @router.get("/debug/contract-types", dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])
-async def debug_contract_types():
+async def debug_contract_types(tenant_id: str = Depends(get_current_tenant)):
     """Debug endpoint to see contract type distribution"""
     try:
         from backend.infrastructure.contract_repository import Neo4jContractRepository
         repo = Neo4jContractRepository()
         
         query = """
-        MATCH (c:Contract)
+        MATCH (c:Contract {tenant_id: $tenant_id})
         RETURN c.contract_type as contract_type, count(*) as count
         ORDER BY count DESC
         """
         
-        result = repo.graph.query(query)
+        result = repo.graph.query(query, {"tenant_id": tenant_id})
         
         return {
             "contract_types": [{"type": row["contract_type"], "count": row["count"]} for row in result]
@@ -87,13 +106,68 @@ async def debug_contract_types():
         logger.error(f"Debug contract types failed: {e}")
         return {"error": str(e)}
 
+async def _filing_proposal(repo, contract_id: str, tenant_id: str,
+                           filename: str = "") -> dict:
+    """What the confirmation card starts out saying.
+
+    The upload pipeline already extracts the counterparty, the contract type and
+    the dates — asking the reviewer to type them again would be asking them to
+    re-do work the model has done. Every field here is a guess they can correct;
+    the counterparty in particular, since nothing in the data yet says which
+    party is *us*.
+    """
+    try:
+        stored = await repo.get_contract_by_id(contract_id, tenant_id)
+    except Exception as e:
+        logger.warning(f"Could not read back {contract_id} for the filing card: {e}")
+        stored = None
+
+    if not stored:
+        return {
+            "title": suggest_title(None, None, filename),
+            "counterparty": "",
+            "contract_type": "",
+            "effective_date": None,
+            "end_date": None,
+            "parties": [],
+        }
+
+    counterparty = counterparty_from_parties(stored.get("parties"))
+    contract_type = stored.get("contract_type") or ""
+    return {
+        "title": suggest_title(contract_type, counterparty, filename),
+        "counterparty": counterparty,
+        "contract_type": contract_type,
+        "effective_date": stored.get("effective_date"),
+        "end_date": stored.get("end_date"),
+        "parties": stored.get("parties") or [],
+        "summary": (stored.get("summary") or "")[:400],
+    }
+
+
 @router.post("/upload", dependencies=[Depends(requires_permission(Permission.UPLOAD))])
 @audit_log(AuditEventType.DOCUMENT_UPLOAD, "upload_pdf")
 async def upload_pdf(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
-    model: str = Query(default=DEFAULT_MODEL_ID, description="LLM model to use for processing"),
+    # The tenant is the caller's, never the URL's. Upload used to read it from a
+    # query parameter the frontend has never set, so every contract landed in
+    # `default-tenant` while its redlines were written under the tenant in the
+    # `X-Tenant-ID` header — the same document filed twice, in two places.
+    tenant_id: str = Depends(get_current_tenant),
+    # Accepted from the multipart body *and* the query string, because both
+    # callers are real: the browser sends a FormData field, `scripts/` sends a
+    # query parameter. The endpoint only ever declared the query form, so the
+    # model dropdown in the UI has silently done nothing since it was added and
+    # every upload used DEFAULT_MODEL_ID — 50-130s a call, which is very likely
+    # the "uploads take a long time" report. The body wins when both are given.
+    model: Optional[str] = Form(default=None, description="LLM model to use for processing"),
+    model_param: Optional[str] = Query(default=None, alias="model"),
+    # Present for "upload a new round into this matter", absent for
+    # "new contract" — in which case the document is stored unfiled and the
+    # caller confirms it into a matter afterwards.
+    matter_ref: Optional[str] = Form(default=None, description="File this round under an existing matter"),
+    matter_ref_param: Optional[str] = Query(default=None, alias="matter_ref"),
     enable_enhanced: bool = Query(default=False, description="Enable enhanced processing with sections/clauses"),
     llm_mgr: LLMManager = Depends(get_llm_manager)
 ):
@@ -102,8 +176,21 @@ async def upload_pdf(
     - Validates file type and size
     - Processes using PDF processing agent
     - Returns processing status
+
+    Two paths, distinguished by `matter_ref`:
+
+    * **into a matter** — the reviewer opened `MSA-2026-0042` and clicked
+      *Upload new round*. Nothing is inferred and nothing is asked.
+    * **new contract** — no matter yet. The document is extracted and stored as
+      an unfiled version, and the response carries a pre-filled proposal
+      (counterparty, type, dates) for the caller to confirm. The reference
+      number is allocated at that confirmation, so a document that never parsed
+      — or a card the user cancels — burns no number and leaves no gap.
     """
-    
+
+    model = model or model_param or DEFAULT_MODEL_ID
+    matter_ref = (matter_ref or matter_ref_param or "").strip() or None
+
     logger.info(f"=== UPLOAD START: {file.filename if file else 'NO FILE'} ===")
     
     # Initialize services
@@ -161,39 +248,32 @@ async def upload_pdf(
                     detail=f"Validation failed: {validation_result['summary']}"
                 )
 
-            # Check for duplicate by filename
-            logger.info("Step 3: Checking for duplicates")
+            logger.info("Step 3: Resolving the destination matter")
             try:
-                _dup_agent = llm_mgr.get_model_by_name(DEFAULT_MODEL_ID)
-                duplicate_check = _dup_agent._llm if hasattr(_dup_agent, '_llm') else _dup_agent
                 from backend.infrastructure.contract_repository import Neo4jContractRepository
                 repo = Neo4jContractRepository()
+                matters = MatterRepository()
                 logger.info("Repository initialized successfully")
             except Exception as repo_error:
                 logger.error(f"Repository initialization failed: {repo_error}")
                 raise
 
-            # Simple duplicate check by filename
-            try:
-                with trace_step("upload", "duplicate_check") as _step:
-                    existing_query = "MATCH (c:Contract) WHERE c.file_id CONTAINS $filename RETURN c.file_id LIMIT 1"
-                    existing = repo.graph.query(existing_query, {"filename": file.filename.replace(".pdf", "")})
-                    _step.set(matches=len(existing) if existing else 0)
-                logger.info(f"Duplicate check completed. Found: {len(existing) if existing else 0} matches")
-            except Exception as query_error:
-                logger.error(f"Duplicate check query failed: {query_error}")
-                # Continue without duplicate check
-                existing = []
-
-            if existing:
-                note("upload", "duplicate_skipped", filename=file.filename)
-                return {
-                    "message": "Duplicate file detected",
-                    "filename": file.filename,
-                    "status": "duplicate",
-                    "existing_contract_id": existing[0]["file_id"],
-                    "action": "skipped"
-                }
+            # Checked before anything expensive happens. A closed matter or a
+            # reference that does not exist should cost the reviewer a second,
+            # not two minutes of extraction and embedding.
+            if matter_ref:
+                with trace_step("upload", "resolve_matter", matter_ref=matter_ref) as _step:
+                    destination = matters.get_matter(tenant_id, matter_ref)
+                    _step.set(found=bool(destination))
+                if destination is None:
+                    # 404 for an unknown reference and for another tenant's
+                    # alike: 403 would confirm that it exists.
+                    raise HTTPException(status_code=404, detail=f"No matter {matter_ref}")
+                if not parse_status(destination.get("status")).accepts_new_versions:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"{matter_ref} is closed. Reopen it before uploading a new round.",
+                    )
 
             # Save file temporarily
             logger.info("Step 4: Saving file temporarily")
@@ -220,6 +300,67 @@ async def upload_pdf(
                     full_text = text_extractor.extract_with_fallback(temp_path)
                     _step.set(chars=len(full_text))
                 logger.info(f"Text extraction completed. Length: {len(full_text)} characters")
+
+                # The one automatic case in this increment: byte-identical
+                # source. Not a judgement call, so nothing is asked — no version
+                # is created and the user lands on the matter that already holds
+                # it. This is what stops a double-click producing v2 = v1.
+                #
+                # It replaces a check that matched the filename against
+                # `file_id`, which is generated as `UPLOADED_{random}_{date}` and
+                # never contains it — so the check never fired, and every
+                # re-upload of a revised contract silently created a second,
+                # unrelated Contract, orphaning the previous round's redline
+                # decisions. It also ran across every tenant in the database.
+                with trace_step("upload", "duplicate_check") as _step:
+                    digest = source_sha256(full_text)
+                    _step.set(sha256=digest[:12])
+                    try:
+                        twin = matters.version_by_source_hash(tenant_id, digest)
+                    except Exception as query_error:
+                        # A failed lookup must not block the upload; the worst
+                        # case is a duplicate version the user can see and act on.
+                        logger.error(f"Duplicate check failed: {query_error}")
+                        twin = None
+                    _step.set(duplicate=bool(twin))
+
+                if twin and twin.get("matter_ref"):
+                    note("upload", "duplicate_skipped", filename=file.filename,
+                         matter_ref=twin["matter_ref"])
+                    os.path.exists(temp_path) and os.remove(temp_path)
+                    return {
+                        "message": "Duplicate file detected",
+                        "filename": file.filename,
+                        "status": "duplicate",
+                        "contract_id": twin["version_id"],
+                        "existing_contract_id": twin["version_id"],
+                        "matter_ref": twin["matter_ref"],
+                        "version": twin.get("n"),
+                        "details": f"Exactly matches version {twin.get('n')} "
+                                   f"of {twin['matter_ref']}",
+                        "model_used": model,
+                        "action": "skipped",
+                    }
+
+                if twin and not twin.get("matter_ref"):
+                    # The same bytes were uploaded but never filed — a cancelled
+                    # or double-clicked confirmation card. Re-offer that version
+                    # instead of storing the document a second time.
+                    note("upload", "unfiled_duplicate", filename=file.filename,
+                         contract_id=twin["version_id"])
+                    os.path.exists(temp_path) and os.remove(temp_path)
+                    return {
+                        "message": "PDF processing completed",
+                        "filename": file.filename,
+                        "status": "success",
+                        "contract_id": twin["version_id"],
+                        "needs_filing": True,
+                        "proposal": await _filing_proposal(repo, twin["version_id"], tenant_id,
+                                                           file.filename),
+                        "details": "This document was already uploaded and is waiting to be filed.",
+                        "model_used": model,
+                        "validation_passed": True,
+                    }
 
                 # Validate content quality
                 with trace_step("upload", "content_validate", chars=len(full_text)) as _step:
@@ -437,9 +578,7 @@ async def upload_pdf(
                 metadata={"filename": file.filename, "model": model}
             )
             
-            note("upload", "completed", contract_id=contract_id, status=result["status"])
-
-            return {
+            response = {
                 "message": "PDF processing completed",
                 "filename": file.filename,
                 "status": result["status"],
@@ -448,6 +587,50 @@ async def upload_pdf(
                 "model_used": model,
                 "validation_passed": True
             }
+
+            # Everything past this point needs a stored contract to hang off.
+            # A document that was skipped, or needed manual review, has none —
+            # and filing it would be filing nothing.
+            if contract_id:
+                try:
+                    matters.record_version(
+                        tenant_id, contract_id,
+                        source_sha256=digest, filename=file.filename,
+                    )
+                    if matter_ref:
+                        filed = matters.attach_version(tenant_id, matter_ref, contract_id)
+                        response["matter_ref"] = filed["matter_ref"]
+                        response["version"] = filed["n"]
+                        note("upload", "filed", contract_id=contract_id,
+                             matter_ref=filed["matter_ref"], version=filed["n"])
+                    else:
+                        # Unfiled on purpose. The caller confirms the pre-filled
+                        # card, and only then is a reference number allocated.
+                        response["needs_filing"] = True
+                        response["proposal"] = await _filing_proposal(
+                            repo, contract_id, tenant_id, file.filename
+                        )
+                except MatterClosed:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"{matter_ref} is closed. Reopen it before uploading a new round.",
+                    )
+                except MatterNotFound:
+                    raise HTTPException(status_code=404, detail=f"No matter {matter_ref}")
+                except Exception as filing_error:
+                    # The document is stored either way. Say so rather than
+                    # reporting the whole upload as a failure.
+                    logger.error(f"Could not file {contract_id}: {filing_error}")
+                    response["needs_filing"] = True
+                    response["details"] = (
+                        f"{response['details']} (the document was stored but could not be "
+                        f"filed: {filing_error})"
+                    )
+
+            note("upload", "completed", contract_id=contract_id, status=result["status"],
+                 matter_ref=response.get("matter_ref"))
+
+            return response
         
         except HTTPException:
             logger.error(f"HTTP Exception in upload: {file.filename if file else 'unknown'}")
@@ -478,8 +661,9 @@ async def upload_pdf(
 @router.post("/upload-stream", dependencies=[Depends(requires_permission(Permission.UPLOAD))])
 async def upload_pdf_stream(
     file: UploadFile = File(...),
-    tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
-    model: str = Query(default=DEFAULT_MODEL_ID, description="LLM model to use for processing"),
+    tenant_id: str = Depends(get_current_tenant),
+    model: Optional[str] = Form(default=None, description="LLM model to use for processing"),
+    model_param: Optional[str] = Query(default=None, alias="model"),
     llm_mgr: LLMManager = Depends(get_llm_manager)
 ):
     """
@@ -487,6 +671,8 @@ async def upload_pdf_stream(
     Similar to existing /run/ endpoint pattern
     """
     
+    model = model or model_param or DEFAULT_MODEL_ID
+
     try:
         # Validation (same as above)
         if not file.filename or not file.filename.lower().endswith('.pdf'):

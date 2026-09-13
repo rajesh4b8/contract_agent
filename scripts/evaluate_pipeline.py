@@ -58,9 +58,12 @@ def analyse(base_url: str, pdf: pathlib.Path, model: str | None, timeout: int,
     """
     started = time.monotonic()
     with pdf.open("rb") as handle:
-        params = {"tenant_id": tenant}
-        if model:
-            params["model"] = model
+        # The tenant rides the header now, everywhere. It used to be a query
+        # parameter on upload and analyze and a header on the redline calls, so
+        # a contract could be written under one tenant and looked up under
+        # another. `model` is still accepted as a query parameter for callers
+        # like this one; the browser sends it in the multipart body.
+        params = {"model": model} if model else {}
         upload = requests.post(
             f"{base_url}/api/documents/upload", params=params,
             files={"file": (pdf.name, handle, "application/pdf")},
@@ -74,9 +77,7 @@ def analyse(base_url: str, pdf: pathlib.Path, model: str | None, timeout: int,
     upload_seconds = time.monotonic() - started
 
     started = time.monotonic()
-    params = {"tenant_id": tenant}
-    if model:
-        params["model"] = model
+    params = {"model": model} if model else {}
     analysis = requests.post(
         f"{base_url}/api/intelligence/contracts/{contract_id}/analyze",
         params=params, headers=_headers(tenant), timeout=timeout,

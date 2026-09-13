@@ -1,17 +1,16 @@
 # POC Progress Tracker
 
-**Resume point: Increment 5 — `awaiting your test`.**
-Run `make test`, then `make eval` with the stack up and the playbook seeded.
+**Resume point: Increment 6 — `awaiting your test`.**
+Increments 0–5 are accepted. Increment 6 is built; test it before 7 starts.
 
-Also awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
+Still awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
 (out-of-increment bug fix, from your report of an unexplained "processing error") and
 **[Debug — a live timeline of what the pipeline is doing](#debug--a-live-timeline-of-what-the-pipeline-is-doing)**
 (out-of-increment, from your report that uploads take a long time with nothing on screen to say why).
 
-**Increments 6–9 are specified and ready to build.** In order: matters and reference numbers
-(6), chunk identity so unchanged text is never re-embedded (7), analysing the whole contract rather
-than its first 12,000 characters (8), and the cross-version change report (9). Say the word and I
-start on 6.
+**Increment 6 is built and waiting on you.** 7–9 remain specified and ready: chunk identity so
+unchanged text is never re-embedded (7), analysing the whole contract rather than its first 12,000
+characters (8), and the cross-version change report (9). Nothing starts until you have tested 6.
 
 Two sections are worth knowing about before starting anything:
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) (settled — what this
@@ -42,8 +41,8 @@ produced it; this file is what you and I actually work from.
 | 2 | Ground policy checks in one real playbook | accepted |
 | 3 | Redlines that are real and persisted | accepted |
 | 4 | Human-in-the-loop approve / edit / reject | accepted |
-| 5 | One measurable outcome | **awaiting your test** |
-| 6 | Multiple contracts, each resumable | **specified — not started** |
+| 5 | One measurable outcome | accepted |
+| 6 | Multiple contracts, each resumable | **awaiting your test** |
 | 7 | Content-addressed chunks | specified — not started |
 | 8 | Analyse the whole contract | specified — not started |
 | 9 | Incremental re-analysis and the change report | specified — not started |
@@ -780,7 +779,7 @@ failing a build over.
 
 ### Your feedback
 
-_(write here)_
+_Passed testing 2026-09-13. Accepted._
 
 ---
 
@@ -1029,7 +1028,7 @@ _(write here)_
 
 ## Increment 6 — Multiple contracts, each resumable
 
-**Status: `specified — not started`.** Designed with you on 2026-09-13. Follows from the
+**Status: `awaiting your test`.** Specified and built 2026-09-13. Follows from the
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) decision: if this
 system is the record of the *review*, a review has to be a durable object you can leave and come
 back to.
@@ -1141,24 +1140,166 @@ Small, and all in the path this increment rewrites:
   compares against `UPLOADED_{random}_{date}`, which never contains the filename. Replaced by
   `source_sha256`.
 
+### What changed
+
+**The findings are on the graph now.** `_store_intelligence_results` wrote three numbers —
+`clauses_count`, `violations_count`, `risk_score` — and the redlines. The clause findings, the
+evidence spans, the rule citations and the risk narrative were never persisted at all, so
+"reopen this review" meant re-running a two-minute analysis and hoping the model agreed with
+itself. They are now `(:ContractVersion)-[:HAS_FINDING]->(:ClauseFinding)` and
+`-[:HAS_VIOLATION]->(:PolicyViolation)`, with `critical_issues` and `recommendations` stored
+alongside the score. `GET /api/intelligence/contracts/{id}/analysis` reads the lot back in the
+same shape `POST /analyze` returns, so the page renders identically whether it analysed or
+reopened. Measured against the live stack: an analysis that took **71s** reopens in **136ms**.
+
+**A version is the existing `Contract` node, given a second label.** The one structural decision
+worth knowing about:
+
+```
+(:Matter {matter_ref, tenant_id, title, counterparty, contract_type, status, version_count, …})
+  -[:HAS_VERSION {n}]->(:Contract:ContractVersion {version_id, source_sha256, uploaded_at,
+                                                   analysis_status, analysis_error})
+      -[:HAS_FINDING]->(:ClauseFinding)
+      -[:HAS_VIOLATION]->(:PolicyViolation)
+      -[:HAS_REDLINE]->(:Redline)          <- already there, already pointing at the version
+```
+
+Not a separate node beside the contract. Every redline decision from Increment 4 hangs off
+`(:Contract)-[:HAS_REDLINE]->(:Redline)` and is looked up by `file_id`, and every URL in the app
+carries that same id. A distinct node would have meant re-pointing all of it and migrating the
+decisions across — the one thing this increment must not risk. A label re-points nothing, and
+`version_id == file_id` keeps the analyse/decide flow working untouched.
+
+**Reference numbers** are allocated from a `(:Counter {tenant_id, year, kind})` node in one
+statement, so two uploads racing for `MSA-2026-0042` cannot both get it — the second waits on the
+lock the first holds. Version numbers are allocated the same way, inside the statement that
+increments the matter's counter. Allocation happens at the *confirmation*, after extraction has
+already succeeded and after the version is known to exist, so a PDF that fails to parse and a card
+the reviewer cancels both burn nothing.
+
+**Two upload paths**, distinguished by one optional field:
+
+| path | what happens |
+|---|---|
+| `matter_ref` given | the reviewer opened the matter and clicked *Upload new round*. Nothing inferred, nothing asked. The matter is checked for existence and closure **before** extraction, so a closed matter costs a second rather than two minutes. |
+| no `matter_ref` | extracted and stored as an *unfiled* version. The response carries a proposal — title, counterparty, type, dates — pre-filled from what the pipeline already found. `POST /api/matters` confirms it. |
+
+**The one automatic case.** `source_sha256` — SHA-256 over the whitespace-folded full text — is
+stored on every version. An exact match returns "Exactly matches version N of MSA-2026-0042" and
+creates nothing. Folding whitespace is deliberate: PDF extraction is not byte-stable across runs,
+so hashing the raw string would report the same file as different. A matching version that is
+*unfiled* re-offers its confirmation card instead, so a cancelled card never leaves two copies.
+
+**Status is derived wherever it can be.** `IN_REVIEW` vs `REVIEWED` is `pending == 0` on the latest
+version, computed from the redlines rather than stored beside them where it could drift.
+`AWAITING_COUNTERPARTY` and `CLOSED` are human statements and are never overridden by a count.
+`PATCH /api/matters/{ref}/status` is guarded by `APPROVE_REDLINE`, not `ANALYZE` — `VIEWER` holds
+`ANALYZE`, and closing a matter is a judgement about the negotiation, not a query against it.
+
+**An analysis that fails is said out loud.** `analysis_status` moves `NOT_STARTED → RUNNING →
+COMPLETE | FAILED` on the version, written around the run rather than after it. A matter opened
+mid-analysis shows the in-progress state; one whose analysis died shows the reason as a warning.
+Neither is ever rendered as "no findings", which reads as a clean contract. `clauses_extracted` was
+added to `ContractIntelligence` alongside the existing `redlines_generated` so a failed run cannot
+replace a good stored review with nothing.
+
+**The frontend navigates by URL.** `/` is the matters list, `/matters/MSA-2026-0042` is one matter.
+`useRouter` uses `pushState` and `popstate`, so the back button works, a matter opens in a new tab,
+and a hard refresh keeps your place. `localStorage` is demoted to what its name now says — a
+`matters_cache_v1` that paints the last known list while the request is in flight and is replaced
+wholesale by whatever the server says. `IntelligencePage` and `DocumentUpload` are gone; their work
+happens inside a matter, and `/intelligence` redirects to the list rather than 404ing.
+
+**The four bugs, fixed:**
+
+| bug | what it was doing |
+|---|---|
+| model dropdown | `DocumentUpload.tsx` sent `model` in the FormData body; the endpoint declared `model: str = Query(...)`. Every upload has run on `DEFAULT_MODEL_ID`. The endpoint now reads both, body first — `scripts/evaluate_pipeline.py` passes it as a query parameter and still works. Confirmed live: `"model_used":"gemini-flash-lite"`. |
+| upload ignored the tenant header | it read `tenant_id` from a query parameter the frontend never set, so contracts landed in `default-tenant` while redlines were looked up under the header's tenant. |
+| three-way tenant split | query parameter on upload/analyze, header on redlines, hardcoded `"default-tenant"` on status and dashboard. All ten tenant-scoped endpoints now use `Depends(get_current_tenant)`, and a test walks the route table to keep it that way. |
+| duplicate check never fired | `WHERE c.file_id CONTAINS $filename` compared against `UPLOADED_{random}_{date}`, which never contains the filename — and it had no tenant filter, so a collision would have returned another tenant's contract id (bug #1 in the architecture review). Replaced by the tenant-scoped `source_sha256` lookup. |
+
+**Migration.** `scripts/migrate_matters.py` (`make check-matters` / `make migrate-matters`) gives
+every contract that predates matters a single-version matter, with references allocated in upload
+order. It is purely additive — it adds a label and a `Matter` and writes to no `(:Redline)` — and
+idempotent, so it is safe to re-run. A test asserts that no statement it issues contains `DELETE`,
+`REMOVE` or `Redline`. Dry-run against your database: **51 contracts** would be migrated.
+
+**Tests: 359 → 504**, all offline. The failure-case table above is walked row by row in
+`backend/tests/test_matters.py::TestTheFailureCases`.
+
+| file | covers |
+|---|---|
+| `test_matters.py` (68) | the failure-case table, reference numbers, derived status and transitions, source hashing, the migration |
+| `test_matters_api.py` (22) | the wire — 404 for an unknown *and* another tenant's reference, 409 on a double-clicked confirm, 422 on a derived status, 403 for a VIEWER |
+| `test_review_is_resumable.py` (20) | findings reach the graph, a failed analysis never erases a good review, the read-back shape |
+| `test_upload_paths.py` (23) | the four bugs, pinned by inspecting what the routes actually declare |
+| `test_frontend_navigation.py` (12) | static checks that a review has a URL and the list comes from the server |
+
+**Also verified against the live stack** (a throwaway tenant, since removed): every statement this
+increment introduces, the full new-contract → confirm → analyse → decide → re-analyse flow, the
+duplicate short circuit, the 409 on a closed matter, and that version 1's approved redline survived
+a re-analysis. That check found one real bug — `list_matters` counted a matter with *no* redlines as
+having one pending, because `coalesce(rl.status, 'PENDING')` over a null `OPTIONAL MATCH` row reads
+as `PENDING`. Fixed, and pinned by a test.
+
+### One thing this increment could not finish
+
+`frontend/src/services/enhancedSearchApi.ts:1` is fixed (bug #2), but **that was not the only thing
+breaking `npm run build`**. The build fails on **31 TypeScript errors across 15 files** — unused
+imports, implicit `any`, index-signature errors — none of them in code this increment wrote. Fixing
+bug #2 alone does not produce a working production build, and the note in *Known issues* implying
+it would is wrong.
+
+What I did: fixed bug #2, then fixed the ten errors that were in files this increment touches
+(`ContractIntelligence.tsx`, `ClausesDetail.tsx`, `useModal.ts`, and by deleting `DocumentUpload.tsx`).
+That took the count from **41 to 31**. The rest sit in `ViolationsDetail`, `ErrorBoundary`, the
+documentation tabs, `theme-provider`, `tabs.tsx`, the chat input and the search results — files
+this increment has no reason to touch and no test coverage for. I left them rather than change
+behaviour in areas I cannot verify offline.
+
+`npx vite build` succeeds (esbuild does not type-check), which is why the dev server has always
+worked. Everything new type-checks clean and lints clean.
+
 ### How to test
 
 ```bash
 make test
 ```
 
-With the stack up:
+504 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
 
-1. Upload two different contracts as new matters. Both appear in the list with reference numbers,
-   counterparty and type pre-filled from extraction.
-2. Analyse one, decide a redline, then **hard-refresh**. The list is intact, the matter reopens on
-   the same clause findings, and the decision is still recorded.
-3. Open `/matters/MSA-2026-0042` directly in a new tab — it loads that matter.
-4. Re-upload a byte-identical file. No new version; it opens the existing matter with the note.
-5. Upload a new round into an existing matter from its own page. Version 2, and version 1's
-   decisions are still visible.
-6. Pick `gemini-flash-lite` and upload: confirm from the debug panel that the call actually uses
-   it (this is the `model` fix).
+Then, with the stack up (`make run`):
+
+```bash
+make check-matters      # lists the 51 contracts that would get a matter — writes nothing
+make migrate-matters    # creates them
+```
+
+The migration is additive and idempotent; your Increment 4 redline decisions come through
+untouched. Then, in the browser:
+
+1. **The landing page is the matters list.** `/` shows every contract from the server, with its
+   reference number, counterparty, version count and how many redlines are still pending.
+2. **The existing flow, in its new home.** Open a migrated matter, press *Analyze*, decide a
+   redline. This is the Increment 1–4 path; it should behave exactly as before.
+3. **Hard-refresh.** The list is intact, the matter reopens on the same clause findings — no
+   re-analysis, no two-minute wait — and the decision is still recorded.
+4. **`/matters/MSA-2026-0001` in a new tab** loads that matter directly. The back button works.
+5. **Upload two different contracts as new matters.** Each shows a confirmation card pre-filled
+   with the counterparty and type from extraction. Correct anything, confirm, and the reference is
+   allocated. Cancelling one burns no number.
+6. **Re-upload a byte-identical file.** No new version — it opens the matter with
+   *"Exactly matches version 1 of …"*, and returns in about a second rather than two minutes.
+7. **Upload a new round from a matter's own page.** It becomes version 2, and version 1's
+   decisions are still there under version 1.
+8. **Close a matter, then try to upload into it.** Refused by name, immediately. *Reopen* puts it
+   back in review.
+9. **Pick `gemini-flash-lite` and upload.** The debug panel should show the call using it — this
+   is the `model` fix. It is noticeably faster than the old silent default.
+
+Worth knowing before you start: `npm run build` still fails (see above), but the dev server the
+stack runs is unaffected.
 
 ### Your feedback
 
@@ -1437,6 +1578,8 @@ Settled — do not re-litigate without saying so explicitly.
 | **One contract end-to-end, asserted** is the first milestone | Matches the design doc's own "POC Scope — Start Narrow" guidance. |
 | **Work on `main`** | A parallel session is also committing here; small increments reduce collision risk. |
 | **Source of truth for the _review_, not the contract** | Settled 2026-09-13. The contract stays in the customer's Word/CLM; this system owns the review history. See [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for). |
+| **A version *is* the `Contract` node, relabelled** | Settled while building Increment 6. `(:Contract:ContractVersion)` with `version_id == file_id`, rather than a new node beside it. Every Increment 4 redline decision hangs off that node by `file_id`, and every URL carries the same id — a separate node would have meant migrating the decisions across, which is exactly the risk the increment exists to remove. |
+| **Status is derived, not stored, wherever it can be** | `IN_REVIEW` / `REVIEWED` is `pending == 0` over the latest version's redlines. Storing it would be a second copy of a fact the redlines already hold, free to drift. Only `DRAFT`, `AWAITING_COUNTERPARTY` and `CLOSED` — the transitions a human makes — are written down. |
 
 ## Product shape — what this system is the source of truth for
 
@@ -1478,16 +1621,17 @@ track changes, and anything that would make this system the place the contract t
 1. `Contract.full_text` is written once at `CREATE` (`contract_repository.py:89`) and never updated,
    so the stored copy never reflects an approved redline. Under C that is correct — but it should be
    explicit, not accidental.
-2. The duplicate check (`document_upload.py:179`) matches the filename against `file_id`, which is
-   generated as `UPLOADED_{random}_{date}` and never contains it. **It never fires.** Re-uploading a
-   revised contract silently creates a second, unrelated `Contract`, orphaning every redline decision
-   from the previous round (redline ids are keyed on `contract_id`).
+2. ~~The duplicate check matches the filename against `file_id`~~ — **fixed in Increment 6.** It is
+   now a tenant-scoped `source_sha256` match, and a revised contract uploaded into its matter becomes
+   version 2 rather than a second unrelated `Contract`.
 3. Chunk storage `MERGE`s a `Document` on the **filename** (`document_upload.py:253`) and then
    `CREATE`s fresh chunks, so v1 and v2 chunks accumulate under one node and semantic search returns
    a blend of both with no way to tell which version a hit came from.
 
-`ContractVersion` / `HAS_VERSION` exist today only inside `enterprise_schema_migration.py`, which
-creates a literal node called `sample_version`. No application code reads or writes a version.
+~~`ContractVersion` / `HAS_VERSION` exist today only inside `enterprise_schema_migration.py`~~ —
+**closed by Increment 6.** `MatterRepository` reads and writes them, and every contract that
+predates them gets one from `scripts/migrate_matters.py`. Point 3 above — chunks accumulating under
+a `Document` MERGEd on the filename — is untouched and belongs to Increment 7.
 
 
 ## Deferred — in the design doc, deliberately not now
@@ -1634,13 +1778,13 @@ each once those land rather than fixing them twice.
 
 | # | Bug | Where | Why it matters |
 |---|---|---|---|
-| 1 | **Duplicate check has no tenant filter.** `MATCH (c:Contract) WHERE c.file_id CONTAINS $filename` — a filename collision returns *another tenant's* `contract_id` to the uploader | `api/document_upload.py:179` | cross-tenant disclosure. Increment 6 replaces this check with `source_sha256`; confirm the replacement is tenant-scoped |
-| 2 | **Frontend build is broken.** `import { EnhancedSearchParams } from '../components/search/EnhancedSearchInterface'` — the directory is `components/features/search/`. Vite dev survives it (esbuild drops the type-only import); `npm run build` / `tsc -b` does not | `frontend/src/services/enhancedSearchApi.ts:1` | no production build |
+| 1 | ~~**Duplicate check has no tenant filter.**~~ **Fixed in Increment 6.** Replaced by `MatterRepository.version_by_source_hash`, which matches `(:ContractVersion {tenant_id, source_sha256})` — tenant-scoped by construction, and pinned by `test_upload_paths.py` | `api/document_upload.py` | was cross-tenant disclosure |
+| 2 | ~~**Frontend build is broken.**~~ The stale import is fixed in Increment 6 — but it was **not the only cause**. `npm run build` still fails on 31 `tsc` errors across 15 files (unused imports, implicit `any`, index-signature errors), down from 41. Increment 6 fixed the ten in files it touched; the rest sit in `ViolationsDetail`, `ErrorBoundary`, the documentation tabs, `theme-provider`, `tabs.tsx`, the chat input and the search results. `npx vite build` succeeds, which is why dev has always worked | `frontend/src/` (15 files) | still no production build; **needs its own scheduled pass** |
 | 3 | **Precedent matching silently returns nothing.** Query matches `[:CONTAINS]`, but the write path creates `[:CONTAINS_CLAUSE]` | `agents/enhanced_cuad_tools.py:354` | the missing `tenant_id` recorded in Increment 1 is not the whole story; this is the other half |
 | 4 | **Chat rejects ordinary contract questions.** `TopicValidator` matches `\bcontract\b`, which does **not** match "contracts", and its allowlist has "indemnity" but not "indemnification". "Summarise the indemnification clauses in our contracts" is refused as `OUT_OF_SCOPE` | `governance/validators/topic.py:8-13` | the symptom is noted in the debug-panel section; this is the root cause |
 | 5 | **Dead import.** `create_production_router` is imported and never mounted | `backend/main.py:15` | misleading — suggests a production route set that does not exist |
 | 6 | **Unused duplicate modules.** `backend/domain/contracts/` and `backend/domain/search/` duplicate `domain/entities.py` and `domain/search_entities.py`. Only `domain/policies/` and `domain/documentation/` are imported | — | two sources of truth for the same entities |
 
-Also outstanding, and covered by Increment 6 rather than listed above: the model dropdown having no
-effect on upload, upload ignoring `X-Tenant-ID`, the three-way tenant split, and the duplicate check
-never firing.
+All four bugs that were "covered by Increment 6 rather than listed above" are now fixed: the model
+dropdown having no effect on upload, upload ignoring `X-Tenant-ID`, the three-way tenant split, and
+the duplicate check never firing. See [Increment 6 — What changed](#increment-6--multiple-contracts-each-resumable).

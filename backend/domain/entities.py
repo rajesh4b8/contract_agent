@@ -108,6 +108,10 @@ class ContractIntelligence:
     redlines: List[RedlineRecommendation]
     processing_time: float = 0.0
     redlines_generated: bool = True
+    # False when the analysis itself never ran. An empty clause list then means
+    # "we do not know", not "this contract has no notable clauses" — and
+    # persistence must not replace a stored review on the strength of it.
+    clauses_extracted: bool = True
     # Stages that degraded rather than failed the run: "Redlines could not be
     # drafted: OpenRouter is rate-limiting this key". Without these a
     # half-finished analysis is indistinguishable from a clean contract.

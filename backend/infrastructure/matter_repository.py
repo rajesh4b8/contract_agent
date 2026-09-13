@@ -1,0 +1,508 @@
+"""Reading and writing matters, versions and reference numbers.
+
+The shape, and the one decision worth calling out: **a version is the existing
+``(:Contract)`` node, given a second label.**
+
+    (:Matter)-[:HAS_VERSION {n}]->(:Contract:ContractVersion)
+
+Not a new node beside it. Every redline a reviewer decided in Increment 4 hangs
+off ``(:Contract)-[:HAS_REDLINE]->(:Redline)`` and is looked up by
+``file_id``; every URL in the app carries that same id. Introducing a separate
+node would mean re-pointing all of it and migrating the decisions across — the
+one thing this increment must not risk. Adding a label re-points nothing, and
+``version_id == file_id`` keeps the existing analyse/decide flow working
+untouched.
+
+Nothing here deletes. The migration adds labels and Matter nodes to contracts
+that predate them, and is safe to re-run.
+"""
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+from backend.domain.matter import (
+    AnalysisStatus,
+    MatterStatus,
+    counterparty_from_parties,
+    format_reference,
+    parse_status,
+    source_sha256,
+    suggest_title,
+    type_code,
+)
+from backend.shared.utils.contract_search_tool import graph as default_graph
+from backend.shared.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+class MatterNotFound(LookupError):
+    """No such matter for this tenant.
+
+    Deliberately not distinguishable from "belongs to someone else": the
+    endpoint answers 404 either way, the same rule redlines follow. Answering
+    403 for another tenant's reference would confirm that it exists.
+    """
+
+
+class MatterClosed(RuntimeError):
+    """A closed matter takes no new rounds. Reopening is an explicit action."""
+
+
+class AlreadyFiled(RuntimeError):
+    """This version is already part of a matter."""
+
+
+class MatterRepository:
+    """Graph access for matters. The graph is injectable so tests need no server."""
+
+    def __init__(self, graph: Any = None):
+        self.graph = default_graph if graph is None else graph
+
+    # -- versions ---------------------------------------------------------
+
+    def record_version(self, tenant_id: str, version_id: str, *,
+                       source_sha256: str, filename: str = "") -> Optional[Dict[str, Any]]:
+        """Mark a freshly stored contract as a version, before it is filed.
+
+        A version exists from the moment extraction succeeds, whether or not the
+        user has confirmed which matter it belongs to. That is what makes the
+        confirmation card cancellable without leaving a reference number burned.
+        """
+        rows = self.graph.query(
+            """
+            MATCH (c:Contract {file_id: $version_id, tenant_id: $tenant_id})
+            SET c:ContractVersion,
+                c.version_id = $version_id,
+                c.source_sha256 = $source_sha256,
+                c.source_filename = $filename,
+                c.uploaded_at = coalesce(c.uploaded_at, c.upload_date, datetime()),
+                c.analysis_status = coalesce(c.analysis_status, $not_started)
+            RETURN c.version_id AS version_id
+            """,
+            {
+                "version_id": version_id,
+                "tenant_id": tenant_id,
+                "source_sha256": source_sha256,
+                "filename": filename,
+                "not_started": AnalysisStatus.NOT_STARTED.value,
+            },
+        )
+        return rows[0] if rows else None
+
+    def version_by_source_hash(self, tenant_id: str, digest: str) -> Optional[Dict[str, Any]]:
+        """The one automatic case: these exact bytes have been seen before.
+
+        Tenant-scoped, unlike the filename check it replaces — that one matched
+        ``c.file_id CONTAINS $filename`` across every tenant in the database and
+        would hand a stranger's contract id back to the uploader. (It also never
+        fired, because ``file_id`` is ``UPLOADED_{random}_{date}`` and never
+        contains the filename.)
+
+        A version already filed under a matter wins over a loose one, so a
+        double-click on the confirmation card reports the matter rather than the
+        orphan.
+        """
+        rows = self.graph.query(
+            """
+            MATCH (v:ContractVersion {tenant_id: $tenant_id, source_sha256: $digest})
+            OPTIONAL MATCH (m:Matter {tenant_id: $tenant_id})-[r:HAS_VERSION]->(v)
+            RETURN v.version_id AS version_id,
+                   v.source_filename AS filename,
+                   m.matter_ref AS matter_ref,
+                   m.title AS title,
+                   m.status AS matter_status,
+                   r.n AS n
+            ORDER BY CASE WHEN m IS NULL THEN 1 ELSE 0 END, v.uploaded_at
+            LIMIT 1
+            """,
+            {"tenant_id": tenant_id, "digest": digest},
+        )
+        return rows[0] if rows else None
+
+    def set_analysis_status(self, tenant_id: str, version_id: str,
+                            status: AnalysisStatus, error: str = "") -> None:
+        """Record how the analysis of one version went.
+
+        Called around the analysis rather than after it, so a matter opened
+        while its analysis is still running shows the in-progress state instead
+        of an empty review, and one that died shows the failure instead of
+        "no findings".
+        """
+        try:
+            self.graph.query(
+                """
+                MATCH (v:ContractVersion {version_id: $version_id, tenant_id: $tenant_id})
+                SET v.analysis_status = $status,
+                    v.analysis_error = $error,
+                    v.analysis_updated_at = datetime()
+                """,
+                {
+                    "version_id": version_id,
+                    "tenant_id": tenant_id,
+                    "status": status.value,
+                    "error": error or "",
+                },
+            )
+        except Exception as e:  # never fail an analysis over its own bookkeeping
+            logger.warning(f"Could not set analysis status on {version_id}: {e}")
+
+    # -- matters ----------------------------------------------------------
+
+    def allocate_reference(self, tenant_id: str, kind: str, year: int) -> str:
+        """Take the next number for this tenant, year and type.
+
+        Read and increment happen in one statement, so two uploads racing for a
+        reference cannot both read the same value: the second waits on the lock
+        the first holds over the counter node.
+        """
+        rows = self.graph.query(
+            """
+            MERGE (c:Counter {tenant_id: $tenant_id, year: $year, kind: $kind})
+              ON CREATE SET c.n = 0
+            SET c.n = c.n + 1
+            RETURN c.n AS n
+            """,
+            {"tenant_id": tenant_id, "kind": kind, "year": year},
+        )
+        if not rows:
+            raise RuntimeError(f"could not allocate a {kind} reference for {tenant_id}")
+        return format_reference(kind, year, int(rows[0]["n"]))
+
+    def create_matter(self, tenant_id: str, version_id: str, *, title: str,
+                      counterparty: str = "", contract_type: str = "",
+                      year: Optional[int] = None) -> Dict[str, Any]:
+        """File a version as version 1 of a brand-new matter.
+
+        The reference is allocated here, **after** extraction has already
+        succeeded, so a document that never parsed burns no number and leaves no
+        gap in the sequence. The existence check comes before the allocation for
+        the same reason: filing something that is not there must cost nothing.
+        """
+        unfiled = self.graph.query(
+            """
+            MATCH (v:ContractVersion {version_id: $version_id, tenant_id: $tenant_id})
+            WHERE NOT (:Matter)-[:HAS_VERSION]->(v)
+            RETURN v.version_id AS version_id
+            """,
+            {"version_id": version_id, "tenant_id": tenant_id},
+        )
+        if not unfiled:
+            raise AlreadyFiled(
+                f"{version_id} is not an unfiled version of tenant {tenant_id}"
+            )
+
+        kind = type_code(contract_type)
+        matter_ref = self.allocate_reference(tenant_id, kind, year or datetime.now().year)
+
+        rows = self.graph.query(
+            """
+            MATCH (v:ContractVersion {version_id: $version_id, tenant_id: $tenant_id})
+            WHERE NOT (:Matter)-[:HAS_VERSION]->(v)
+            CREATE (m:Matter {
+                matter_ref: $matter_ref,
+                tenant_id: $tenant_id,
+                title: $title,
+                counterparty: $counterparty,
+                contract_type: $contract_type,
+                status: $status,
+                version_count: 1,
+                created_at: datetime(),
+                updated_at: datetime()
+            })
+            CREATE (m)-[:HAS_VERSION {n: 1}]->(v)
+            RETURN m.matter_ref AS matter_ref
+            """,
+            {
+                "version_id": version_id,
+                "tenant_id": tenant_id,
+                "matter_ref": matter_ref,
+                "title": title,
+                "counterparty": counterparty or "",
+                "contract_type": contract_type or "",
+                "status": MatterStatus.DRAFT.value,
+            },
+        )
+        if not rows:
+            # Lost the race against a concurrent confirmation of the same
+            # document. The reference just allocated is spent; a gap is a far
+            # better outcome than two matters holding the same bytes.
+            raise AlreadyFiled(
+                f"{version_id} was filed by someone else while {matter_ref} was being created"
+            )
+
+        logger.info(f"Created matter {matter_ref} from version {version_id}")
+        return {"matter_ref": matter_ref, "n": 1, "version_id": version_id}
+
+    def attach_version(self, tenant_id: str, matter_ref: str, version_id: str) -> Dict[str, Any]:
+        """Add a new round to an existing matter.
+
+        ``n`` is derived and written inside the same statement that increments
+        the matter's counter, so two uploads racing into one matter get 2 and 3
+        rather than both getting 2.
+
+        A matter awaiting the counterparty comes back to DRAFT when their
+        version lands — which is what a new round *means* — while a closed one is
+        refused above this call.
+        """
+        matter = self.get_matter(tenant_id, matter_ref)
+        if matter is None:
+            raise MatterNotFound(matter_ref)
+        if not parse_status(matter["status"]).accepts_new_versions:
+            raise MatterClosed(matter_ref)
+
+        rows = self.graph.query(
+            """
+            MATCH (m:Matter {matter_ref: $matter_ref, tenant_id: $tenant_id})
+            WHERE m.status <> $closed
+            MATCH (v:ContractVersion {version_id: $version_id, tenant_id: $tenant_id})
+            WHERE NOT (m)-[:HAS_VERSION]->(v)
+            SET m.version_count = coalesce(m.version_count, 0) + 1,
+                m.updated_at = datetime(),
+                m.status = CASE WHEN m.status = $awaiting THEN $draft ELSE m.status END
+            CREATE (m)-[r:HAS_VERSION {n: m.version_count}]->(v)
+            RETURN m.matter_ref AS matter_ref, r.n AS n
+            """,
+            {
+                "matter_ref": matter_ref,
+                "tenant_id": tenant_id,
+                "version_id": version_id,
+                "closed": MatterStatus.CLOSED.value,
+                "awaiting": MatterStatus.AWAITING_COUNTERPARTY.value,
+                "draft": MatterStatus.DRAFT.value,
+            },
+        )
+        if not rows:
+            raise MatterNotFound(f"{matter_ref}/{version_id}")
+
+        return {"matter_ref": matter_ref, "n": int(rows[0]["n"]), "version_id": version_id}
+
+    def get_matter(self, tenant_id: str, matter_ref: str) -> Optional[Dict[str, Any]]:
+        """One matter and every round of it, or None.
+
+        None for an unknown reference *and* for another tenant's — the endpoint
+        answers 404 to both.
+        """
+        rows = self.graph.query(
+            """
+            MATCH (m:Matter {matter_ref: $matter_ref, tenant_id: $tenant_id})
+            OPTIONAL MATCH (m)-[r:HAS_VERSION]->(v:ContractVersion)
+            WITH m, r, v ORDER BY r.n
+            RETURN m.matter_ref AS matter_ref,
+                   m.title AS title,
+                   m.counterparty AS counterparty,
+                   m.contract_type AS contract_type,
+                   m.status AS status,
+                   toString(m.created_at) AS created_at,
+                   toString(m.updated_at) AS updated_at,
+                   [x IN collect({
+                       n: r.n,
+                       version_id: v.version_id,
+                       filename: v.source_filename,
+                       source_sha256: v.source_sha256,
+                       uploaded_at: toString(v.uploaded_at),
+                       analysis_status: coalesce(v.analysis_status, $not_started),
+                       analysis_error: v.analysis_error,
+                       risk_score: v.risk_score,
+                       risk_level: v.risk_level,
+                       clauses_count: v.clauses_count,
+                       violations_count: v.violations_count,
+                       redlines_count: v.redlines_count
+                   }) WHERE x.version_id IS NOT NULL] AS versions
+            """,
+            {
+                "matter_ref": matter_ref,
+                "tenant_id": tenant_id,
+                "not_started": AnalysisStatus.NOT_STARTED.value,
+            },
+        )
+        return rows[0] if rows else None
+
+    def list_matters(self, tenant_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+        """Every matter for this tenant, newest activity first.
+
+        Carries the latest version's headline numbers and its pending-redline
+        count, because the list is the landing page: it has to say what state
+        each review is in without a request per row.
+        """
+        return self.graph.query(
+            """
+            MATCH (m:Matter {tenant_id: $tenant_id})
+            OPTIONAL MATCH (m)-[r:HAS_VERSION]->(:ContractVersion)
+            WITH m, count(r) AS version_count, max(r.n) AS latest_n
+            OPTIONAL MATCH (m)-[:HAS_VERSION {n: latest_n}]->(latest:ContractVersion)
+            OPTIONAL MATCH (latest)-[:HAS_REDLINE]->(rl:Redline)
+            WITH m, version_count, latest_n, latest,
+                 count(rl) AS redline_total,
+                 // `rl IS NOT NULL` is load-bearing: the OPTIONAL MATCH yields a
+                 // null row for a version with no redlines, and
+                 // `coalesce(null.status, 'PENDING')` is 'PENDING' — so a matter
+                 // that has never been analysed reported one pending redline.
+                 sum(CASE WHEN rl IS NOT NULL AND coalesce(rl.status, 'PENDING') = 'PENDING'
+                          THEN 1 ELSE 0 END) AS redline_pending
+            RETURN m.matter_ref AS matter_ref,
+                   m.title AS title,
+                   m.counterparty AS counterparty,
+                   m.contract_type AS contract_type,
+                   m.status AS status,
+                   toString(m.created_at) AS created_at,
+                   toString(m.updated_at) AS updated_at,
+                   version_count,
+                   latest_n,
+                   latest.version_id AS latest_version_id,
+                   coalesce(latest.analysis_status, $not_started) AS analysis_status,
+                   latest.risk_score AS risk_score,
+                   latest.risk_level AS risk_level,
+                   redline_total,
+                   redline_pending
+            ORDER BY m.updated_at DESC, m.matter_ref DESC
+            LIMIT $limit
+            """,
+            {
+                "tenant_id": tenant_id,
+                "not_started": AnalysisStatus.NOT_STARTED.value,
+                "limit": limit,
+            },
+        )
+
+    def review_counts(self, tenant_id: str, matter_ref: str) -> Dict[int, Dict[str, int]]:
+        """Redline decision counts for every version of a matter, by version number.
+
+        One query rather than one per version: the matter page shows how far
+        each round got, and the derived ``IN_REVIEW`` / ``REVIEWED`` status is
+        exactly ``pending == 0`` on the latest one.
+        """
+        rows = self.graph.query(
+            """
+            MATCH (m:Matter {matter_ref: $matter_ref, tenant_id: $tenant_id})
+                  -[r:HAS_VERSION]->(v:ContractVersion)
+            OPTIONAL MATCH (v)-[:HAS_REDLINE]->(rl:Redline)
+            WITH r.n AS n, coalesce(rl.status, 'PENDING') AS status, rl
+            RETURN n,
+                   count(rl) AS total,
+                   sum(CASE WHEN rl IS NOT NULL AND status = 'PENDING' THEN 1 ELSE 0 END) AS pending,
+                   sum(CASE WHEN status = 'APPROVED' THEN 1 ELSE 0 END) AS approved,
+                   sum(CASE WHEN status = 'MODIFIED' THEN 1 ELSE 0 END) AS modified,
+                   sum(CASE WHEN status = 'REJECTED' THEN 1 ELSE 0 END) AS rejected
+            """,
+            {"matter_ref": matter_ref, "tenant_id": tenant_id},
+        )
+        counts: Dict[int, Dict[str, int]] = {}
+        for row in rows:
+            if row.get("n") is None:
+                continue
+            counts[int(row["n"])] = {
+                "total": int(row.get("total") or 0),
+                "pending": int(row.get("pending") or 0),
+                "approved": int(row.get("approved") or 0),
+                "modified": int(row.get("modified") or 0),
+                "rejected": int(row.get("rejected") or 0),
+            }
+        return counts
+
+    def matter_for_version(self, tenant_id: str, version_id: str) -> Optional[Dict[str, Any]]:
+        """Which matter a contract id belongs to, if any.
+
+        Lets a bookmarked contract URL redirect to the matter it is now part of
+        instead of dead-ending.
+        """
+        rows = self.graph.query(
+            """
+            MATCH (m:Matter {tenant_id: $tenant_id})-[r:HAS_VERSION]->
+                  (v:ContractVersion {version_id: $version_id, tenant_id: $tenant_id})
+            RETURN m.matter_ref AS matter_ref, m.title AS title, r.n AS n
+            LIMIT 1
+            """,
+            {"tenant_id": tenant_id, "version_id": version_id},
+        )
+        return rows[0] if rows else None
+
+    def set_status(self, tenant_id: str, matter_ref: str, status: MatterStatus) -> Dict[str, Any]:
+        """Write a transition a human made. Validation belongs to the caller."""
+        rows = self.graph.query(
+            """
+            MATCH (m:Matter {matter_ref: $matter_ref, tenant_id: $tenant_id})
+            SET m.status = $status, m.updated_at = datetime()
+            RETURN m.matter_ref AS matter_ref, m.status AS status
+            """,
+            {"matter_ref": matter_ref, "tenant_id": tenant_id, "status": status.value},
+        )
+        if not rows:
+            raise MatterNotFound(matter_ref)
+        return rows[0]
+
+    # -- migration --------------------------------------------------------
+
+    def migrate_legacy_contracts(self, tenant_id: Optional[str] = None,
+                                 dry_run: bool = False) -> Dict[str, Any]:
+        """Give every pre-existing contract a single-version matter.
+
+        Purely additive: it labels contracts and creates matters around them. It
+        never writes to a ``(:Redline)``, so the decisions recorded in
+        Increment 4 come through untouched — they hang off the same node, which
+        has simply gained a label and a parent.
+
+        Idempotent, so it is safe to re-run after a partial failure; contracts
+        that already belong to a matter are skipped. References are allocated in
+        upload order, so the oldest contract gets the lowest number.
+        """
+        rows = self.graph.query(
+            """
+            MATCH (c:Contract)
+            WHERE ($tenant_id IS NULL OR c.tenant_id = $tenant_id)
+              AND NOT (:Matter)-[:HAS_VERSION]->(c)
+            RETURN c.file_id AS version_id,
+                   c.tenant_id AS tenant_id,
+                   c.contract_type AS contract_type,
+                   c.full_text AS full_text,
+                   c.summary AS summary,
+                   toString(c.upload_date) AS upload_date,
+                   [(p:Party)-[pr:PARTY_TO]->(c) | {name: p.name, role: pr.role}] AS parties
+            ORDER BY c.upload_date, c.file_id
+            """,
+            {"tenant_id": tenant_id},
+        )
+
+        planned: List[Dict[str, Any]] = []
+        for row in rows:
+            contract_tenant = row.get("tenant_id") or "default-tenant"
+            counterparty = counterparty_from_parties(row.get("parties"))
+            planned.append({
+                "version_id": row["version_id"],
+                "tenant_id": contract_tenant,
+                "contract_type": row.get("contract_type") or "",
+                "counterparty": counterparty,
+                "title": suggest_title(row.get("contract_type"), counterparty,
+                                       row["version_id"]),
+                # The stored text is what the analysis has always read, so it is
+                # the right thing to hash: a re-upload of the same PDF then
+                # matches the migrated version rather than forking a second one.
+                "source_sha256": source_sha256(row.get("full_text") or row.get("summary") or ""),
+            })
+
+        if dry_run:
+            return {"migrated": 0, "planned": planned, "dry_run": True}
+
+        created: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+        for item in planned:
+            try:
+                self.record_version(
+                    item["tenant_id"], item["version_id"],
+                    source_sha256=item["source_sha256"], filename=item["version_id"],
+                )
+                result = self.create_matter(
+                    item["tenant_id"], item["version_id"],
+                    title=item["title"],
+                    counterparty=item["counterparty"],
+                    contract_type=item["contract_type"],
+                )
+                created.append({**result, "version_id": item["version_id"]})
+            except Exception as e:
+                # One bad contract must not stop the rest from migrating.
+                logger.error(f"Could not migrate {item['version_id']}: {e}")
+                failed.append({"version_id": item["version_id"], "error": str(e)})
+
+        return {"migrated": len(created), "created": created,
+                "failed": failed, "dry_run": False}

@@ -1,9 +1,12 @@
 import React from 'react';
 import { Button } from '../shared/ui/button';
+import type { PageType } from '../../lib/useRouter';
+
+type NavPage = Exclude<PageType, 'matter'>;
 
 interface NavigationProps {
-  currentPage: 'chat' | 'intelligence' | 'agents' | 'search';
-  onNavigate: (page: 'chat' | 'intelligence' | 'agents' | 'search') => void;
+  currentPage: NavPage;
+  onNavigate: (page: NavPage) => void;
 }
 
 export const Navigation: React.FC<NavigationProps> = ({ currentPage, onNavigate }) => {
@@ -15,11 +18,11 @@ export const Navigation: React.FC<NavigationProps> = ({ currentPage, onNavigate 
             <h1 className="text-2xl font-bold text-slate-800">Contract Intelligence</h1>
             <div className="flex space-x-1">
               <Button
-                variant={currentPage === 'intelligence' ? 'default' : 'ghost'}
-                onClick={() => onNavigate('intelligence')}
-                className={`px-4 py-2 ${currentPage === 'intelligence' ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200'}`}
+                variant={currentPage === 'matters' ? 'default' : 'ghost'}
+                onClick={() => onNavigate('matters')}
+                className={`px-4 py-2 ${currentPage === 'matters' ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200'}`}
               >
-                Document Analysis
+                Matters
               </Button>
               <Button
                 variant={currentPage === 'chat' ? 'default' : 'ghost'}

@@ -1,6 +1,6 @@
 import { useState, useCallback } from 'react';
 
-export type ModalType = 'clauses' | 'violations' | 'risk' | null;
+export type ModalType = 'clauses' | 'violations' | 'risk' | 'redlines' | null;
 
 export const useModal = () => {
   const [activeModal, setActiveModal] = useState<ModalType>(null);
