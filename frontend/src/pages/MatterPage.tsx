@@ -23,6 +23,8 @@ import {
 interface MatterPageProps {
   matterRef: string;
   onBack: () => void;
+  /** So a duplicate that belongs elsewhere can open the matter that owns it. */
+  onOpenMatter: (matterRef: string) => void;
 }
 
 /**
@@ -35,7 +37,7 @@ interface MatterPageProps {
  * Uploading here is the second of the two upload paths: the matter is already
  * known, so nothing is inferred and nothing is asked.
  */
-export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack }) => {
+export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack, onOpenMatter }) => {
   const debugEnabled = useDebugEnabled();
 
   const [matter, setMatter] = useState<MatterDetail | null>(null);
@@ -81,7 +83,17 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack }) => 
       try {
         const result = await uploadContract(file, model, matterRef);
         if (result.status === 'duplicate') {
-          setNotice(result.details || 'That is byte-identical to a version already on file.');
+          // These exact bytes are already a version. If they belong to a
+          // different matter, showing a note here leaves the reviewer looking
+          // at the wrong contract — open the one that owns them.
+          if (result.matter_ref && result.matter_ref !== matterRef) {
+            setNotice(result.details || `Already filed under ${result.matter_ref}.`);
+            onOpenMatter(result.matter_ref);
+            return;
+          }
+          setNotice(
+            result.details || 'That is byte-identical to a version already on file.',
+          );
         } else if (result.status === 'error') {
           setUploadError(result.details || 'Processing failed');
         } else {
@@ -98,7 +110,7 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack }) => 
         setUploading(false);
       }
     },
-    [model, matterRef, refresh],
+    [model, matterRef, refresh, onOpenMatter],
   );
 
   const moveTo = useCallback(

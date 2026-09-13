@@ -1225,14 +1225,14 @@ order. It is purely additive — it adds a label and a `Matter` and writes to no
 idempotent, so it is safe to re-run. A test asserts that no statement it issues contains `DELETE`,
 `REMOVE` or `Redline`. Dry-run against your database: **51 contracts** would be migrated.
 
-**Tests: 359 → 504**, all offline. The failure-case table above is walked row by row in
+**Tests: 359 → 526**, all offline. The failure-case table above is walked row by row in
 `backend/tests/test_matters.py::TestTheFailureCases`.
 
 | file | covers |
 |---|---|
-| `test_matters.py` (68) | the failure-case table, reference numbers, derived status and transitions, source hashing, the migration |
-| `test_matters_api.py` (22) | the wire — 404 for an unknown *and* another tenant's reference, 409 on a double-clicked confirm, 422 on a derived status, 403 for a VIEWER |
-| `test_review_is_resumable.py` (20) | findings reach the graph, a failed analysis never erases a good review, the read-back shape |
+| `test_matters.py` (85) | the failure-case table, reference numbers, derived status and transitions, source hashing, the migration |
+| `test_matters_api.py` (25) | the wire — 404 for an unknown *and* another tenant's reference, 409 on a double-clicked confirm, 422 on a derived status, 403 for a VIEWER |
+| `test_review_is_resumable.py` (22) | findings reach the graph, a failed analysis never erases a good review, the read-back shape |
 | `test_upload_paths.py` (23) | the four bugs, pinned by inspecting what the routes actually declare |
 | `test_frontend_navigation.py` (12) | static checks that a review has a URL and the list comes from the server |
 
@@ -1242,6 +1242,64 @@ duplicate short circuit, the 409 on a closed matter, and that version 1's approv
 a re-analysis. That check found one real bug — `list_matters` counted a matter with *no* redlines as
 having one pending, because `coalesce(rl.status, 'PENDING')` over a null `OPTIONAL MATCH` row reads
 as `PENDING`. Fixed, and pinned by a test.
+
+### Addressed in review (Copilot, PR #8)
+
+Nine findings, all nine fixed. Four were about the same thing, and it is the thing this increment
+is *for*: a check performed before a two-minute extraction is not a guarantee.
+
+- **The duplicate check was check-then-write.** Two uploads of the same PDF both pass the
+  pre-flight hash lookup, then spend two minutes extracting, then both write — the exact
+  double-click the increment claims to prevent. The lookup is now the fast path only. The guarantee
+  is a **uniqueness constraint** on `source_key` (`tenant_id|source_sha256`), so the loser is
+  rejected by the database and told which version won. Verified with two real threads: exactly one
+  wins.
+- **`MERGE` does not make a counter singleton.** Two first allocations for the same
+  `(tenant, year, kind)` could create two `Counter` nodes that each return `1`, and two matters
+  claiming one reference. Added uniqueness constraints for the counter, the matter reference and
+  the source key, created at startup and by the migration. Verified: eight concurrent allocations
+  produce eight distinct references and one counter node.
+- **A failed analysis still overwrote the stored review.** `_store_clause_findings` was guarded but
+  `_store_intelligence_results` was not, so the failure path's risk 0.0 / `UNKNOWN` / every-count-zero
+  result replaced a good previous review — and on the matters list that reads as a contract with
+  nothing wrong with it. Nothing is written now unless the analysis ran.
+- **`COMPLETE` was claimed without checking that anything was saved.** A Neo4j write failure was
+  swallowed and the version marked complete anyway. Persistence now reports success, and the status
+  follows it: an analysis that ran and then failed to save is, to whoever reopens the matter,
+  indistinguishable from one that never ran.
+- **A filing failure was reported as success.** `MatterPage` treats every non-error response as
+  filed, so a failed `attach_version` closed the uploader on a round that is not there — and a
+  failed `record_version` produced a confirmation card whose confirmation could only 404.
+  `needs_filing` is now set only once the version is known to exist, and a filing failure returns
+  an explicit recoverable error.
+- **The landing page silently truncated.** For a system whose whole claim is that the review is
+  durable, "the work is there and there is no way back to it" is the worst failure available. The
+  list is paged and says so — `total`, `offset`, `has_more` — with a *Load more* button.
+- **The migration would have filed cancelled uploads.** A version uploaded since this increment and
+  left unfiled is a confirmation card the reviewer has not answered; the scan would have picked it
+  up and burned a reference on a decision they never made. It now skips anything already labelled
+  `:ContractVersion`, while still recovering its own interrupted work via `pending_migration`.
+- **The drop zone was mouse-only.** A click-only `div` in front of a `display: none` input, so
+  keyboard users could not upload at all. It is a `<button>` now.
+- **The duplicate case stayed on the wrong page.** Uploading bytes that belong to a different matter
+  showed a note and left the reviewer looking at the wrong contract. It opens the matter that owns
+  them.
+- **A failed restore looked like an unanalysed contract**, whose obvious next move is to spend two
+  minutes re-deriving a review that is already on the graph. Network and server failures are shown
+  with a retry; only a genuine 404 stays quiet.
+
+**One thing the review did not ask for, found while fixing it.** The loser of a duplicate race
+leaves a `(:Contract)` that never became a version — unreachable, but the migration would later
+file it as a matter of its own and put the duplicate back. It is marked `superseded_by` rather than
+deleted: deletion is irreversible and the node is evidence that two uploads raced.
+
+**And one the legacy data forced.** Migrating the development database showed what the broken
+duplicate check actually did: **52 contracts are 8 distinct documents**, one of them uploaded 18
+times. Filing those as 52 matters would have put the old bug on the landing page and buried the
+eight real contracts. Repeat uploads are grouped into rounds of one matter instead, oldest first.
+Nothing is discarded — every copy keeps its own redline decisions under its own version number.
+
+Tests: **504 → 526.**
 
 ### One thing this increment could not finish
 
@@ -1253,7 +1311,7 @@ it would is wrong.
 
 What I did: fixed bug #2, then fixed the ten errors that were in files this increment touches
 (`ContractIntelligence.tsx`, `ClausesDetail.tsx`, `useModal.ts`, and by deleting `DocumentUpload.tsx`).
-That took the count from **41 to 31**. The rest sit in `ViolationsDetail`, `ErrorBoundary`, the
+That took the count from **41 to 31**, and lint in those files from 4 errors to 2. The rest sit in `ViolationsDetail`, `ErrorBoundary`, the
 documentation tabs, `theme-provider`, `tabs.tsx`, the chat input and the search results — files
 this increment has no reason to touch and no test coverage for. I left them rather than change
 behaviour in areas I cannot verify offline.
@@ -1267,17 +1325,19 @@ worked. Everything new type-checks clean and lints clean.
 make test
 ```
 
-504 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
+526 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
 
 Then, with the stack up (`make run`):
 
 ```bash
-make check-matters      # lists the 51 contracts that would get a matter — writes nothing
-make migrate-matters    # creates them
+make check-matters      # writes nothing; lists what it would do
+make migrate-matters    # creates the matters, and the uniqueness constraints
 ```
 
-The migration is additive and idempotent; your Increment 4 redline decisions come through
-untouched. Then, in the browser:
+On your database that is **51 contracts becoming 8 matters** — the repeat uploads the old duplicate
+check never caught become rounds of one matter rather than 51 separate ones. Nothing is discarded:
+every copy keeps its own redline decisions under its own version number. The migration is additive
+and idempotent, and your Increment 4 decisions come through untouched. Then, in the browser:
 
 1. **The landing page is the matters list.** `/` shows every contract from the server, with its
    reference number, counterparty, version count and how many redlines are still pending.

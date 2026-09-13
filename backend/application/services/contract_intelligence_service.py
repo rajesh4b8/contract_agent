@@ -144,21 +144,36 @@ class ContractIntelligenceService:
 
             # Store intelligence results back to database
             with trace_step("analysis", "store_results", contract_id=contract_id) as step:
-                self._store_intelligence_results(contract_id, tenant_id, intelligence)
+                stored = self._store_intelligence_results(contract_id, tenant_id, intelligence)
                 step.set(
                     clauses=len(intelligence.clauses or []),
                     violations=len(intelligence.violations or []),
+                    stored=stored,
                 )
 
-            # The version outlives the analysis. If the run degraded, that is
-            # recorded on it as a failure with the reason, so reopening the
-            # matter later shows a warning rather than a clean bill of health.
-            if intelligence.clauses_extracted:
+            # The version outlives the analysis. COMPLETE is claimed only when
+            # the review was actually written down — an analysis that ran
+            # perfectly and then failed to save is, to whoever reopens the
+            # matter, indistinguishable from one that never ran. Either way the
+            # reason is recorded, so reopening shows a warning rather than a
+            # clean bill of health.
+            if stored:
                 self._set_analysis_status(contract_id, tenant_id, AnalysisStatus.COMPLETE)
             else:
+                reason = "; ".join(intelligence.warnings or []) or (
+                    "the analysis did not complete"
+                    if not intelligence.clauses_extracted
+                    else "the analysis ran but its results could not be saved"
+                )
                 self._set_analysis_status(
-                    contract_id, tenant_id, AnalysisStatus.FAILED,
-                    error="; ".join(intelligence.warnings or []) or "the analysis did not complete",
+                    contract_id, tenant_id, AnalysisStatus.FAILED, error=reason,
+                )
+                # And the caller is told, so the response carries the warning
+                # rather than presenting an unsaved review as a saved one.
+                intelligence.warnings = list(intelligence.warnings or []) + (
+                    [] if not intelligence.clauses_extracted
+                    else ["The analysis ran but its results could not be saved; "
+                          "reopening this version will not show them."]
                 )
 
             note(
@@ -288,7 +303,7 @@ class ContractIntelligenceService:
             )
 
     def _store_clause_findings(self, contract_id: str, tenant_id: str,
-                               intelligence: ContractIntelligence) -> None:
+                               intelligence: ContractIntelligence) -> bool:
         """Persist the findings themselves, not just how many there were.
 
         This is the gap that made a review un-reopenable. `_store_intelligence_results`
@@ -302,18 +317,14 @@ class ContractIntelligenceService:
         so there is nothing here to preserve across a re-analysis, and keeping
         superseded findings would double-count the violations on the matter list.
 
-        Nothing is written when the analysis did not run: an empty list then
-        means "we do not know", and wiping a good stored review on the strength
-        of a transient model failure would lose exactly what this method exists
-        to keep.
-        """
-        if not intelligence.clauses_extracted:
-            logger.warning(
-                f"Analysis of {contract_id} did not complete; keeping the previously "
-                f"stored findings rather than replacing them with nothing"
-            )
-            return
+        An analysis that did not run never reaches here — `_store_intelligence_results`
+        returns before calling this — because an empty list would then mean "we do
+        not know", and wiping a good stored review on the strength of a transient
+        model failure would lose exactly what this method exists to keep.
 
+        Returns whether the write succeeded, so the caller can mark the version
+        FAILED rather than claiming a review it does not have.
+        """
         findings = [
             {
                 "finding_id": self._finding_id(contract_id, index, clause),
@@ -406,12 +417,15 @@ class ContractIntelligenceService:
             )
             note("analysis", "store_findings", contract_id=contract_id,
                  findings=len(findings), violations=len(violations))
+            return True
         except Exception as e:
             # Non-fatal, like redline storage: the caller already has the
             # analysis, and failing the request would throw it away entirely.
+            # The version is marked FAILED, so nobody reads the gap as good news.
             logger.error(f"Failed to store findings for {contract_id}: {e}")
             note("analysis", "store_findings", "error", contract_id=contract_id,
                  error_type=type(e).__name__, error=str(e))
+            return False
 
     @staticmethod
     def _finding_id(contract_id: str, index: int, clause) -> str:
@@ -792,9 +806,29 @@ class ContractIntelligenceService:
         
         return intelligence
     
-    def _store_intelligence_results(self, contract_id: str, tenant_id: str, intelligence: ContractIntelligence):
-        """Store intelligence analysis results in the database"""
-        
+    def _store_intelligence_results(self, contract_id: str, tenant_id: str,
+                                    intelligence: ContractIntelligence) -> bool:
+        """Store intelligence analysis results in the database.
+
+        Returns whether the review was actually written, which is what decides
+        the version's COMPLETE / FAILED status. Claiming completion on the
+        strength of the in-memory result alone marks a review complete that
+        whoever reopens it will find empty.
+
+        **Nothing is written at all when the analysis did not run.** The failure
+        path builds a result with risk 0.0, level "UNKNOWN" and every count at
+        zero; storing that overwrites a good previous review with numbers that
+        read, on the matters list, as a contract with nothing wrong with it.
+        """
+        if not intelligence.clauses_extracted:
+            logger.warning(
+                f"Analysis of {contract_id} did not complete; keeping the previously "
+                f"stored review rather than replacing it with an empty one"
+            )
+            note("analysis", "store_results", "skipped", contract_id=contract_id,
+                 reason="the analysis did not complete")
+            return False
+
         try:
             # Update contract with intelligence data including CUAD fields
             intelligence_data = {
@@ -851,7 +885,10 @@ class ContractIntelligenceService:
                 **intelligence_data
             })
 
-            self._store_clause_findings(contract_id, tenant_id, intelligence)
+            if not self._store_clause_findings(contract_id, tenant_id, intelligence):
+                # The findings are the review. Without them the version holds a
+                # score and nothing to justify it, which must not read as COMPLETE.
+                return False
 
             self._store_redlines(
                 contract_id, tenant_id, intelligence.redlines,
@@ -862,9 +899,17 @@ class ContractIntelligenceService:
             self._store_performance_metrics(contract_id, tenant_id, intelligence)
             
             logger.info(f"Stored intelligence results for contract: {contract_id}")
+            return True
             
         except Exception as e:
+            # Reported, not raised: the caller already has the analysis and
+            # failing the request would throw it away. But the version is marked
+            # FAILED rather than COMPLETE, so reopening says the review could not
+            # be saved instead of showing nothing and implying all is well.
             logger.error(f"Failed to store intelligence results for {contract_id}: {e}")
+            note("analysis", "store_results", "error", contract_id=contract_id,
+                 error_type=type(e).__name__, error=str(e))
+            return False
     
     def _store_performance_metrics(self, contract_id: str, tenant_id: str, intelligence: ContractIntelligence):
         """Store performance metrics in database"""

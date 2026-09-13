@@ -7,13 +7,23 @@
 
 Contracts uploaded before Increment 6 have no matter, so they would not appear
 on the matters list at all — the landing page would be empty on a database full
-of work. This gives each of them a matter of its own, with a reference number
-allocated in upload order, and marks the contract as version 1.
+of work.
+
+Repeat uploads of one document become **rounds of one matter**, not separate
+matters. The duplicate check never fired before this increment, so re-uploading
+a contract silently created a second unrelated `Contract`; on the development
+database that turned 8 distinct documents into 52 contracts, one of them
+uploaded 18 times. Filing those as 52 matters would put the old bug on the
+landing page. Nothing is discarded — every copy keeps its own redline decisions
+under its own version number.
 
 **Nothing is deleted or overwritten.** The redline decisions recorded in
 Increment 4 hang off the same node the matter now points at; the migration adds
 a label and a parent and touches no `(:Redline)`. Re-running is safe: contracts
-that already belong to a matter are skipped.
+that already belong to a matter are skipped, and so are versions uploaded since
+this increment — one sitting unfiled is a confirmation card the reviewer has not
+answered yet, and auto-filing it would burn a reference number on a decision
+they never made.
 """
 # Run directly from anywhere: Python puts this file's directory on sys.path,
 # not the repo root, so `backend.*` would not resolve without this.
@@ -37,6 +47,15 @@ def main() -> int:
     args = parser.parse_args()
 
     repository = MatterRepository()
+
+    if not args.check:
+        # The uniqueness constraints the concurrency guarantees rest on. Created
+        # here as well as at startup so a database migrated by hand still gets
+        # them.
+        created_constraints = repository.ensure_constraints()
+        if created_constraints:
+            print(f"Constraints in place: {', '.join(created_constraints)}\n")
+
     try:
         result = repository.migrate_legacy_contracts(args.tenant, dry_run=args.check)
     except Exception as e:
@@ -45,18 +64,21 @@ def main() -> int:
 
     if args.check:
         planned = result["planned"]
-        print(f"{len(planned)} contract(s) would get a matter:")
+        contracts = sum(len(item["version_ids"]) for item in planned)
+        print(f"{contracts} contract(s) would become {len(planned)} matter(s):")
         for item in planned:
-            print(f"  {item['version_id']:34} {item['tenant_id']:18} "
-                  f"{item['title']}")
+            rounds = len(item["version_ids"])
+            print(f"  {item['tenant_id']:18} {rounds:3} version(s)  {item['title']}")
+            for n, version_id in enumerate(item["version_ids"], start=1):
+                print(f"      v{n:<3} {version_id}")
         return 0
 
-    print(f"Created {result['migrated']} matter(s):")
+    print(f"Created {result['migrated']} matter(s) holding {result['versions']} version(s):")
     for created in result["created"]:
-        print(f"  {created['matter_ref']:16} v{created['n']}  {created['version_id']}")
+        print(f"  {created['matter_ref']:16} {created['versions']:3} version(s)")
 
     if result["failed"]:
-        print(f"\n{len(result['failed'])} contract(s) could not be migrated:")
+        print(f"\n{len(result['failed'])} document(s) could not be migrated:")
         for failure in result["failed"]:
             print(f"  {failure['version_id']}: {failure['error']}")
         return 1

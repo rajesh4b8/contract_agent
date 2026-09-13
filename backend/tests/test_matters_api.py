@@ -67,6 +67,8 @@ def matters():
     """Stand in for the module-level repository the endpoints hold."""
     with patch("backend.api.matters.repository", new=MagicMock()) as fake:
         fake.review_counts.return_value = {}
+        fake.list_matters.return_value = []
+        fake.count_matters.return_value = 0
         yield fake
 
 
@@ -78,6 +80,7 @@ class TestTheList:
         could not have listed contracts even if it had asked.
         """
         matters.list_matters.return_value = [A_LIST_ROW]
+        matters.count_matters.return_value = 1
 
         response = client.get("/api/matters", headers=HEADERS)
 
@@ -107,7 +110,38 @@ class TestTheList:
         response = client.get("/api/matters", headers=HEADERS)
 
         assert response.status_code == 200
-        assert response.json() == {"count": 0, "matters": []}
+        body = response.json()
+        assert body["count"] == 0 and body["matters"] == []
+        assert body["has_more"] is False
+
+    def test_a_truncated_list_says_that_it_is_truncated(self, client, matters):
+        """Silently returning the first page makes older matters unreachable.
+
+        For a system whose claim is that the review is durable, that is the
+        worst kind of failure: the work is still there and there is no way to
+        get to it.
+        """
+        matters.list_matters.return_value = [A_LIST_ROW]
+        matters.count_matters.return_value = 250
+
+        body = client.get("/api/matters?limit=1", headers=HEADERS).json()
+
+        assert body["total"] == 250
+        assert body["has_more"] is True
+
+    def test_the_last_page_does_not_claim_there_is_more(self, client, matters):
+        matters.list_matters.return_value = [A_LIST_ROW]
+        matters.count_matters.return_value = 3
+
+        body = client.get("/api/matters?limit=1&offset=2", headers=HEADERS).json()
+
+        assert body["offset"] == 2
+        assert body["has_more"] is False
+
+    def test_a_page_can_be_asked_for(self, client, matters):
+        client.get("/api/matters?limit=25&offset=50", headers=HEADERS)
+
+        assert matters.list_matters.call_args.kwargs == {"limit": 25, "offset": 50}
 
     def test_it_reads_the_tenant_from_the_caller(self, client, matters):
         matters.list_matters.return_value = []

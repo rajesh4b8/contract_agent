@@ -52,11 +52,17 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
   );
   const [filing, setFiling] = useState(false);
 
+  const [total, setTotal] = useState<number | null>(null);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
+
   const refresh = useCallback(async () => {
     try {
-      const rows = await listMatters();
-      setMatters(rows);
-      cacheMatters(rows);
+      const page = await listMatters();
+      setMatters(page.matters);
+      setTotal(page.total);
+      setHasMore(page.hasMore);
+      cacheMatters(page.matters);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Could not load matters');
@@ -64,6 +70,20 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
       setLoading(false);
     }
   }, [cacheMatters]);
+
+  const loadMore = useCallback(async () => {
+    setLoadingMore(true);
+    try {
+      const page = await listMatters(matters.length);
+      setMatters((current) => [...current, ...page.matters]);
+      setTotal(page.total);
+      setHasMore(page.hasMore);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not load more matters');
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [matters.length]);
 
   useEffect(() => {
     if (cachedMatters.length > 0) {
@@ -192,7 +212,12 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
         <div className="p-6">
           <div className="flex items-center justify-between mb-4">
             <h2 className="text-xl font-semibold text-slate-800">
-              Open matters{matters.length > 0 ? ` (${matters.length})` : ''}
+              Open matters
+              {total != null && total > 0 && (
+                <span className="ml-2 text-base font-normal text-slate-500">
+                  {matters.length < total ? `${matters.length} of ${total}` : total}
+                </span>
+              )}
             </h2>
             <Button variant="outline" size="sm" onClick={() => void refresh()}>
               Refresh
@@ -237,6 +262,14 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
               />
             ))}
           </div>
+
+          {hasMore && (
+            <div className="pt-4 text-center">
+              <Button variant="outline" onClick={() => void loadMore()} disabled={loadingMore}>
+                {loadingMore ? 'Loading…' : `Load more (${(total ?? 0) - matters.length} left)`}
+              </Button>
+            </div>
+          )}
         </div>
       </Card>
 

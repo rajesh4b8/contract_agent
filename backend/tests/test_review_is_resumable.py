@@ -143,19 +143,47 @@ class TestTheFindingsThemselvesAreStored:
 
 
 class TestAFailedAnalysisNeverErasesAGoodReview:
-    def test_nothing_is_written_when_the_analysis_did_not_run(self):
-        """An empty clause list then means "we do not know".
+    def test_nothing_at_all_is_written_when_the_analysis_did_not_run(self):
+        """Not the findings, and not the score either.
 
-        Replacing a stored review on the strength of a transient model failure
-        would destroy precisely what this increment exists to keep.
+        The failure path builds a result with risk 0.0, level "UNKNOWN" and every
+        count at zero. Writing that overwrites a good previous review with
+        numbers that read, on the matters list, as a contract with nothing wrong
+        with it — which is worse than showing nothing.
         """
         service = _service()
 
-        service._store_clause_findings("C-1", "acme", _intelligence(
+        stored = service._store_intelligence_results("C-1", "acme", _intelligence(
             clauses=[], violations=[], clauses_extracted=False,
         ))
 
-        assert service.repository.graph.query.call_count == 0
+        assert stored is False
+        assert service.repository.graph.query.call_count == 0, (
+            "a failed analysis wrote to the graph"
+        )
+
+    def test_the_version_is_not_marked_complete_when_nothing_was_saved(self):
+        """An analysis that ran and then failed to save is, to whoever reopens
+        the matter, indistinguishable from one that never ran at all."""
+        service = _service()
+        service.repository.graph.query.side_effect = RuntimeError("neo4j is down")
+
+        assert service._store_intelligence_results("C-1", "acme", _intelligence()) is False
+
+    def test_a_findings_write_failure_is_not_reported_as_a_complete_review(self):
+        """The findings *are* the review. A score with nothing to justify it is not."""
+        service = _service()
+        calls = {"n": 0}
+
+        def fail_on_findings(statement, *args, **kwargs):
+            calls["n"] += 1
+            if "ClauseFinding" in statement:
+                raise RuntimeError("neo4j is down")
+            return []
+
+        service.repository.graph.query.side_effect = fail_on_findings
+
+        assert service._store_intelligence_results("C-1", "acme", _intelligence()) is False
 
     def test_a_run_that_genuinely_found_nothing_does_clear_the_last_one(self):
         """Otherwise a fixed contract keeps showing the violations it fixed."""
@@ -169,11 +197,15 @@ class TestAFailedAnalysisNeverErasesAGoodReview:
         assert any("DETACH DELETE old" in s for s in statements)
 
     def test_a_storage_failure_does_not_fail_the_analysis(self):
-        """The caller already has the results; raising would throw them away."""
+        """The caller already has the results; raising would throw them away.
+
+        It is reported rather than swallowed, though — the return value is what
+        decides COMPLETE versus FAILED on the version.
+        """
         service = _service()
         service.repository.graph.query.side_effect = RuntimeError("neo4j is down")
 
-        service._store_clause_findings("C-1", "acme", _intelligence())  # no raise
+        assert service._store_clause_findings("C-1", "acme", _intelligence()) is False
 
 
 class TestReadingTheReviewBack:

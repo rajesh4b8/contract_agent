@@ -29,7 +29,9 @@ from backend.domain.matter import (
     type_code,
 )
 from backend.infrastructure.matter_repository import (
+    CONSTRAINTS,
     AlreadyFiled,
+    DuplicateSource,
     MatterClosed,
     MatterNotFound,
     MatterRepository,
@@ -493,6 +495,11 @@ class TestMigratingContractsThatPredateMatters:
         },
     ]
 
+    #: What one single-version group costs, in order: mark pending, record the
+    #: version, the unfiled check, the counter, the CREATE, clear pending.
+    ONE_GROUP = ([], [{"version_id": "x"}], [{"version_id": "x"}], [{"n": 1}],
+                 [{"matter_ref": "MSA-2026-0001"}], [])
+
     def test_it_never_writes_to_a_redline(self):
         """Increment 4's decisions must survive this untouched.
 
@@ -500,13 +507,7 @@ class TestMigratingContractsThatPredateMatters:
         adds a label and a parent and nothing else. A DELETE anywhere in these
         statements would be a decision silently thrown away.
         """
-        repository = repo(
-            self.LEGACY,
-            [{"version_id": "UPLOADED_AAA_20260801"}],   # record_version
-            [{"version_id": "UPLOADED_AAA_20260801"}],   # unfiled check
-            [{"n": 1}],                                  # counter
-            [{"matter_ref": "MSA-2026-0001"}],           # created
-        )
+        repository = repo(self.LEGACY, *self.ONE_GROUP)
 
         result = repository.migrate_legacy_contracts()
 
@@ -514,7 +515,8 @@ class TestMigratingContractsThatPredateMatters:
         for statement in repository.graph.statements:
             assert "Redline" not in statement
             assert "DELETE" not in statement
-            assert "REMOVE" not in statement
+            # The one REMOVE is the migration clearing its own housekeeping flag.
+            assert "REMOVE" not in statement or "pending_migration" in statement
 
     def test_it_only_looks_at_contracts_without_a_matter(self):
         """So re-running after a partial failure is safe."""
@@ -522,6 +524,24 @@ class TestMigratingContractsThatPredateMatters:
         repository.migrate_legacy_contracts()
 
         assert "NOT (:Matter)-[:HAS_VERSION]->(c)" in repository.graph.statements[0]
+
+    def test_it_leaves_versions_uploaded_since_this_increment_alone(self):
+        """An unfiled version is a card the reviewer has not answered yet.
+
+        Auto-filing it would allocate a reference number for a decision they
+        never made — the opposite of the cancellable flow.
+        """
+        repository = repo([])
+        repository.migrate_legacy_contracts()
+
+        assert "NOT c:ContractVersion" in repository.graph.statements[0]
+
+    def test_but_it_does_pick_up_its_own_interrupted_work(self):
+        """A run that died between labelling and filing must not strand a version."""
+        repository = repo([])
+        repository.migrate_legacy_contracts()
+
+        assert "c.pending_migration = true" in repository.graph.statements[0]
 
     def test_references_are_allocated_oldest_first(self):
         repository = repo([])
@@ -549,17 +569,179 @@ class TestMigratingContractsThatPredateMatters:
 
         assert planned["source_sha256"] == source_sha256("Payment within ninety (90) days.")
 
-    def test_one_bad_contract_does_not_stop_the_rest(self):
+    def test_one_bad_document_does_not_stop_the_rest(self):
         repository = repo(
-            self.LEGACY + [{**self.LEGACY[0], "version_id": "UPLOADED_BBB_20260802"}],
-            RuntimeError("node is locked"),             # first record_version blows up
-            [{"version_id": "UPLOADED_BBB_20260802"}],  # second: record_version
-            [{"version_id": "UPLOADED_BBB_20260802"}],  # unfiled check
-            [{"n": 1}],
-            [{"matter_ref": "MSA-2026-0001"}],
+            self.LEGACY + [{**self.LEGACY[0], "version_id": "UPLOADED_BBB_20260802",
+                            "full_text": "A different contract entirely."}],
+            [],                                   # mark pending (first)
+            RuntimeError("node is locked"),       # record_version blows up
+            [], [{"version_id": "x"}], [{"version_id": "x"}], [{"n": 1}],
+            [{"matter_ref": "MSA-2026-0001"}], [],
         )
 
         result = repository.migrate_legacy_contracts()
 
         assert result["migrated"] == 1
         assert result["failed"][0]["version_id"] == "UPLOADED_AAA_20260801"
+
+
+class TestRepeatUploadsBecomeRoundsOfOneMatter:
+    """The duplicate check never fired, so the history is full of re-uploads.
+
+    On the development database, 52 contracts are 8 distinct documents — one of
+    them uploaded 18 times. Filing those as 52 matters would put the old bug on
+    the landing page and bury the eight real contracts.
+    """
+
+    SAME_TEXT = "Payment within ninety (90) days."
+
+    def _three_copies(self):
+        return [
+            {
+                "version_id": f"UPLOADED_{letter}_2026080{n}",
+                "tenant_id": "default-tenant",
+                "contract_type": "Master Services Agreement",
+                "full_text": self.SAME_TEXT,
+                "summary": "An MSA with Acme",
+                "upload_date": f"2026-08-0{n}T00:00:00Z",
+                "parties": [{"name": "Acme Corporation", "role": "Customer"}],
+            }
+            for n, letter in enumerate("ABC", start=1)
+        ]
+
+    def test_identical_documents_group_into_one_matter(self):
+        repository = repo(self._three_copies())
+
+        planned = repository.migrate_legacy_contracts(dry_run=True)["planned"]
+
+        assert len(planned) == 1, "three copies of one document are not three matters"
+        assert len(planned[0]["version_ids"]) == 3
+
+    def test_the_oldest_copy_becomes_version_one(self):
+        repository = repo(self._three_copies())
+
+        version_ids = repository.migrate_legacy_contracts(dry_run=True)["planned"][0]["version_ids"]
+
+        assert version_ids[0] == "UPLOADED_A_20260801"
+
+    def test_no_copy_is_discarded(self):
+        """Each keeps its own redline decisions under its own version number."""
+        repository = repo(self._three_copies())
+
+        planned = repository.migrate_legacy_contracts(dry_run=True)["planned"][0]
+
+        assert planned["version_ids"] == [
+            "UPLOADED_A_20260801", "UPLOADED_B_20260802", "UPLOADED_C_20260803",
+        ]
+
+    def test_genuinely_different_documents_stay_apart(self):
+        copies = self._three_copies()
+        copies[2]["full_text"] = "Payment within thirty (30) days."
+
+        repository = repo(copies)
+        planned = repository.migrate_legacy_contracts(dry_run=True)["planned"]
+
+        assert len(planned) == 2
+
+    def test_the_same_text_in_another_tenant_is_another_matter(self):
+        copies = self._three_copies()
+        copies[2]["tenant_id"] = "someone-else"
+
+        repository = repo(copies)
+        planned = repository.migrate_legacy_contracts(dry_run=True)["planned"]
+
+        assert len(planned) == 2
+
+    def test_the_loser_of_a_duplicate_race_is_not_later_filed(self):
+        """It never became a version, so nothing reaches it.
+
+        Left unmarked, the migration would pick it up as an unlabelled legacy
+        contract and give it a matter — putting back the duplicate the
+        constraint had just refused.
+        """
+        repository = repo([])
+        repository.migrate_legacy_contracts()
+
+        assert "c.superseded_by IS NULL" in repository.graph.statements[0]
+
+    def test_a_loser_is_marked_rather_than_deleted(self):
+        repository = repo([])
+        repository.mark_superseded("t", "V-loser", "V-winner")
+
+        statement, params = repository.graph.calls[0]
+        assert "DELETE" not in statement
+        assert "SET c.superseded_by" in statement
+        assert params["winner_id"] == "V-winner"
+
+    def test_grouped_copies_do_not_claim_the_unique_source_key(self):
+        """They share a hash by definition, so they cannot all hold the key."""
+        import inspect
+
+        source = inspect.getsource(MatterRepository.migrate_legacy_contracts)
+        assert "claim_source=False" in source
+
+
+class TestTheDuplicateGuaranteeIsEnforcedByTheDatabase:
+    """A lookup before a two-minute extraction cannot be the guarantee.
+
+    Two uploads of the same PDF can both pass the pre-flight check and then both
+    write — that is the double-click this increment exists to prevent. The
+    constraint on `source_key` is what actually decides it.
+    """
+
+    def test_the_constraints_are_declared(self):
+        names = {name for name, _ in CONSTRAINTS}
+
+        assert "matter_counter_unique" in names, "two counters would both return 1"
+        assert "matter_ref_unique" in names
+        assert "contract_source_key_unique" in names
+
+    def test_the_counter_constraint_covers_the_whole_merge_key(self):
+        body = dict((name, body) for name, body in CONSTRAINTS)["matter_counter_unique"]
+
+        for key in ("c.tenant_id", "c.year", "c.kind"):
+            assert key in body, f"{key} is part of the MERGE but not of the constraint"
+
+    def test_creating_them_is_idempotent(self):
+        repository = repo([], [], [])
+
+        repository.ensure_constraints()
+
+        for statement in repository.graph.statements:
+            assert "IF NOT EXISTS" in statement
+
+    def test_a_database_that_refuses_a_constraint_does_not_stop_startup(self):
+        """Existing rows may violate one. Running without it beats not running."""
+        repository = repo(RuntimeError("existing data violates it"), [], [])
+
+        created = repository.ensure_constraints()
+
+        assert "matter_counter_unique" not in created
+        assert len(created) == 2, "one bad constraint must not block the others"
+
+    def test_a_new_upload_claims_the_key(self):
+        repository = repo([{"version_id": "V-1"}])
+
+        repository.record_version("t", "V-1", source_sha256="abc")
+
+        assert repository.graph.params[0]["source_key"] == "t|abc"
+        assert "SET c.source_key" in repository.graph.statements[0]
+
+    def test_a_rejected_claim_names_the_version_that_won(self):
+        """So the reviewer is sent to the matter that already holds the bytes."""
+        repository = repo(
+            Exception("Node already exists with label ContractVersion and property "
+                      "source_key... ConstraintValidationFailed"),
+            [{"version_id": "V-first", "matter_ref": "MSA-2026-0042", "n": 1}],
+        )
+
+        with pytest.raises(DuplicateSource) as caught:
+            repository.record_version("t", "V-second", source_sha256="abc")
+
+        assert caught.value.existing["matter_ref"] == "MSA-2026-0042"
+
+    def test_an_unrelated_write_failure_is_not_mistaken_for_a_duplicate(self):
+        repository = repo(RuntimeError("the database is down"))
+
+        with pytest.raises(RuntimeError, match="database is down"):
+            repository.record_version("t", "V-1", source_sha256="abc")

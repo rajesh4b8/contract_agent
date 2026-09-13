@@ -71,12 +71,29 @@ def _summary_row(row: dict, review: Optional[dict] = None) -> dict:
 @router.get("", dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])
 async def list_matters(
     tenant_id: str = Depends(get_current_tenant),
-    limit: int = Query(default=200, ge=1, le=500),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
 ):
-    """Every matter for this tenant — the app's landing page."""
-    rows = repository.list_matters(tenant_id, limit=limit)
+    """This tenant's matters — the app's landing page.
+
+    Paged, and **it says so**. A landing page that silently returns the first N
+    makes everything older unreachable, which for a system whose whole claim is
+    that the review is durable would be the worst possible failure: the work is
+    still there, and there is no way to get to it. `total` and `has_more` are
+    part of the answer so the page can ask for the rest and the reviewer can see
+    that there is a rest.
+    """
+    total = repository.count_matters(tenant_id)
+    rows = repository.list_matters(tenant_id, limit=limit, offset=offset)
     matters = [_summary_row(row) for row in rows]
-    return {"count": len(matters), "matters": matters}
+    return {
+        "count": len(matters),
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "has_more": offset + len(matters) < total,
+        "matters": matters,
+    }
 
 
 @router.get("/{matter_ref}", dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])

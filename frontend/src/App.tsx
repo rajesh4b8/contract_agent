@@ -21,6 +21,7 @@ function App() {
             key={route.matterRef}
             matterRef={route.matterRef!}
             onBack={() => navigate('matters')}
+            onOpenMatter={(ref) => navigate('matter', ref)}
           />
         );
       case 'chat':

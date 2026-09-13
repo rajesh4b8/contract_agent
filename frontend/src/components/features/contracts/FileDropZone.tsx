@@ -47,10 +47,16 @@ export const FileDropZone: React.FC<FileDropZoneProps> = ({
 
   return (
     <div className="space-y-2">
-      <div
-        className={`border-2 border-dashed rounded-lg p-8 text-center transition-colors ${
+      {/* A button, not a div. The real file input is `display: none`, so
+          without button semantics and a key handler the only way to open the
+          picker is a mouse — keyboard users could not upload at all. */}
+      <button
+        type="button"
+        disabled={busy}
+        aria-label="Choose a PDF contract, or drop one here"
+        className={`w-full border-2 border-dashed rounded-lg p-8 text-center transition-colors focus:outline-none focus:ring-2 focus:ring-blue-400 ${
           dragActive ? 'border-blue-500 bg-blue-50' : 'border-slate-300 hover:border-slate-400'
-        } ${busy ? 'pointer-events-none opacity-60' : 'cursor-pointer'}`}
+        } ${busy ? 'opacity-60' : 'cursor-pointer'}`}
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}
         onDragOver={handleDrag}
@@ -73,7 +79,7 @@ export const FileDropZone: React.FC<FileDropZoneProps> = ({
             <p className="text-xs text-slate-500">{hint}</p>
           </div>
         )}
-      </div>
+      </button>
 
       <input
         id={inputId}
@@ -88,7 +94,11 @@ export const FileDropZone: React.FC<FileDropZoneProps> = ({
         }}
       />
 
-      {problem && <p className="text-sm text-red-600">{problem}</p>}
+      {problem && (
+        <p className="text-sm text-red-600" role="alert">
+          {problem}
+        </p>
+      )}
     </div>
   );
 };

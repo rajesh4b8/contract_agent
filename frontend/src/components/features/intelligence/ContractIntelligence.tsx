@@ -61,6 +61,7 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
   const [warnings, setWarnings] = useState<string[]>([]);
   const [networkError, setNetworkError] = useState(false);
   const [restoring, setRestoring] = useState(true);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
   const [storedStatus, setStoredStatus] = useState<AnalysisStatus>('NOT_STARTED');
   const { openModal, closeModal, isOpen } = useModal();
 
@@ -74,8 +75,11 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
    */
   const loadStored = useCallback(async () => {
     setRestoring(true);
+    setRestoreError(null);
     try {
       const stored = await getStoredAnalysis(contractId);
+      // A 404 arrives as null — an unanalysed contract is the normal case and
+      // not worth a message. The Analyse button is right there.
       if (!stored) return;
       setStoredStatus(stored.analysis_status);
       setWarnings(Array.isArray(stored.warnings) ? stored.warnings : []);
@@ -86,9 +90,15 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       if (hasFindings || stored.analysis_status === 'COMPLETE') {
         setResults(stored.results as unknown as IntelligenceResults);
       }
-    } catch {
-      // A missing stored review is not an error worth showing: the Analyse
-      // button is right there, and an unanalysed contract is the normal case.
+    } catch (e) {
+      // Anything reaching here is a real network or server failure, and
+      // swallowing it is worse than it looks: the page renders as though the
+      // contract had never been analysed, so the reviewer's obvious next move
+      // is to spend two minutes and a model call re-deriving a review that is
+      // already on the graph.
+      setRestoreError(
+        e instanceof Error ? e.message : 'Could not load the stored review',
+      );
     } finally {
       setRestoring(false);
     }
@@ -115,7 +125,7 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
           const workflowData = await workflowResponse.json();
           onWorkflowUpdate?.(workflowData);
         }
-      } catch (e) {
+      } catch {
         // Ignore workflow polling errors
       }
     }, 500);
@@ -166,7 +176,7 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
             const workflowData = await workflowResponse.json();
             onWorkflowUpdate?.(workflowData);
           }
-        } catch (e) {
+        } catch {
           // Ignore final workflow polling error
         }
       }, 1000);
@@ -274,9 +284,30 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
         </Card>
       )}
 
+      {/* The stored review could not be fetched. Distinct from "not analysed":
+          re-analysing is the expensive wrong answer to a network blip. */}
+      {restoreError && !results && (
+        <Card className="border-yellow-200 bg-yellow-50">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 text-yellow-800">
+              <AlertTriangle className="h-4 w-4" />
+              <span className="font-medium">Could not load the saved review</span>
+            </div>
+            <p className="text-sm text-yellow-700 mt-1">{restoreError}</p>
+            <p className="text-xs text-yellow-700 mt-1">
+              This version may already have findings. Retry before re-analysing.
+            </p>
+            <Button variant="outline" size="sm" className="mt-3" onClick={() => void loadStored()}>
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Retry
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
       {/* An analysis that never ran is said out loud. Rendering it as an empty
           result set would read as a contract with nothing wrong with it. */}
-      {!restoring && !results && storedStatus === 'FAILED' && (
+      {!restoring && !restoreError && !results && storedStatus === 'FAILED' && (
         <Card className="border-yellow-200 bg-yellow-50">
           <CardContent className="pt-6">
             <div className="flex items-center gap-2 text-yellow-700">

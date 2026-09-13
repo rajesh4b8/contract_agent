@@ -22,6 +22,7 @@ from backend.domain.matter import (
 )
 from backend.infrastructure.chunking.storage_service import ChunkStorageService
 from backend.infrastructure.matter_repository import (
+    DuplicateSource,
     MatterClosed,
     MatterNotFound,
     MatterRepository,
@@ -105,6 +106,27 @@ async def debug_contract_types(tenant_id: str = Depends(get_current_tenant)):
     except Exception as e:
         logger.error(f"Debug contract types failed: {e}")
         return {"error": str(e)}
+
+def _duplicate_response(filename: str, model: str, twin: dict) -> dict:
+    """The answer when these exact bytes are already a version.
+
+    Built in two places: the pre-flight lookup, which saves two minutes of
+    pointless extraction, and the uniqueness constraint, which is what actually
+    decides it when two uploads race.
+    """
+    return {
+        "message": "Duplicate file detected",
+        "filename": filename,
+        "status": "duplicate",
+        "contract_id": twin.get("version_id"),
+        "existing_contract_id": twin.get("version_id"),
+        "matter_ref": twin.get("matter_ref"),
+        "version": twin.get("n"),
+        "details": f"Exactly matches version {twin.get('n')} of {twin['matter_ref']}",
+        "model_used": model,
+        "action": "skipped",
+    }
+
 
 async def _filing_proposal(repo, contract_id: str, tenant_id: str,
                            filename: str = "") -> dict:
@@ -328,19 +350,7 @@ async def upload_pdf(
                     note("upload", "duplicate_skipped", filename=file.filename,
                          matter_ref=twin["matter_ref"])
                     os.path.exists(temp_path) and os.remove(temp_path)
-                    return {
-                        "message": "Duplicate file detected",
-                        "filename": file.filename,
-                        "status": "duplicate",
-                        "contract_id": twin["version_id"],
-                        "existing_contract_id": twin["version_id"],
-                        "matter_ref": twin["matter_ref"],
-                        "version": twin.get("n"),
-                        "details": f"Exactly matches version {twin.get('n')} "
-                                   f"of {twin['matter_ref']}",
-                        "model_used": model,
-                        "action": "skipped",
-                    }
+                    return _duplicate_response(file.filename, model, twin)
 
                 if twin and not twin.get("matter_ref"):
                     # The same bytes were uploaded but never filed — a cancelled
@@ -597,34 +607,92 @@ async def upload_pdf(
                         tenant_id, contract_id,
                         source_sha256=digest, filename=file.filename,
                     )
-                    if matter_ref:
+                except DuplicateSource as clash:
+                    # The uniqueness constraint, not the pre-flight lookup, is
+                    # what decides this under concurrency: two uploads of the
+                    # same PDF can both pass the check at the start and only
+                    # meet here, two minutes later. The one that lost reports
+                    # the matter that holds the bytes.
+                    twin = clash.existing or {}
+                    note("upload", "duplicate_rejected", filename=file.filename,
+                         contract_id=contract_id,
+                         matter_ref=twin.get("matter_ref"))
+                    # This upload's Contract node never became a version, so
+                    # nothing can reach it. Marked, not deleted, so the migration
+                    # does not later file it as a matter of its own.
+                    if twin.get("version_id"):
+                        matters.mark_superseded(tenant_id, contract_id, twin["version_id"])
+                    if twin.get("matter_ref"):
+                        return _duplicate_response(file.filename, model, twin)
+                    # The winner is itself still unfiled — send the reviewer to
+                    # its confirmation card rather than to a second one.
+                    return {
+                        **response,
+                        "contract_id": twin.get("version_id") or contract_id,
+                        "needs_filing": True,
+                        "proposal": await _filing_proposal(
+                            repo, twin.get("version_id") or contract_id, tenant_id,
+                            file.filename,
+                        ),
+                        "details": "This document was already uploaded and is waiting "
+                                   "to be filed.",
+                    }
+                except Exception as record_error:
+                    # The contract is stored but is not a version, so it can be
+                    # neither filed nor confirmed. Saying "success" here would
+                    # hand the UI a card whose confirmation can only 404.
+                    logger.error(f"Could not record {contract_id} as a version: "
+                                 f"{record_error}")
+                    note("upload", "record_version_failed", contract_id=contract_id,
+                         error_type=type(record_error).__name__, error=str(record_error))
+                    return {
+                        **response,
+                        "status": "error",
+                        "needs_filing": False,
+                        "details": f"The document was extracted but could not be stored "
+                                   f"as a version, so it cannot be filed: {record_error}",
+                    }
+
+                if matter_ref:
+                    try:
                         filed = matters.attach_version(tenant_id, matter_ref, contract_id)
-                        response["matter_ref"] = filed["matter_ref"]
-                        response["version"] = filed["n"]
-                        note("upload", "filed", contract_id=contract_id,
-                             matter_ref=filed["matter_ref"], version=filed["n"])
-                    else:
-                        # Unfiled on purpose. The caller confirms the pre-filled
-                        # card, and only then is a reference number allocated.
-                        response["needs_filing"] = True
-                        response["proposal"] = await _filing_proposal(
-                            repo, contract_id, tenant_id, file.filename
+                    except MatterClosed:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"{matter_ref} is closed. Reopen it before uploading "
+                                   f"a new round.",
                         )
-                except MatterClosed:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"{matter_ref} is closed. Reopen it before uploading a new round.",
-                    )
-                except MatterNotFound:
-                    raise HTTPException(status_code=404, detail=f"No matter {matter_ref}")
-                except Exception as filing_error:
-                    # The document is stored either way. Say so rather than
-                    # reporting the whole upload as a failure.
-                    logger.error(f"Could not file {contract_id}: {filing_error}")
+                    except MatterNotFound:
+                        raise HTTPException(status_code=404, detail=f"No matter {matter_ref}")
+                    except Exception as filing_error:
+                        # The version exists; only the link to the matter is
+                        # missing. That is recoverable, and must not be reported
+                        # as a filed round — the page would close the uploader
+                        # and show a version that is not there.
+                        logger.error(f"Could not file {contract_id} under {matter_ref}: "
+                                     f"{filing_error}")
+                        note("upload", "filing_failed", contract_id=contract_id,
+                             matter_ref=matter_ref, error=str(filing_error))
+                        return {
+                            **response,
+                            "status": "error",
+                            "needs_filing": False,
+                            "details": f"The document was stored but could not be added to "
+                                       f"{matter_ref}: {filing_error}. Try uploading it again.",
+                        }
+
+                    response["matter_ref"] = filed["matter_ref"]
+                    response["version"] = filed["n"]
+                    note("upload", "filed", contract_id=contract_id,
+                         matter_ref=filed["matter_ref"], version=filed["n"])
+                else:
+                    # Unfiled on purpose. The caller confirms the pre-filled
+                    # card, and only then is a reference number allocated.
+                    # `needs_filing` is set only now, because the version it
+                    # refers to is only now known to exist.
                     response["needs_filing"] = True
-                    response["details"] = (
-                        f"{response['details']} (the document was stored but could not be "
-                        f"filed: {filing_error})"
+                    response["proposal"] = await _filing_proposal(
+                        repo, contract_id, tenant_id, file.filename
                     )
 
             note("upload", "completed", contract_id=contract_id, status=result["status"],

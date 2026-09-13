@@ -109,10 +109,33 @@ async function readJson<T>(response: Response, fallback: string): Promise<T> {
   return (await response.json()) as T;
 }
 
-export async function listMatters(): Promise<MatterSummary[]> {
-  const response = await apiFetch('/api/matters');
-  const body = await readJson<{ matters: MatterSummary[] }>(response, 'Could not load matters');
-  return body.matters ?? [];
+export interface MatterPage {
+  matters: MatterSummary[];
+  total: number;
+  hasMore: boolean;
+}
+
+/**
+ * One page of matters.
+ *
+ * The list is paged, and the page says so: a landing page that silently returns
+ * the first hundred makes everything older unreachable, which for a system
+ * whose whole claim is that the review is durable is the worst failure it could
+ * have — the work is there and there is no way back to it.
+ */
+export async function listMatters(offset = 0, limit = 100): Promise<MatterPage> {
+  const response = await apiFetch(`/api/matters?offset=${offset}&limit=${limit}`);
+  const body = await readJson<{
+    matters: MatterSummary[];
+    total?: number;
+    has_more?: boolean;
+  }>(response, 'Could not load matters');
+  const matters = body.matters ?? [];
+  return {
+    matters,
+    total: body.total ?? matters.length,
+    hasMore: body.has_more ?? false,
+  };
 }
 
 export async function getMatter(matterRef: string): Promise<MatterDetail> {

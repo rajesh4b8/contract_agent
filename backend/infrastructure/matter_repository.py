@@ -37,6 +37,18 @@ from backend.shared.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _is_constraint_violation(error: Exception) -> bool:
+    """Whether a driver error is a uniqueness-constraint rejection.
+
+    Matched on the message because the Neo4j driver raises
+    `ClientError` for a whole family of problems and importing its
+    exception hierarchy here would drag the driver into modules that
+    currently need nothing but a `query()` callable — including the tests.
+    """
+    text = f"{type(error).__name__}: {error}".lower()
+    return "constraint" in text and ("already exists" in text or "equivalent" in text)
+
+
 class MatterNotFound(LookupError):
     """No such matter for this tenant.
 
@@ -54,42 +66,150 @@ class AlreadyFiled(RuntimeError):
     """This version is already part of a matter."""
 
 
+#: The constraints that make the concurrency guarantees real rather than
+#: hopeful. `MERGE` alone does not make a node singleton: two transactions can
+#: both find nothing and both create, which for `(:Counter)` means two counters
+#: that each return 1 and two matters that claim the same reference. Only a
+#: uniqueness constraint serialises that.
+#:
+#: `source_key` is `tenant_id|source_sha256`, set **only on versions uploaded
+#: after this increment**. Neo4j uniqueness constraints ignore nodes where the
+#: property is null, so contracts migrated from before matters existed are
+#: exempt — which they have to be, because re-uploading the same PDF is exactly
+#: the bug this increment fixes and the history is full of it.
+CONSTRAINTS = (
+    ("matter_counter_unique",
+     "FOR (c:Counter) REQUIRE (c.tenant_id, c.year, c.kind) IS UNIQUE"),
+    ("matter_ref_unique",
+     "FOR (m:Matter) REQUIRE (m.tenant_id, m.matter_ref) IS UNIQUE"),
+    ("contract_source_key_unique",
+     "FOR (v:ContractVersion) REQUIRE v.source_key IS UNIQUE"),
+)
+
+
+def source_key(tenant_id: str, digest: str) -> str:
+    """The value the uniqueness constraint above is enforced on."""
+    return f"{tenant_id}|{digest}"
+
+
+class DuplicateSource(RuntimeError):
+    """These exact bytes already exist as a version for this tenant.
+
+    Raised by the write rather than discovered by a lookup, so it is a real
+    answer under concurrency instead of a hopeful one.
+    """
+
+    def __init__(self, message: str = "", existing: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.existing = existing
+
+
 class MatterRepository:
     """Graph access for matters. The graph is injectable so tests need no server."""
 
     def __init__(self, graph: Any = None):
         self.graph = default_graph if graph is None else graph
 
+    def ensure_constraints(self) -> List[str]:
+        """Create the uniqueness constraints, idempotently.
+
+        Called at startup and by the migration script. Failures are reported
+        rather than raised: an existing database may hold rows that violate a
+        constraint, and refusing to start is a worse outcome than running
+        without it and saying so.
+        """
+        created: List[str] = []
+        for name, body in CONSTRAINTS:
+            try:
+                self.graph.query(f"CREATE CONSTRAINT {name} IF NOT EXISTS {body}")
+                created.append(name)
+            except Exception as e:
+                logger.warning(f"Could not create constraint {name}: {e}")
+        return created
+
     # -- versions ---------------------------------------------------------
 
     def record_version(self, tenant_id: str, version_id: str, *,
-                       source_sha256: str, filename: str = "") -> Optional[Dict[str, Any]]:
+                       source_sha256: str, filename: str = "",
+                       claim_source: bool = True) -> Optional[Dict[str, Any]]:
         """Mark a freshly stored contract as a version, before it is filed.
 
         A version exists from the moment extraction succeeds, whether or not the
         user has confirmed which matter it belongs to. That is what makes the
         confirmation card cancellable without leaving a reference number burned.
+
+        `claim_source` writes `source_key`, which carries a uniqueness
+        constraint. This is where the duplicate guarantee is actually enforced:
+        the pre-flight hash lookup at the start of an upload is a fast path that
+        saves two minutes of work, but between it and this write lies the whole
+        extraction, so two uploads of the same PDF can both pass it. The
+        constraint cannot be raced, and a violation here is reported as
+        `DuplicateSource` naming the version that won.
+
+        `claim_source=False` for the migration, where the same document legitimately
+        appears many times — re-uploading a revised contract *was* the bug, so the
+        history is full of it, and those versions stay exempt from the constraint.
         """
-        rows = self.graph.query(
-            """
-            MATCH (c:Contract {file_id: $version_id, tenant_id: $tenant_id})
-            SET c:ContractVersion,
-                c.version_id = $version_id,
-                c.source_sha256 = $source_sha256,
-                c.source_filename = $filename,
-                c.uploaded_at = coalesce(c.uploaded_at, c.upload_date, datetime()),
-                c.analysis_status = coalesce(c.analysis_status, $not_started)
-            RETURN c.version_id AS version_id
-            """,
-            {
-                "version_id": version_id,
-                "tenant_id": tenant_id,
-                "source_sha256": source_sha256,
-                "filename": filename,
-                "not_started": AnalysisStatus.NOT_STARTED.value,
-            },
-        )
+        try:
+            rows = self.graph.query(
+                """
+                MATCH (c:Contract {file_id: $version_id, tenant_id: $tenant_id})
+                SET c:ContractVersion,
+                    c.version_id = $version_id,
+                    c.source_sha256 = $source_sha256,
+                    c.source_filename = $filename,
+                    c.uploaded_at = coalesce(c.uploaded_at, c.upload_date, datetime()),
+                    c.analysis_status = coalesce(c.analysis_status, $not_started)
+                """
+                + ("""
+                SET c.source_key = $source_key
+                """ if claim_source else "")
+                + """
+                RETURN c.version_id AS version_id
+                """,
+                {
+                    "version_id": version_id,
+                    "tenant_id": tenant_id,
+                    "source_sha256": source_sha256,
+                    "source_key": source_key(tenant_id, source_sha256),
+                    "filename": filename,
+                    "not_started": AnalysisStatus.NOT_STARTED.value,
+                },
+            )
+        except Exception as e:
+            if not _is_constraint_violation(e):
+                raise
+            # Another upload of the same bytes got there first. Report the one
+            # that won, so the caller can send the reviewer to its matter.
+            existing = self.version_by_source_hash(tenant_id, source_sha256)
+            raise DuplicateSource(
+                f"{version_id} duplicates an existing version for {tenant_id}",
+                existing=existing,
+            ) from e
         return rows[0] if rows else None
+
+    def mark_superseded(self, tenant_id: str, version_id: str, winner_id: str) -> None:
+        """Record that this contract lost a race to identical bytes.
+
+        The loser of a duplicate race is a `(:Contract)` that never became a
+        version: it holds no findings and no decisions, and nobody can reach it.
+        Left as it is, the migration would later pick it up as an unlabelled
+        legacy contract and give it a matter of its own — resurrecting the exact
+        duplicate the constraint just prevented.
+
+        Marked rather than deleted. Deleting is irreversible and this node is
+        evidence that two uploads raced; the migration skips it instead.
+        """
+        try:
+            self.graph.query(
+                """
+                MATCH (c:Contract {file_id: $version_id, tenant_id: $tenant_id})
+                SET c.superseded_by = $winner_id, c.superseded_at = datetime()
+                """,
+                {"version_id": version_id, "tenant_id": tenant_id, "winner_id": winner_id},
+            )
+        except Exception as e:
+            logger.warning(f"Could not mark {version_id} superseded: {e}")
 
     def version_by_source_hash(self, tenant_id: str, digest: str) -> Optional[Dict[str, Any]]:
         """The one automatic case: these exact bytes have been seen before.
@@ -319,7 +439,16 @@ class MatterRepository:
         )
         return rows[0] if rows else None
 
-    def list_matters(self, tenant_id: str, limit: int = 200) -> List[Dict[str, Any]]:
+    def count_matters(self, tenant_id: str) -> int:
+        """How many matters this tenant has, so a truncated list can say so."""
+        rows = self.graph.query(
+            "MATCH (m:Matter {tenant_id: $tenant_id}) RETURN count(m) AS total",
+            {"tenant_id": tenant_id},
+        )
+        return int(rows[0]["total"]) if rows else 0
+
+    def list_matters(self, tenant_id: str, limit: int = 200,
+                     offset: int = 0) -> List[Dict[str, Any]]:
         """Every matter for this tenant, newest activity first.
 
         Carries the latest version's headline numbers and its pending-redline
@@ -357,12 +486,14 @@ class MatterRepository:
                    redline_total,
                    redline_pending
             ORDER BY m.updated_at DESC, m.matter_ref DESC
+            SKIP $offset
             LIMIT $limit
             """,
             {
                 "tenant_id": tenant_id,
                 "not_started": AnalysisStatus.NOT_STARTED.value,
                 "limit": limit,
+                "offset": max(0, offset),
             },
         )
 
@@ -436,22 +567,41 @@ class MatterRepository:
 
     def migrate_legacy_contracts(self, tenant_id: Optional[str] = None,
                                  dry_run: bool = False) -> Dict[str, Any]:
-        """Give every pre-existing contract a single-version matter.
+        """Give every contract that predates matters a matter to live in.
 
         Purely additive: it labels contracts and creates matters around them. It
-        never writes to a ``(:Redline)``, so the decisions recorded in
-        Increment 4 come through untouched — they hang off the same node, which
-        has simply gained a label and a parent.
+        never writes to a `(:Redline)`, so the decisions recorded in Increment 4
+        come through untouched — they hang off the same node, which has simply
+        gained a label and a parent.
 
-        Idempotent, so it is safe to re-run after a partial failure; contracts
-        that already belong to a matter are skipped. References are allocated in
-        upload order, so the oldest contract gets the lowest number.
+        **Repeat uploads of one document become rounds of one matter, not many
+        matters.** The duplicate check never fired before this increment, so
+        re-uploading a contract silently created a second unrelated `Contract` —
+        and the history shows it: on the development database, 52 contracts are
+        8 distinct documents, one of them uploaded 18 times. Filing those as 18
+        matters would put the old bug on the landing page and bury the eight
+        real contracts. They are grouped by source hash instead, oldest first,
+        and nothing is discarded: every copy keeps its own redline decisions
+        under its own version number.
+
+        **Versions uploaded since this increment are left alone.** They already
+        carry the `:ContractVersion` label, and one sitting unfiled is a
+        confirmation card the reviewer has not answered yet — auto-filing it
+        would burn a reference number for a decision they never made. A
+        migration interrupted part-way is still picked up, because it marks its
+        own work with `pending_migration` until the matter exists.
+
+        Idempotent, so it is safe to re-run.
         """
         rows = self.graph.query(
             """
             MATCH (c:Contract)
             WHERE ($tenant_id IS NULL OR c.tenant_id = $tenant_id)
               AND NOT (:Matter)-[:HAS_VERSION]->(c)
+              AND (NOT c:ContractVersion OR c.pending_migration = true)
+              // The losing half of a duplicate race. Filing it would put back
+              // the duplicate the constraint refused.
+              AND c.superseded_by IS NULL
             RETURN c.file_id AS version_id,
                    c.tenant_id AS tenant_id,
                    c.contract_type AS contract_type,
@@ -464,45 +614,97 @@ class MatterRepository:
             {"tenant_id": tenant_id},
         )
 
-        planned: List[Dict[str, Any]] = []
+        # Group by (tenant, source hash): one matter per distinct document, in
+        # upload order, so the oldest copy becomes version 1 and the lowest
+        # reference number goes to the oldest contract.
+        groups: Dict[tuple, List[Dict[str, Any]]] = {}
         for row in rows:
             contract_tenant = row.get("tenant_id") or "default-tenant"
-            counterparty = counterparty_from_parties(row.get("parties"))
+            # The stored text is what the analysis has always read, so it is the
+            # right thing to hash: a re-upload of the same PDF then matches the
+            # migrated version rather than forking a second one.
+            digest = source_sha256(row.get("full_text") or row.get("summary") or "")
+            groups.setdefault((contract_tenant, digest), []).append(row)
+
+        planned: List[Dict[str, Any]] = []
+        for (contract_tenant, digest), members in groups.items():
+            first = members[0]
+            counterparty = counterparty_from_parties(first.get("parties"))
             planned.append({
-                "version_id": row["version_id"],
                 "tenant_id": contract_tenant,
-                "contract_type": row.get("contract_type") or "",
+                "source_sha256": digest,
+                "contract_type": first.get("contract_type") or "",
                 "counterparty": counterparty,
-                "title": suggest_title(row.get("contract_type"), counterparty,
-                                       row["version_id"]),
-                # The stored text is what the analysis has always read, so it is
-                # the right thing to hash: a re-upload of the same PDF then
-                # matches the migrated version rather than forking a second one.
-                "source_sha256": source_sha256(row.get("full_text") or row.get("summary") or ""),
+                "title": suggest_title(first.get("contract_type"), counterparty,
+                                       first["version_id"]),
+                "version_ids": [m["version_id"] for m in members],
             })
 
         if dry_run:
-            return {"migrated": 0, "planned": planned, "dry_run": True}
+            return {"migrated": 0, "versions": 0, "planned": planned, "dry_run": True}
 
         created: List[Dict[str, Any]] = []
         failed: List[Dict[str, Any]] = []
+        versions = 0
         for item in planned:
+            version_ids = item["version_ids"]
             try:
-                self.record_version(
-                    item["tenant_id"], item["version_id"],
-                    source_sha256=item["source_sha256"], filename=item["version_id"],
-                )
+                for version_id in version_ids:
+                    self._mark_pending_migration(item["tenant_id"], version_id)
+                    self.record_version(
+                        item["tenant_id"], version_id,
+                        source_sha256=item["source_sha256"], filename=version_id,
+                        # Repeat uploads of one document share a hash by
+                        # definition, so they cannot all claim the unique key.
+                        claim_source=False,
+                    )
+
                 result = self.create_matter(
-                    item["tenant_id"], item["version_id"],
+                    item["tenant_id"], version_ids[0],
                     title=item["title"],
                     counterparty=item["counterparty"],
                     contract_type=item["contract_type"],
                 )
-                created.append({**result, "version_id": item["version_id"]})
-            except Exception as e:
-                # One bad contract must not stop the rest from migrating.
-                logger.error(f"Could not migrate {item['version_id']}: {e}")
-                failed.append({"version_id": item["version_id"], "error": str(e)})
+                versions += 1
 
-        return {"migrated": len(created), "created": created,
+                # The remaining copies become later rounds of the same matter.
+                # Each keeps its own redline decisions under its own number.
+                for version_id in version_ids[1:]:
+                    self.attach_version(item["tenant_id"], result["matter_ref"], version_id)
+                    versions += 1
+
+                for version_id in version_ids:
+                    self._clear_pending_migration(item["tenant_id"], version_id)
+
+                created.append({**result, "versions": len(version_ids)})
+            except Exception as e:
+                # One bad document must not stop the rest from migrating.
+                logger.error(f"Could not migrate {version_ids[0]}: {e}")
+                failed.append({"version_id": version_ids[0], "error": str(e)})
+
+        return {"migrated": len(created), "versions": versions, "created": created,
                 "failed": failed, "dry_run": False}
+
+    def _mark_pending_migration(self, tenant_id: str, version_id: str) -> None:
+        """Claim a contract for the migration before labelling it.
+
+        Without this, a migration that dies between `record_version` and
+        `create_matter` would leave a labelled but unfiled version that the next
+        run skips — stranded, and invisible on the matters list.
+        """
+        self.graph.query(
+            """
+            MATCH (c:Contract {file_id: $version_id, tenant_id: $tenant_id})
+            SET c.pending_migration = true
+            """,
+            {"version_id": version_id, "tenant_id": tenant_id},
+        )
+
+    def _clear_pending_migration(self, tenant_id: str, version_id: str) -> None:
+        self.graph.query(
+            """
+            MATCH (c:Contract {file_id: $version_id, tenant_id: $tenant_id})
+            REMOVE c.pending_migration
+            """,
+            {"version_id": version_id, "tenant_id": tenant_id},
+        )

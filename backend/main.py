@@ -51,6 +51,19 @@ except Exception as e:
 async def lifespan(app: FastAPI):
     # Startup - Initialize once
     app.state.llm_manager = LLMManager()
+
+    # The uniqueness constraints the matter concurrency guarantees rest on.
+    # `MERGE` alone does not make a counter singleton, and a pre-flight hash
+    # lookup cannot stop two uploads that pass it at the same moment. Idempotent,
+    # and never fatal: a database that refuses one should still serve requests,
+    # loudly missing the guarantee rather than silently refusing to start.
+    try:
+        from backend.infrastructure.matter_repository import MatterRepository
+
+        MatterRepository().ensure_constraints()
+    except Exception as e:
+        logger.warning(f"Could not ensure matter constraints at startup: {e}")
+
     yield
     # Shutdown - cleanup if needed
 
