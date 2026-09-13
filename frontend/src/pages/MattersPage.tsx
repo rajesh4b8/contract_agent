@@ -17,6 +17,9 @@ import {
   type MatterSummary,
 } from '../services/mattersApi';
 
+/** Only runs while a row says "Analysing"; idle pages make no requests. */
+const LIST_POLL_MS = 10000;
+
 interface MattersPageProps {
   onOpenMatter: (matterRef: string) => void;
 }
@@ -95,6 +98,17 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Same reason as the matter page: an analysis runs on the server whether or
+  // not anyone is watching, so a row that says "Analysing" has to stop saying
+  // it by itself. Only while there is something to watch.
+  const analysing = matters.some((m) => m.analysis_status === 'RUNNING');
+
+  useEffect(() => {
+    if (!analysing) return;
+    const timer = setInterval(() => void refresh(), LIST_POLL_MS);
+    return () => clearInterval(timer);
+  }, [analysing, refresh]);
 
   const handleFile = useCallback(
     async (file: File) => {

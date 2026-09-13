@@ -282,6 +282,30 @@ class TestReadingTheReviewBack:
         assert stored["warnings"] == ["Gemini has no quota left on this key"]
         assert stored["results"]["clauses"] == []
 
+    def test_a_running_analysis_says_when_its_status_last_moved(self):
+        """So the page can tell "still working" from "the server restarted".
+
+        Without it, a version left RUNNING by a crash is polled for ever.
+        """
+        service = self._service_returning(
+            [{"contract_id": "C-1", "analysis_status": "RUNNING",
+              "analysis_updated_at": "2026-09-13T18:30:00Z"}])
+
+        stored = service.get_stored_analysis("C-1", "acme")
+
+        assert stored["analysis_status"] == "RUNNING"
+        assert stored["analysis_updated_at"] == "2026-09-13T18:30:00Z"
+
+    def test_a_running_analysis_returns_no_findings_and_no_warning(self):
+        """It has not failed. Saying so would be as wrong as saying it is clean."""
+        service = self._service_returning(
+            [{"contract_id": "C-1", "analysis_status": "RUNNING"}])
+
+        stored = service.get_stored_analysis("C-1", "acme")
+
+        assert stored["results"]["clauses"] == []
+        assert stored["warnings"] == []
+
     def test_a_contract_that_was_never_analysed_says_not_started(self):
         service = self._service_returning(
             [{"contract_id": "C-1", "analysis_status": "NOT_STARTED"}])

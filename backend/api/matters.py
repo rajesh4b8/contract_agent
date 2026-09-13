@@ -136,6 +136,7 @@ async def get_matter(matter_ref: str, tenant_id: str = Depends(get_current_tenan
                 # Never rendered as "no findings": the matter page shows this as
                 # a warning above the (empty) results.
                 "analysis_error": v.get("analysis_error") or "",
+                "analysis_updated_at": v.get("analysis_updated_at"),
                 "risk_score": v.get("risk_score"),
                 "risk_level": v.get("risk_level"),
                 "clauses_count": v.get("clauses_count"),

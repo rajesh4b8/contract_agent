@@ -424,6 +424,7 @@ class MatterRepository:
                        uploaded_at: toString(v.uploaded_at),
                        analysis_status: coalesce(v.analysis_status, $not_started),
                        analysis_error: v.analysis_error,
+                       analysis_updated_at: toString(v.analysis_updated_at),
                        risk_score: v.risk_score,
                        risk_level: v.risk_level,
                        clauses_count: v.clauses_count,

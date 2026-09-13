@@ -56,6 +56,7 @@ export interface MatterVersion {
   analysis_status: AnalysisStatus;
   /** Why the analysis failed. Shown as a warning — never as "no findings". */
   analysis_error: string;
+  analysis_updated_at?: string | null;
   risk_score: number | null;
   risk_level: string | null;
   clauses_count: number | null;
@@ -200,6 +201,8 @@ export async function uploadContract(
 
 export interface StoredAnalysis {
   analysis_status: AnalysisStatus;
+  /** When the status last moved — lets the page tell "working" from "stuck". */
+  analysis_updated_at?: string | null;
   warnings: string[];
   /** Exactly the `results` object `POST /analyze` returns, so the page renders
    *  the same whether it analysed or reopened. Typed loosely on purpose: the

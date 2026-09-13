@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../../shared/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '../../shared/ui/card';
 import { Badge } from '../../shared/ui/badge';
@@ -42,6 +42,10 @@ interface IntelligenceResults {
   redlines: any[];
 }
 
+/** Every 4s for 10 minutes. An analysis is 30-130s; ten minutes is generous. */
+const POLL_INTERVAL_MS = 4000;
+const POLL_ATTEMPTS = 150;
+
 interface ContractIntelligenceProps {
   contractId: string;
   model?: string;
@@ -62,6 +66,14 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
   const [networkError, setNetworkError] = useState(false);
   const [restoring, setRestoring] = useState(true);
   const [restoreError, setRestoreError] = useState<string | null>(null);
+  const [statusMovedAt, setStatusMovedAt] = useState<string | null>(null);
+  const [pollingGaveUp, setPollingGaveUp] = useState(false);
+  // Held in refs, not read as props inside callbacks: the parent's handler is
+  // usually an inline arrow, so depending on it would rebuild the loader — and
+  // the poll that uses it — on every render.
+  const notify = useRef(onAnalysisComplete);
+  notify.current = onAnalysisComplete;
+  const lastNotified = useRef<string | null>(null);
   const [storedStatus, setStoredStatus] = useState<AnalysisStatus>('NOT_STARTED');
   const { openModal, closeModal, isOpen } = useModal();
 
@@ -73,8 +85,11 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
    * minutes and a model call. Before this, `results` was React state seeded
    * only by pressing Analyse, so every refresh threw the review away.
    */
-  const loadStored = useCallback(async () => {
-    setRestoring(true);
+  const loadStored = useCallback(async ({ quiet = false } = {}) => {
+    // `quiet` for the background poll: an analysis that finishes while you are
+    // looking at the page should fill the findings in, not blank the page back
+    // to a spinner every few seconds.
+    if (!quiet) setRestoring(true);
     setRestoreError(null);
     try {
       const stored = await getStoredAnalysis(contractId);
@@ -82,6 +97,7 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       // not worth a message. The Analyse button is right there.
       if (!stored) return;
       setStoredStatus(stored.analysis_status);
+      setStatusMovedAt(stored.analysis_updated_at ?? null);
       setWarnings(Array.isArray(stored.warnings) ? stored.warnings : []);
       const hasFindings =
         (stored.results?.clauses?.length ?? 0) > 0 ||
@@ -89,6 +105,17 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
         (stored.results?.redlines?.length ?? 0) > 0;
       if (hasFindings || stored.analysis_status === 'COMPLETE') {
         setResults(stored.results as unknown as IntelligenceResults);
+        // Notify the page around this one — but only when the status actually
+        // *moves* to COMPLETE, never on every load. The callback typically
+        // triggers a refetch up there, which re-renders, which would hand this
+        // component a new callback identity and start the whole thing again.
+        if (stored.analysis_status === 'COMPLETE' && lastNotified.current !== 'COMPLETE') {
+          lastNotified.current = 'COMPLETE';
+          const risk = stored.results?.risk_assessment;
+          notify.current?.(
+            contractId, risk?.overall_risk_score, risk?.risk_level, stored.results,
+          );
+        }
       }
     } catch (e) {
       // Anything reaching here is a real network or server failure, and
@@ -108,8 +135,39 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
     setResults(null);
     setWarnings([]);
     setError(null);
+    setPollingGaveUp(false);
+    lastNotified.current = null;
     void loadStored();
   }, [loadStored]);
+
+  /**
+   * Watch an analysis that is running somewhere else.
+   *
+   * The analysis outlives the request that started it — it runs on a worker
+   * thread, so navigating away does not stop it. Coming back to the page found
+   * the version RUNNING and then sat there: the work finished on the server and
+   * nothing on the page ever asked again, so the reviewer had to know to press
+   * refresh. Now it asks until the answer changes.
+   *
+   * It gives up eventually. A server that restarted mid-analysis leaves the
+   * version RUNNING for ever, and polling a status that will never move is
+   * worse than saying so.
+   */
+  useEffect(() => {
+    if (storedStatus !== 'RUNNING' || pollingGaveUp) return;
+
+    let attempts = 0;
+    const timer = setInterval(() => {
+      attempts += 1;
+      if (attempts > POLL_ATTEMPTS) {
+        setPollingGaveUp(true);
+        return;
+      }
+      void loadStored({ quiet: true });
+    }, POLL_INTERVAL_MS);
+
+    return () => clearInterval(timer);
+  }, [storedStatus, pollingGaveUp, loadStored]);
 
   const analyzeContract = async () => {
     setLoading(true);
@@ -165,6 +223,8 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       
       // Report analysis completion with full results
       if (data.results?.risk_assessment) {
+        lastNotified.current = 'COMPLETE';
+        setStoredStatus('COMPLETE');
         onAnalysisComplete?.(contractId, data.results.risk_assessment.overall_risk_score, data.results.risk_assessment.risk_level, data.results);
       }
       
@@ -192,6 +252,18 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       setLoading(false);
     }
   };
+
+  /** "2 minutes ago" — vague on purpose; the exact second is not the point. */
+  const startedAgo = (() => {
+    if (!statusMovedAt) return '';
+    const started = new Date(statusMovedAt).getTime();
+    if (Number.isNaN(started)) return '';
+    const minutes = Math.floor((Date.now() - started) / 60000);
+    if (minutes < 1) return 'just now';
+    if (minutes === 1) return '1 minute ago';
+    if (minutes < 60) return `${minutes} minutes ago`;
+    return 'over an hour ago';
+  })();
 
   const getRiskColor = (level: string) => {
     switch (level.toUpperCase()) {
@@ -264,11 +336,15 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
         </div>
         <Button 
           onClick={analyzeContract} 
-          disabled={loading || restoring}
+          disabled={loading || restoring || storedStatus === 'RUNNING'}
           className="flex items-center gap-2"
         >
           <Brain className="h-4 w-4" />
-          {loading ? 'Analyzing...' : results ? 'Re-analyse' : 'Analyze'}
+          {loading || storedStatus === 'RUNNING'
+            ? 'Analyzing...'
+            : results
+              ? 'Re-analyse'
+              : 'Analyze'}
         </Button>
       </div>
 
@@ -300,6 +376,57 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
             <Button variant="outline" size="sm" className="mt-3" onClick={() => void loadStored()}>
               <RefreshCw className="h-4 w-4 mr-2" />
               Retry
+            </Button>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* An analysis started elsewhere — by this page before you navigated away,
+          or by a colleague. It runs on a worker thread and outlives the request
+          that started it, so the page watches for it to land rather than
+          leaving you to guess when to refresh. */}
+      {!restoring && storedStatus === 'RUNNING' && !pollingGaveUp && (
+        <Card className="border-blue-200 bg-blue-50">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 text-blue-700">
+              <Clock className="h-4 w-4 animate-spin" />
+              <span className="font-medium">
+                An analysis of this version is running
+              </span>
+            </div>
+            <p className="text-sm text-blue-700 mt-1">
+              The findings will appear here as soon as it finishes — you do not need to
+              refresh{startedAgo ? `. Started ${startedAgo}` : ''}.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Polling stopped. A server restarted mid-analysis leaves the version
+          RUNNING for ever, and waiting on a status that will never move is
+          worse than saying so. */}
+      {storedStatus === 'RUNNING' && pollingGaveUp && (
+        <Card className="border-yellow-200 bg-yellow-50">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2 text-yellow-800">
+              <AlertTriangle className="h-4 w-4" />
+              <span className="font-medium">This analysis has not finished</span>
+            </div>
+            <p className="text-sm text-yellow-700 mt-1">
+              It has been marked running {startedAgo ? `since ${startedAgo}` : 'for a while'} and
+              may have stopped. Check again, or run it once more.
+            </p>
+            <Button
+              variant="outline"
+              size="sm"
+              className="mt-3"
+              onClick={() => {
+                setPollingGaveUp(false);
+                void loadStored({ quiet: true });
+              }}
+            >
+              <RefreshCw className="h-4 w-4 mr-2" />
+              Check again
             </Button>
           </CardContent>
         </Card>

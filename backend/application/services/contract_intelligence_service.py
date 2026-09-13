@@ -460,6 +460,7 @@ class ContractIntelligenceService:
             RETURN c.file_id AS contract_id,
                    coalesce(c.analysis_status, 'NOT_STARTED') AS analysis_status,
                    c.analysis_error AS analysis_error,
+                   toString(c.analysis_updated_at) AS analysis_updated_at,
                    c.intelligence_status AS intelligence_status,
                    toString(c.intelligence_updated) AS analysed_at,
                    c.processing_time AS processing_time,
@@ -520,6 +521,10 @@ class ContractIntelligenceService:
         return {
             "contract_id": contract_id,
             "analysis_status": row.get("analysis_status") or "NOT_STARTED",
+            # When the status last moved. A version left RUNNING by a server
+            # that restarted mid-analysis would otherwise poll for ever; the
+            # page uses this to say it looks stuck rather than "still working".
+            "analysis_updated_at": row.get("analysis_updated_at"),
             "analysed_at": row.get("analysed_at"),
             "processing_time": row.get("processing_time"),
             "contract_type": row.get("contract_type"),

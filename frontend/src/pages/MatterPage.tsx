@@ -20,6 +20,9 @@ import {
   type MatterVersion,
 } from '../services/mattersApi';
 
+/** Slower than the findings poll: this is only the summary beside each round. */
+const ROUNDS_POLL_MS = 8000;
+
 interface MatterPageProps {
   matterRef: string;
   onBack: () => void;
@@ -73,6 +76,22 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack, onOpe
     void refresh();
   }, [refresh]);
 
+  /**
+   * Keep the rounds list honest while something is analysing.
+   *
+   * An analysis outlives the request that started it, so a version can be
+   * RUNNING because of a page you left, or a colleague. Without this the list
+   * keeps saying "Analysing" long after it finished, and the risk level and
+   * redline counts beside it stay blank until someone reloads.
+   */
+  const analysing = matter?.versions.some((v) => v.analysis_status === 'RUNNING') ?? false;
+
+  useEffect(() => {
+    if (!analysing) return;
+    const timer = setInterval(() => void refresh(), ROUNDS_POLL_MS);
+    return () => clearInterval(timer);
+  }, [analysing, refresh]);
+
   const version: MatterVersion | undefined = matter?.versions.find((v) => v.n === selected);
 
   const handleNewRound = useCallback(
@@ -112,6 +131,11 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack, onOpe
     },
     [model, matterRef, refresh, onOpenMatter],
   );
+
+  // Stable identity: passed to a child that holds it across renders.
+  const handleAnalysisComplete = useCallback(() => {
+    void refresh();
+  }, [refresh]);
 
   const moveTo = useCallback(
     async (status: Parameters<typeof changeMatterStatus>[1]) => {
@@ -302,7 +326,7 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack, onOpe
               key={version.version_id}
               contractId={version.version_id}
               model={model}
-              onAnalysisComplete={() => void refresh()}
+              onAnalysisComplete={handleAnalysisComplete}
             />
           </div>
         </Card>

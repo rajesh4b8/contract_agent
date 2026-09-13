@@ -90,6 +90,56 @@ class TestTheUploadSendsWhatTheEndpointReads:
         assert not (FRONTEND / "components/features/contracts/DocumentUpload.tsx").exists()
 
 
+class TestAnAnalysisThatFinishesElsewhereShowsUp:
+    """The analysis outlives the request that started it.
+
+    It runs on a worker thread, so navigating away does not stop it — but the
+    page that comes back found the version RUNNING and then sat there, because
+    nothing ever asked again. Reported from manual testing: "after the analysis
+    is complete, the page didn't load the findings without hitting refresh."
+    """
+
+    def test_the_review_panel_polls_while_a_version_is_running(self):
+        panel = source("components/features/intelligence/ContractIntelligence.tsx")
+
+        assert "storedStatus !== 'RUNNING'" in panel, "no poll guarded on RUNNING"
+        assert "setInterval" in panel
+
+    def test_the_poll_is_quiet(self):
+        """Blanking the page back to a spinner every few seconds is not an update."""
+        panel = source("components/features/intelligence/ContractIntelligence.tsx")
+
+        assert "quiet: true" in panel
+        assert "if (!quiet) setRestoring(true);" in panel
+
+    def test_it_stops_rather_than_polling_a_status_that_will_never_move(self):
+        """A server restarted mid-analysis leaves the version RUNNING for ever."""
+        panel = source("components/features/intelligence/ContractIntelligence.tsx")
+
+        assert "POLL_ATTEMPTS" in panel
+        assert "pollingGaveUp" in panel
+
+    @pytest.mark.parametrize("relative", [
+        "pages/MatterPage.tsx",
+        "pages/MattersPage.tsx",
+    ])
+    def test_the_lists_stop_saying_analysing_by_themselves(self, relative):
+        page = source(relative)
+
+        assert "'RUNNING'" in page
+        assert "setInterval" in page, f"{relative} never refreshes a running analysis"
+
+    @pytest.mark.parametrize("relative", [
+        "pages/MatterPage.tsx",
+        "pages/MattersPage.tsx",
+    ])
+    def test_an_idle_page_makes_no_requests(self, relative):
+        """The poll exists only while there is something to watch."""
+        page = source(relative)
+
+        assert "if (!analysing) return;" in page
+
+
 class TestAFailedAnalysisIsNeverShownAsNoFindings:
     @pytest.mark.parametrize("relative", [
         "pages/MatterPage.tsx",
