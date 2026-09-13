@@ -1363,6 +1363,20 @@ and the duplicate helper written here was removed.
 Tests: **526 → 544**, plus 21 checks against a live Neo4j covering the concurrency and atomicity
 claims with real threads and a deliberately failed write.
 
+### From your manual testing
+
+- **"The word Matters is confusing, can we replace it with Contracts?"** Left as *matter* for now —
+  see the [Decisions log](#decisions-log) for why, and the list page now says what the word means
+  instead of assuming it.
+- **"After the analysis is complete, the page didn't load the findings without hitting refresh."**
+  Fixed. The analysis runs on a worker thread and outlives the request that started it, which is why
+  leaving the page does not stop it — but the page that came back found the version `RUNNING` and
+  then never asked again. The review panel now polls quietly while a version is running, and the
+  matter page and the matters list do the same for the summary beside each round, so a row stops
+  saying "Analysing" by itself. All three poll only while there is something to watch; an idle page
+  makes no requests. It gives up after ten minutes rather than waiting for ever on a version left
+  `RUNNING` by a server that restarted, and says so.
+
 ### One thing this increment could not finish
 
 `frontend/src/services/enhancedSearchApi.ts:1` is fixed (bug #2), but **that was not the only thing
@@ -1701,6 +1715,7 @@ Settled — do not re-litigate without saying so explicitly.
 | **Work on `main`** | A parallel session is also committing here; small increments reduce collision risk. |
 | **Source of truth for the _review_, not the contract** | Settled 2026-09-13. The contract stays in the customer's Word/CLM; this system owns the review history. See [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for). |
 | **A version *is* the `Contract` node, relabelled** | Settled while building Increment 6. `(:Contract:ContractVersion)` with `version_id == file_id`, rather than a new node beside it. Every Increment 4 redline decision hangs off that node by `file_id`, and every URL carries the same id — a separate node would have meant migrating the decisions across, which is exactly the risk the increment exists to remove. |
+| **The word stays "matter"** | Raised during your testing on 2026-09-13: *"The word Matters is confusing, can we replace it with Contracts?"* They are genuinely different — a matter is the negotiation, `(:Contract)` is one uploaded round — but since we settled one-document-per-matter, "contract" would arguably be the better word. It is not renamed because `Contract` is already taken in the code for a single version, so a UI-only rename creates a permanent vocabulary gap and a full rename is a data migration over live contracts and redlines. **Decided: keep it, and say what it means on the page** rather than assume the reader knows. Revisit if it confuses anyone else. |
 | **Status is derived, not stored, wherever it can be** | `IN_REVIEW` / `REVIEWED` is `pending == 0` over the latest version's redlines. Storing it would be a second copy of a fact the redlines already hold, free to drift. Only `DRAFT`, `AWAITING_COUNTERPARTY` and `CLOSED` — the transitions a human makes — are written down. |
 
 ## Product shape — what this system is the source of truth for

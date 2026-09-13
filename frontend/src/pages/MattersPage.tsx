@@ -188,8 +188,12 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
     <div className="space-y-8">
       <div className="bg-white rounded-lg p-8 shadow-sm border border-slate-200">
         <h1 className="text-3xl font-bold text-slate-800 mb-2">Matters</h1>
+        {/* The word does not explain itself, and it was the first thing that
+            confused a reader. One matter is one contract and every round of it —
+            said here rather than assumed. */}
         <p className="text-slate-600">
-          Every contract under review, with each round and the decisions made on it.
+          A <strong>matter</strong> is one contract and every round of it — each version, the
+          findings, and the decisions you made on them.
         </p>
       </div>
 
