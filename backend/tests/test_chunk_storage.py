@@ -332,6 +332,7 @@ class TestTheAdvisoryMatch:
 
         weights = repository.graph.statements[1]
         assert "RETURN DISTINCT other" in weights
+        assert "WITH DISTINCT v, c" in weights
 
     def test_boilerplate_is_weighted_down(self):
         """A clause in fifty versions is not evidence of anything."""

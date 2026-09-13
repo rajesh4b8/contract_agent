@@ -332,6 +332,10 @@ class ChunkRepository:
             """
             MATCH (v:ContractVersion {tenant_id: $tenant_id})-[:INCLUDES]->(c:Chunk)
             WHERE v.version_id IN $ids
+            // A version can include the same chunk hash more than once (for
+            // repeated text). Backward coverage is over distinct shared text,
+            // so duplicate relationships must not inflate the denominator.
+            WITH DISTINCT v, c
             // The same definition as above, or forward and backward would be
             // measured on two different scales.
             WITH v, c, COUNT {
