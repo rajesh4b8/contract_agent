@@ -7,6 +7,8 @@ fire. None of them raised anything; they just did the wrong thing silently,
 which is why they are pinned here by inspecting what the endpoints actually
 declare rather than by hoping someone notices.
 """
+from unittest.mock import MagicMock
+
 import pytest
 from fastapi.routing import APIRoute
 
@@ -146,3 +148,49 @@ class TestTheDuplicateCheckCanNowFire:
         source = inspect.getsource(MatterRepository.version_by_source_hash)
         assert "source_sha256: $digest" in source
         assert "tenant_id: $tenant_id" in source
+
+
+class TestADuplicateKeepsTheRequestedDestination:
+    @pytest.mark.asyncio
+    async def test_an_upload_into_a_matter_files_the_existing_unfiled_version(self):
+        from backend.api.document_upload import _duplicate_upload_response
+
+        matters = MagicMock()
+        matters.attach_version.return_value = {"matter_ref": "MSA-2026-0042", "n": 2}
+
+        result = await _duplicate_upload_response(
+            filename="msa.pdf",
+            model="gemini-flash-lite",
+            twin={"version_id": "V-1"},
+            tenant_id="acme",
+            matter_ref="MSA-2026-0042",
+            matters=matters,
+            repo=object(),
+        )
+
+        matters.attach_version.assert_called_once_with("acme", "MSA-2026-0042", "V-1")
+        assert result["status"] == "success"
+        assert result["matter_ref"] == "MSA-2026-0042"
+        assert result["version"] == 2
+        assert "needs_filing" not in result
+
+    @pytest.mark.asyncio
+    async def test_a_duplicate_that_cannot_be_filed_is_reported_as_an_error(self):
+        from backend.api.document_upload import _duplicate_upload_response
+
+        matters = MagicMock()
+        matters.attach_version.side_effect = RuntimeError("neo4j is down")
+
+        result = await _duplicate_upload_response(
+            filename="msa.pdf",
+            model="gemini-flash-lite",
+            twin={"version_id": "V-1"},
+            tenant_id="acme",
+            matter_ref="MSA-2026-0042",
+            matters=matters,
+            repo=object(),
+        )
+
+        assert result["status"] == "error"
+        assert result["needs_filing"] is False
+        assert "could not be added to MSA-2026-0042" in result["details"]

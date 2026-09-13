@@ -22,6 +22,7 @@ from backend.domain.entities import (
     ContractClause,
     ContractIntelligence,
     PolicyViolation,
+    RedlineRecommendation,
     RiskAssessment,
 )
 from backend.domain.matter import AnalysisStatus
@@ -184,6 +185,28 @@ class TestAFailedAnalysisNeverErasesAGoodReview:
         service.repository.graph.query.side_effect = fail_on_findings
 
         assert service._store_intelligence_results("C-1", "acme", _intelligence()) is False
+
+    def test_a_redline_write_failure_is_not_reported_as_a_complete_review(self):
+        service = _service()
+
+        def fail_on_redlines(statement, *args, **kwargs):
+            if "MERGE (r:Redline" in statement:
+                raise RuntimeError("neo4j is down")
+            return []
+
+        service.repository.graph.query.side_effect = fail_on_redlines
+
+        assert service._store_intelligence_results("C-1", "acme", _intelligence(
+            redlines=[RedlineRecommendation(
+                original_text=EVIDENCE,
+                suggested_text="Customer shall pay each invoice within thirty (30) days.",
+                justification="Matches PAY-001.",
+                priority="HIGH",
+                rule_id="PAY-001",
+                clause_index=0,
+                clause_type="Payment",
+            )],
+        )) is False
 
     def test_a_run_that_genuinely_found_nothing_does_clear_the_last_one(self):
         """Otherwise a fixed contract keeps showing the violations it fixed."""

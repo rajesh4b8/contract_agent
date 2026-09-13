@@ -206,7 +206,7 @@ class ContractIntelligenceService:
     
 
     def _store_redlines(self, contract_id: str, tenant_id: str, redlines,
-                        replace: bool = True) -> None:
+                        replace: bool = True) -> bool:
         """Persist redlines as (:Contract)-[:HAS_REDLINE]->(:Redline).
 
         Only `redlines_count` used to be stored, so the drafted language existed
@@ -226,7 +226,7 @@ class ContractIntelligenceService:
                 f"Redline drafting failed for {contract_id}; keeping the previously "
                 f"stored redlines rather than replacing them"
             )
-            return
+            return True
 
         try:
             # A redline is identified by the breach it fixes, not by its
@@ -290,8 +290,11 @@ class ContractIntelligenceService:
 
             logger.info(f"Stored {len(redlines)} redlines for contract {contract_id}")
             note("analysis", "store_redlines", contract_id=contract_id, redlines=len(redlines))
+            return True
         except Exception as e:
-            # Non-fatal: the analysis itself succeeded and is already saved.
+            # Non-fatal to the request: the caller already has the analysis. But
+            # the stored snapshot is incomplete, so the version must not be
+            # marked COMPLETE.
             logger.error(f"Failed to store redlines for {contract_id}: {e}")
             note(
                 "analysis",
@@ -301,6 +304,7 @@ class ContractIntelligenceService:
                 error_type=type(e).__name__,
                 error=str(e),
             )
+            return False
 
     def _store_clause_findings(self, contract_id: str, tenant_id: str,
                                intelligence: ContractIntelligence) -> bool:
@@ -895,10 +899,11 @@ class ContractIntelligenceService:
                 # score and nothing to justify it, which must not read as COMPLETE.
                 return False
 
-            self._store_redlines(
+            if not self._store_redlines(
                 contract_id, tenant_id, intelligence.redlines,
                 replace=intelligence.redlines_generated,
-            )
+            ):
+                return False
             
             # Store performance metrics
             self._store_performance_metrics(contract_id, tenant_id, intelligence)

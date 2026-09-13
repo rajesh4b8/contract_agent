@@ -128,6 +128,87 @@ def _duplicate_response(filename: str, model: str, twin: dict) -> dict:
     }
 
 
+async def _duplicate_upload_response(
+    *,
+    filename: str,
+    model: str,
+    twin: dict,
+    tenant_id: str,
+    matter_ref: Optional[str],
+    matters: MatterRepository,
+    repo,
+) -> dict:
+    """Answer a duplicate upload without switching it onto the wrong path."""
+    version_id = twin.get("version_id")
+    if twin.get("matter_ref"):
+        return _duplicate_response(filename, model, twin)
+
+    if matter_ref and version_id:
+        try:
+            filed = matters.attach_version(tenant_id, matter_ref, version_id)
+        except MatterClosed:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{matter_ref} is closed. Reopen it before uploading a new round.",
+            )
+        except MatterNotFound:
+            raise HTTPException(status_code=404, detail=f"No matter {matter_ref}")
+        except Exception as filing_error:
+            logger.error(f"Could not file duplicate {version_id} under {matter_ref}: "
+                         f"{filing_error}")
+            note("upload", "duplicate_filing_failed", contract_id=version_id,
+                 matter_ref=matter_ref, error=str(filing_error))
+            return {
+                "message": "PDF processing completed",
+                "filename": filename,
+                "status": "error",
+                "contract_id": version_id,
+                "needs_filing": False,
+                "details": f"The document was already uploaded, but could not be added to "
+                           f"{matter_ref}: {filing_error}. Try uploading it again.",
+                "model_used": model,
+                "validation_passed": True,
+            }
+
+        return {
+            "message": "PDF processing completed",
+            "filename": filename,
+            "status": "success",
+            "contract_id": version_id,
+            "matter_ref": filed["matter_ref"],
+            "version": filed["n"],
+            "details": f"This document was already uploaded and has been filed as "
+                       f"version {filed['n']} of {filed['matter_ref']}.",
+            "model_used": model,
+            "validation_passed": True,
+        }
+
+    if not version_id:
+        return {
+            "message": "PDF processing completed",
+            "filename": filename,
+            "status": "error",
+            "contract_id": None,
+            "needs_filing": False,
+            "details": "This document was already uploaded concurrently, but the stored "
+                       "version could not be identified. Try uploading it again.",
+            "model_used": model,
+            "validation_passed": True,
+        }
+
+    return {
+        "message": "PDF processing completed",
+        "filename": filename,
+        "status": "success",
+        "contract_id": version_id,
+        "needs_filing": True,
+        "proposal": await _filing_proposal(repo, version_id, tenant_id, filename),
+        "details": "This document was already uploaded and is waiting to be filed.",
+        "model_used": model,
+        "validation_passed": True,
+    }
+
+
 async def _filing_proposal(repo, contract_id: str, tenant_id: str,
                            filename: str = "") -> dict:
     """What the confirmation card starts out saying.
@@ -354,23 +435,21 @@ async def upload_pdf(
 
                 if twin and not twin.get("matter_ref"):
                     # The same bytes were uploaded but never filed — a cancelled
-                    # or double-clicked confirmation card. Re-offer that version
-                    # instead of storing the document a second time.
+                    # or double-clicked confirmation card. Re-use that version
+                    # instead of storing the document a second time; if this
+                    # request named a matter, file the existing version there.
                     note("upload", "unfiled_duplicate", filename=file.filename,
                          contract_id=twin["version_id"])
                     os.path.exists(temp_path) and os.remove(temp_path)
-                    return {
-                        "message": "PDF processing completed",
-                        "filename": file.filename,
-                        "status": "success",
-                        "contract_id": twin["version_id"],
-                        "needs_filing": True,
-                        "proposal": await _filing_proposal(repo, twin["version_id"], tenant_id,
-                                                           file.filename),
-                        "details": "This document was already uploaded and is waiting to be filed.",
-                        "model_used": model,
-                        "validation_passed": True,
-                    }
+                    return await _duplicate_upload_response(
+                        filename=file.filename,
+                        model=model,
+                        twin=twin,
+                        tenant_id=tenant_id,
+                        matter_ref=matter_ref,
+                        matters=matters,
+                        repo=repo,
+                    )
 
                 # Validate content quality
                 with trace_step("upload", "content_validate", chars=len(full_text)) as _step:
@@ -622,21 +701,15 @@ async def upload_pdf(
                     # does not later file it as a matter of its own.
                     if twin.get("version_id"):
                         matters.mark_superseded(tenant_id, contract_id, twin["version_id"])
-                    if twin.get("matter_ref"):
-                        return _duplicate_response(file.filename, model, twin)
-                    # The winner is itself still unfiled — send the reviewer to
-                    # its confirmation card rather than to a second one.
-                    return {
-                        **response,
-                        "contract_id": twin.get("version_id") or contract_id,
-                        "needs_filing": True,
-                        "proposal": await _filing_proposal(
-                            repo, twin.get("version_id") or contract_id, tenant_id,
-                            file.filename,
-                        ),
-                        "details": "This document was already uploaded and is waiting "
-                                   "to be filed.",
-                    }
+                    return await _duplicate_upload_response(
+                        filename=file.filename,
+                        model=model,
+                        twin=twin,
+                        tenant_id=tenant_id,
+                        matter_ref=matter_ref,
+                        matters=matters,
+                        repo=repo,
+                    )
                 except Exception as record_error:
                     # The contract is stored but is not a version, so it can be
                     # neither filed nor confirmed. Saying "success" here would
