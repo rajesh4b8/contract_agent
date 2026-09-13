@@ -1,0 +1,28 @@
+MASTER SERVICES AGREEMENT
+Agreement No. VTX-MSA-2026-0114
+
+This Master Services Agreement (the "Agreement") is entered into as of February 2, 2026 (the "Effective Date") by and between Vertex Systems Inc., a Delaware corporation with offices at 88 Wharf Road, Boston, MA 02210 ("Provider"), and Meridian Freight Holdings LLC, a Texas limited liability company with offices at 2400 Commerce Street, Dallas, TX 75201 ("Customer"). Provider and Customer are each a "Party" and together the "Parties."
+
+1. Services. Provider shall furnish the logistics-optimisation and route-planning services described in Statement of Work No. 1 attached hereto (the "Services"). Provider shall perform the Services in a professional and workmanlike manner consistent with generally accepted industry standards. Additional Services may be added only by a written statement of work signed by authorised representatives of both Parties.
+
+2. Term. This Agreement commences on the Effective Date and continues for an initial term of thirty-six (36) months (the "Initial Term"). Thereafter it renews automatically for successive twelve (12) month periods unless either Party gives written notice of non-renewal at least ninety (90) days before the end of the then-current term.
+
+3. Fees and Payment. Customer shall pay Provider a monthly fee of USD $24,000, invoiced in arrears on the first business day of each month. Payment is due within ninety (90) days from the invoice date. Undisputed amounts not paid when due accrue interest at 1.5% per month or the maximum rate permitted by law, whichever is lower. Fees are exclusive of applicable sales, use, and value-added taxes.
+
+4. Confidentiality. Each Party shall protect the other Party's Confidential Information using no less than reasonable care, shall use it solely to perform under this Agreement, and shall not disclose it to third parties except to employees and contractors bound by comparable obligations. These obligations survive for three (3) years after termination, and indefinitely for trade secrets.
+
+5. Intellectual Property. Each Party retains all right, title, and interest in its pre-existing intellectual property. Deliverables created specifically for Customer under a statement of work are assigned to Customer upon full payment, excluding Provider's underlying tools, models, and know-how, in which Customer receives a non-exclusive, perpetual licence to the extent embedded in a Deliverable.
+
+6. Data Protection. Provider shall process Customer personal data only on documented instructions from Customer, shall maintain administrative, physical, and technical safeguards consistent with SOC 2 Type II, and shall notify Customer without undue delay and in any event within seventy-two (72) hours after becoming aware of a personal data breach.
+
+7. Warranties and Disclaimer. Each Party represents that it has full authority to enter into this Agreement. EXCEPT AS EXPRESSLY SET FORTH HEREIN, THE SERVICES ARE PROVIDED "AS IS" AND PROVIDER DISCLAIMS ALL IMPLIED WARRANTIES, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+8. Indemnification. Customer shall defend, indemnify and hold harmless Provider against any and all third-party claims arising out of or relating to this Agreement, without limitation and regardless of cause. The indemnified Party must give prompt written notice and reasonable cooperation.
+
+9. Limitation of Liability. Provider's total aggregate liability under this Agreement shall be unlimited in respect of all claims, whether in contract, tort or otherwise, including indirect and consequential losses.
+
+10. Termination. Either Party may terminate this Agreement for material breach upon thirty (30) days' written notice if the breach remains uncured. Customer may terminate for convenience upon one hundred and eighty (180) days' written notice, subject to payment of all fees accrued through the effective date of termination.
+
+11. Governing Law. This Agreement is governed by the laws of the State of Delaware, without regard to its conflict-of-laws principles. The Parties submit to the exclusive jurisdiction of the state and federal courts located in Wilmington, Delaware.
+
+12. Entire Agreement. This Agreement, together with its statements of work and exhibits, constitutes the entire agreement between the Parties and supersedes all prior understandings. Amendments must be in writing and signed by both Parties.

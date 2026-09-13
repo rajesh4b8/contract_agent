@@ -267,9 +267,21 @@ class ChunkRepository:
             """
             UNWIND $hashes AS h
             MATCH (c:Chunk {tenant_id: $tenant_id, hash: h})
-            // How many versions hold this chunk — its document frequency, which
-            // is what tells boilerplate from distinctive language.
-            WITH c, h, count { (c)<-[:INCLUDES]-(:ContractVersion) } AS df
+            // Document frequency counts distinct **matters**, not versions.
+            //
+            // Counting versions gets this exactly backwards: a clause carried
+            // through four rounds of one negotiation is the strongest evidence
+            // a match could have, and version-counting scores it as boilerplate
+            // — so the more rounds a matter has, the less it looks like itself.
+            // Observed: a lookalike sharing 12 of 14 chunks with a three-round
+            // matter scored 79% and fell below the threshold, while the same
+            // document against a one-round matter scored 85%.
+            //
+            // Boilerplate is text that turns up across *different* contracts.
+            WITH c, h, COUNT {
+                MATCH (c)<-[:INCLUDES]-(:ContractVersion)<-[:HAS_VERSION]-(other:Matter)
+                RETURN DISTINCT other
+            } AS df
             MATCH (c)<-[:INCLUDES]-(v:ContractVersion)<-[:HAS_VERSION]-(m:Matter)
             WHERE m.status <> 'CLOSED'
               AND ($exclude IS NULL OR v.version_id <> $exclude)
@@ -320,7 +332,12 @@ class ChunkRepository:
             """
             MATCH (v:ContractVersion {tenant_id: $tenant_id})-[:INCLUDES]->(c:Chunk)
             WHERE v.version_id IN $ids
-            WITH v, c, count { (c)<-[:INCLUDES]-(:ContractVersion) } AS df
+            // The same definition as above, or forward and backward would be
+            // measured on two different scales.
+            WITH v, c, COUNT {
+                MATCH (c)<-[:INCLUDES]-(:ContractVersion)<-[:HAS_VERSION]-(other:Matter)
+                RETURN DISTINCT other
+            } AS df
             RETURN v.version_id AS version_id, collect(df) AS dfs
             """,
             {"tenant_id": tenant_id, "ids": ids},

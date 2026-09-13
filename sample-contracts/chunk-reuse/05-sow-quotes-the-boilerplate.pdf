@@ -1,0 +1,70 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [4 0 R] /Count 1 >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents 5 0 R >>
+endobj
+5 0 obj
+<< /Length 2483 >>
+stream
+BT /F1 10.5 Tf 56 736 Td 14.5 TL
+(STATEMENT OF WORK NO. 2) Tj T*
+(Issued under Master Services Agreement No. VTX-MSA-2026-0114) Tj T*
+T*
+(This Statement of Work is entered into as of June 1, 2026 between Vertex Systems Inc.) Tj T*
+(\("Provider"\) and Meridian Freight Holdings LLC \("Customer"\) and is governed by the Master) Tj T*
+(Services Agreement referenced above.) Tj T*
+T*
+(1. Scope of Work. Provider shall deliver a phase-two migration of Customer's depot) Tj T*
+(scheduling workload onto the Vertex platform, including data migration, integration with) Tj T*
+(Customer's existing telematics provider, and two rounds of user acceptance testing.) Tj T*
+T*
+(2. Milestones and Deliverables. Delivery proceeds in four sprints of two weeks each. Sprint) Tj T*
+(one delivers the data migration plan; sprint two delivers the telematics integration; sprint) Tj T*
+(three delivers the scheduling module; sprint four delivers user acceptance testing and) Tj T*
+(handover documentation.) Tj T*
+T*
+(3. Rates and Invoicing. Services under this Statement of Work are charged on a) Tj T*
+(time-and-materials basis at the rates set out in Appendix B. Provider shall invoice monthly) Tj T*
+(in arrears for hours actually worked, supported by a timesheet summary.) Tj T*
+T*
+(4. Acceptance. Customer shall have ten \(10\) business days from delivery of each milestone to) Tj T*
+(accept or reject it in writing, stating the grounds for any rejection. A milestone not) Tj T*
+(rejected within that period is deemed accepted.) Tj T*
+T*
+(5. Key Personnel. Provider shall assign a named engagement lead and a named solution) Tj T*
+(architect to this Statement of Work and shall not replace either without Customer's prior) Tj T*
+(written consent, not to be unreasonably withheld.) Tj T*
+T*
+(6. Confidentiality. Each Party shall protect the other Party's Confidential Information) Tj T*
+(using no less than reasonable care, shall use it solely to perform under this Agreement, and) Tj T*
+(shall not disclose it to third parties except to employees and contractors bound by) Tj T*
+(comparable obligations. These obligations survive for three \(3\) years after termination, and) Tj T*
+(indefinitely for trade secrets.) Tj T*
+T*
+(7. Governing Law. This Agreement is governed by the laws of the State of Delaware, without) Tj T*
+(regard to its conflict-of-laws principles. The Parties submit to the exclusive jurisdiction) Tj T*
+(of the state and federal courts located in Wilmington, Delaware.) Tj T*
+ET
+endstream
+endobj
+xref
+0 6
+0000000000 65535 f 
+0000000009 00000 n 
+0000000058 00000 n 
+0000000115 00000 n 
+0000000185 00000 n 
+0000000311 00000 n 
+trailer
+<< /Size 6 /Root 1 0 R >>
+startxref
+2846
+%%EOF

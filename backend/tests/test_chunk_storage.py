@@ -306,6 +306,33 @@ class TestTheAdvisoryMatch:
 
         assert repository.find_matches("acme", ["a", "b"] + [f"x{i}" for i in range(18)]) == []
 
+    def test_document_frequency_counts_matters_not_versions(self):
+        """A clause carried through four rounds of one negotiation is the
+        strongest evidence a match could have. Counting versions scores it as
+        boilerplate, so the more rounds a matter has the less it looks like
+        itself — observed live: a lookalike sharing 12 of 14 chunks with a
+        three-round matter scored 79% and fell below the threshold."""
+        repository = repo([])
+
+        repository.find_matches("acme", ["a"])
+
+        statement = repository.graph.statements[0]
+        assert "RETURN DISTINCT other" in statement, "df is not counting distinct matters"
+        assert "HAS_VERSION]-(other:Matter)" in statement
+
+    def test_the_backward_direction_uses_the_same_definition(self):
+        """Otherwise forward and backward are measured on two different scales."""
+        repository = repo(
+            [{"matter_ref": "M", "title": "", "version_id": "V-1",
+              "shared": [{"hash": "a", "df": 1}]}],
+            [],
+        )
+
+        repository.find_matches("acme", ["a"])
+
+        weights = repository.graph.statements[1]
+        assert "RETURN DISTINCT other" in weights
+
     def test_boilerplate_is_weighted_down(self):
         """A clause in fifty versions is not evidence of anything."""
         common = [{"hash": h, "df": 50} for h in ("a", "b", "c", "d")]

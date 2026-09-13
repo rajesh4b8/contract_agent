@@ -1704,18 +1704,42 @@ content-addressed chunks (`hash IS NOT NULL`), so it cannot reach them; retiring
 deliberate act, and one worth scheduling — 6 `Document` nodes hold 3,508 chunks for 49 contracts,
 which is the filename-MERGE bug in plain numbers.
 
+### Test contracts for these scenarios
+
+`sample-contracts/chunk-reuse/` holds seven documents around one fictional deal — Vertex Systems /
+Meridian Freight — each written to exercise one thing, with a `README.md` that says what each should
+do. Tracked in git, unlike the rest of `sample-contracts/`, because synthetic fixtures are no use if
+they do not survive a clone.
+
+| file | what should happen (all measured live) |
+|---|---|
+| `01-round1` | file as a new matter — 14 chunks, **0 reused** |
+| `02-round2-one-clause-edited` | upload as a new round — **12/14 reused (85%)** |
+| `03-round3-section-inserted` | a section inserted and everything after it renumbered — **13/15 reused (86%)** |
+| `04-lookalike-different-counterparty` | a different deal on the same template — **suggests the matter at 86%**, and you should ignore it and create a new one |
+| `05-sow-quotes-the-boilerplate` | an SOW quoting the MSA's clauses verbatim — **no suggestion** (forward 23%, backward 13%) |
+| `06-unrelated-harbour-point-lease` | a property lease — **no suggestion**, nothing reused |
+| `07-unstructured-kestrel-nda` | prose with no headings — chunks, but the version is flagged `structural=False` |
+
+**Writing them found a real bug.** On the first run file 4 got no suggestion at all: document
+frequency counted *versions*, so a matter's own three rounds made its clauses look like boilerplate
+and the score fell to 79%. That is backwards — a clause carried through four rounds of one
+negotiation is the strongest evidence a match could have. `df` now counts distinct **matters**, and
+the same file suggests at 86%. The offline tests had not caught it because they use one version per
+matter, which is exactly where the two definitions agree.
+
 ### How to test
 
 ```bash
 make test    # the stability tests are the point
 ```
 
-648 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys. The ones that matter:
+650 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys. The ones that matter:
 
 | file | covers |
 |---|---|
 | `test_chunk_identity.py` (64) | canonical form, heading-stripping, **edit is local**, **insertion is local**, golden hashes, reconstruction, the unstructured-document flag |
-| `test_chunk_storage.py` (28) | embedding reuse, model-guarded vectors, tenancy, membership replacement, retention |
+| `test_chunk_storage.py` (30) | embedding reuse, model-guarded vectors, tenancy, membership replacement, retention |
 
 With the stack up:
 

@@ -274,8 +274,13 @@ def rarity_weight(document_frequency: int) -> float:
 
     Boilerplate appears in every contract a tenant has, so counting shared
     chunks unweighted would make every document look like a new round of every
-    other. A clause present in fifty versions carries almost nothing; one
+    other. A clause present in fifty *matters* carries almost nothing; one
     present in two carries almost all of its weight.
+
+    `df` counts **distinct matters**, never versions. A clause carried through
+    four rounds of one negotiation is the strongest evidence a match could have,
+    and counting versions would score it as boilerplate — so the more rounds a
+    matter had, the less it would look like itself.
     """
     import math
 

@@ -1,0 +1,18 @@
+STATEMENT OF WORK NO. 2
+Issued under Master Services Agreement No. VTX-MSA-2026-0114
+
+This Statement of Work is entered into as of June 1, 2026 between Vertex Systems Inc. ("Provider") and Meridian Freight Holdings LLC ("Customer") and is governed by the Master Services Agreement referenced above.
+
+1. Scope of Work. Provider shall deliver a phase-two migration of Customer's depot scheduling workload onto the Vertex platform, including data migration, integration with Customer's existing telematics provider, and two rounds of user acceptance testing.
+
+2. Milestones and Deliverables. Delivery proceeds in four sprints of two weeks each. Sprint one delivers the data migration plan; sprint two delivers the telematics integration; sprint three delivers the scheduling module; sprint four delivers user acceptance testing and handover documentation.
+
+3. Rates and Invoicing. Services under this Statement of Work are charged on a time-and-materials basis at the rates set out in Appendix B. Provider shall invoice monthly in arrears for hours actually worked, supported by a timesheet summary.
+
+4. Acceptance. Customer shall have ten (10) business days from delivery of each milestone to accept or reject it in writing, stating the grounds for any rejection. A milestone not rejected within that period is deemed accepted.
+
+5. Key Personnel. Provider shall assign a named engagement lead and a named solution architect to this Statement of Work and shall not replace either without Customer's prior written consent, not to be unreasonably withheld.
+
+6. Confidentiality. Each Party shall protect the other Party's Confidential Information using no less than reasonable care, shall use it solely to perform under this Agreement, and shall not disclose it to third parties except to employees and contractors bound by comparable obligations. These obligations survive for three (3) years after termination, and indefinitely for trade secrets.
+
+7. Governing Law. This Agreement is governed by the laws of the State of Delaware, without regard to its conflict-of-laws principles. The Parties submit to the exclusive jurisdiction of the state and federal courts located in Wilmington, Delaware.
