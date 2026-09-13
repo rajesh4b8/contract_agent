@@ -1,16 +1,16 @@
 # POC Progress Tracker
 
-**Resume point: Increment 6 — `awaiting your test`.**
-Increments 0–5 are accepted. Increment 6 is built; test it before 7 starts.
+**Resume point: Increment 7 — `specified, not started`.**
+Increments 0–6 are accepted. Increment 7's specification is complete; start there.
 
 Still awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
 (out-of-increment bug fix, from your report of an unexplained "processing error") and
 **[Debug — a live timeline of what the pipeline is doing](#debug--a-live-timeline-of-what-the-pipeline-is-doing)**
 (out-of-increment, from your report that uploads take a long time with nothing on screen to say why).
 
-**Increment 6 is built and waiting on you.** 7–9 remain specified and ready: chunk identity so
-unchanged text is never re-embedded (7), analysing the whole contract rather than its first 12,000
-characters (8), and the cross-version change report (9). Nothing starts until you have tested 6.
+**Increments 7–9 are specified and ready to build.** In order: chunk identity so unchanged text is
+never re-embedded (7), analysing the whole contract rather than its first 12,000 characters (8), and
+the cross-version change report (9).
 
 Two sections are worth knowing about before starting anything:
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) (settled — what this
@@ -42,8 +42,8 @@ produced it; this file is what you and I actually work from.
 | 3 | Redlines that are real and persisted | accepted |
 | 4 | Human-in-the-loop approve / edit / reject | accepted |
 | 5 | One measurable outcome | accepted |
-| 6 | Multiple contracts, each resumable | **awaiting your test** |
-| 7 | Content-addressed chunks | specified — not started |
+| 6 | Multiple contracts, each resumable | accepted |
+| 7 | Content-addressed chunks | **specified — not started** |
 | 8 | Analyse the whole contract | specified — not started |
 | 9 | Incremental re-analysis and the change report | specified — not started |
 
@@ -1028,7 +1028,8 @@ _(write here)_
 
 ## Increment 6 — Multiple contracts, each resumable
 
-**Status: `awaiting your test`.** Specified and built 2026-09-13. Follows from the
+**Status: `accepted`** (2026-09-13, after your manual testing — two rounds of Copilot review and
+two reports from you folded in). Follows from the
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) decision: if this
 system is the record of the *review*, a review has to be a durable object you can leave and come
 back to.
