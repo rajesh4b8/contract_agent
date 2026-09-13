@@ -1,10 +1,14 @@
 import React, { useState } from 'react';
 import { Button } from '../../shared/ui/button';
-import type { FilingProposal } from '../../../services/mattersApi';
+import type { FilingProposal, SuggestedMatter } from '../../../services/mattersApi';
 
 interface FilingCardProps {
   proposal: FilingProposal;
   busy?: boolean;
+  /** Matters this document shares substantial text with. Advisory only. */
+  suggestions?: SuggestedMatter[];
+  /** Offered beside the card; choosing one files the upload as a new round. */
+  onFileInto?: (matterRef: string) => void;
   onConfirm: (values: { title: string; counterparty: string; contract_type: string }) => void;
   onCancel: () => void;
 }
@@ -23,6 +27,8 @@ interface FilingCardProps {
 export const FilingCard: React.FC<FilingCardProps> = ({
   proposal,
   busy = false,
+  suggestions = [],
+  onFileInto,
   onConfirm,
   onCancel,
 }) => {
@@ -45,6 +51,43 @@ export const FilingCard: React.FC<FilingCardProps> = ({
         });
       }}
     >
+      {/* Shown above the form, and it decides nothing: the form below is still
+          right there, already filled in. A new SOW for a different vendor off
+          the same template looks exactly like a new round, and only the
+          reviewer knows which this is. */}
+      {suggestions.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-2">
+          <p className="text-sm font-medium text-amber-900">
+            This looks like a new round of{' '}
+            {suggestions.length === 1 ? 'an existing matter' : 'existing matters'}
+          </p>
+          {suggestions.map((s) => (
+            <div key={s.matter_ref} className="flex flex-wrap items-center gap-2 text-sm">
+              <span className="font-mono font-semibold text-amber-900">{s.matter_ref}</span>
+              <span className="text-amber-800">{s.title}</span>
+              <span className="text-amber-700">
+                — {Math.round(s.score * 100)}% of the text is shared
+              </span>
+              {onFileInto && (
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={busy}
+                  onClick={() => onFileInto(s.matter_ref)}
+                >
+                  File as a new round
+                </Button>
+              )}
+            </div>
+          ))}
+          <p className="text-xs text-amber-700">
+            Or ignore this and create a new matter below — a new contract off the same
+            template looks the same from here.
+          </p>
+        </div>
+      )}
+
       <div>
         <h3 className="font-semibold text-slate-800">Confirm the details</h3>
         <p className="text-sm text-slate-600">

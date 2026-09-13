@@ -1,16 +1,15 @@
 # POC Progress Tracker
 
-**Resume point: Increment 7 — `specified, not started`.**
-Increments 0–6 are accepted. Increment 7's specification is complete; start there.
+**Resume point: Increment 7 — `awaiting your test`.**
+Increments 0–6 are accepted. Increment 7 is built; test it before 8 starts.
 
 Still awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
 (out-of-increment bug fix, from your report of an unexplained "processing error") and
 **[Debug — a live timeline of what the pipeline is doing](#debug--a-live-timeline-of-what-the-pipeline-is-doing)**
 (out-of-increment, from your report that uploads take a long time with nothing on screen to say why).
 
-**Increments 7–9 are specified and ready to build.** In order: chunk identity so unchanged text is
-never re-embedded (7), analysing the whole contract rather than its first 12,000 characters (8), and
-the cross-version change report (9).
+**Increment 7 is built and waiting on you.** 8 and 9 remain specified: analysing the whole contract
+rather than its first 12,000 characters (8), and the cross-version change report (9).
 
 Two sections are worth knowing about before starting anything:
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) (settled — what this
@@ -43,7 +42,7 @@ produced it; this file is what you and I actually work from.
 | 4 | Human-in-the-loop approve / edit / reject | accepted |
 | 5 | One measurable outcome | accepted |
 | 6 | Multiple contracts, each resumable | accepted |
-| 7 | Content-addressed chunks | **specified — not started** |
+| 7 | Content-addressed chunks | **awaiting your test** |
 | 8 | Analyse the whole contract | specified — not started |
 | 9 | Incremental re-analysis and the change report | specified — not started |
 
@@ -1481,7 +1480,7 @@ _(write here)_
 
 ## Increment 7 — Content-addressed chunks
 
-**Status: `specified — not started`.**
+**Status: `awaiting your test`.** Built 2026-09-13.
 
 **Goal:** give every chunk an identity derived from its content, so unchanged text is never
 re-embedded and two versions of a contract can be compared at all. Chunk embedding is one network
@@ -1630,16 +1629,105 @@ nobody rediscovers them.
   gone, the honest answer is purging the whole matter. Worth knowing before a compliance
   conversation assumes per-version deletion works.
 
+### What changed, and what it measured
+
+**`backend/domain/chunking.py` is the whole hash definition**, in one place and with no I/O, because
+changing it later invalidates every stored hash at once. `canonical()` does NFKC, strips invisible
+characters, rejoins words hyphenated across line breaks, folds smart quotes and dashes, collapses
+whitespace and casefolds. `split_heading()` takes the section number *out* of the hashed body and
+keeps it on the membership relationship.
+
+**Measured against `SampleContract-Shuttle.pdf`** (37 chunks), by inserting a new Section 4 and
+renumbering everything after it, exactly as the specification described:
+
+| hashing scheme | chunks surviving | stable |
+|---|---|---|
+| naive, whole chunk | 18 / 37 | 49% |
+| heading stripped | **32 / 37** | **86%** |
+
+The naive figure reproduces the specification's exactly. Heading-stripping came out **86%** against
+the 81% predicted — the heading pattern here recognises a few more real forms (`ARTICLE IV -`,
+`Section 7:`, `12.3 Title`) while still refusing street numbers, dollar amounts and `1.5 million`.
+
+**Overlap is gone.** `_add_overlap` prepended 20% of chunk *i* onto chunk *i+1*, so a chunk's
+identity depended on its neighbour — and because it mutated `next_chunk['content']` in place and
+then used the grown chunk as the source for the next overlap, the contamination compounded down a
+chain of sub-chunks. That is what dropped one chunk to 0.584 similarity against its own unedited
+self while everything else scored 0.998+.
+
+**`(:ContractVersion)-[:INCLUDES {order, heading}]->(:Chunk {tenant_id, hash})`**, MERGEd on the
+tenant *and* the hash — never the hash alone, which would collapse two customers' identical
+boilerplate onto one node and make a GDPR deletion destroy someone else's version. Embedding reuse
+falls out of the MERGE, guarded on `embedding_model` and `embedding_dimensions` so a model change
+forces a re-embed rather than silently mixing vectors from two models in one similarity search.
+
+**Measured end to end through the HTTP API**, two rounds of a real contract with one clause edited:
+
+```
+round 1:  14 chunks, 14 embedded,  0 reused
+round 2:  14 chunks,  1 embedded, 13 reused   ->  92% of the embedding work skipped
+```
+
+**The profile is recorded on version 1 and reused.** Strategy selection is threshold-based scoring
+that can flip on a one-word edit; a document chunked by `section` in v1 and `paragraph` in v2 has no
+chunk in common, for no reason a reader could ever see. `TextExtractionService` gained
+`extract_with_source`, because which extractor won is part of the profile and the old method threw
+that answer away.
+
+**The advisory match** looks up only the incoming document's own hashes — O(chunks in the new
+document), not O(chunks in the tenant) — and scores two directions. `forward` is how much of the new
+document a candidate explains; `backward` is how much of the candidate it covers. Shared chunks are
+weighted `1/log(1+df)` so boilerplate contributes almost nothing. Live:
+
+- a lightly edited copy of a filed contract → **suggests it at 84%**, with a *File as a new round*
+  button (`POST /api/matters/{ref}/versions`, which files a document already on the server rather
+  than making you upload the same bytes twice);
+- an unrelated contract → **nothing**;
+- an SOW that shares only the governing-law boilerplate → **nothing**.
+
+It decides nothing. The pre-filled new-matter form is still right there underneath it.
+
+**A document with no headings says so.** `_identify_sections` returns a trailing block for any
+non-empty text, so a document where no pattern matched came back looking exactly like a
+well-structured one — the detector asks the text directly instead. Without headings the chunker
+packs greedily, one insertion shifts every boundary after it, and chunk identity is worth nothing;
+that is now logged and flagged on the version rather than pretended away.
+
+### One thing found while building it
+
+**Retention would have deleted the old search corpus.** The specification's orphan query is
+`NOT (:ContractVersion)-[:INCLUDES]->(c)`, on the reasoning that true orphans come only from failed
+uploads. On your database that describes **3,508 chunks** — everything written before this
+increment, which hangs off a `(:Document)` MERGEd on filename and is referenced by no version at
+all. A routine tidy-up would have swept the lot. `delete_orphan_chunks` is now scoped to
+content-addressed chunks (`hash IS NOT NULL`), so it cannot reach them; retiring them is a
+deliberate act, and one worth scheduling — 6 `Document` nodes hold 3,508 chunks for 49 contracts,
+which is the filename-MERGE bug in plain numbers.
+
 ### How to test
 
 ```bash
 make test    # the stability tests are the point
 ```
 
-With the stack up: upload a contract, then upload a lightly edited copy as a **new matter**. The
-debug panel should show embeddings generated only for the changed chunks, and the New-contract flow
-should offer the existing matter with a percentage and a link — while still letting you create a
-new matter anyway.
+648 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys. The ones that matter:
+
+| file | covers |
+|---|---|
+| `test_chunk_identity.py` (64) | canonical form, heading-stripping, **edit is local**, **insertion is local**, golden hashes, reconstruction, the unstructured-document flag |
+| `test_chunk_storage.py` (28) | embedding reuse, model-guarded vectors, tenancy, membership replacement, retention |
+
+With the stack up:
+
+1. **Upload a contract, file it as a new matter.** The response's `chunks` reports
+   `embedded == chunks` and `reused: 0` — everything is new the first time.
+2. **Edit one clause and upload it into that matter** (*Upload new round*). `reused` should be
+   everything but the changed chunk, and the upload should be visibly faster. The debug panel shows
+   `chunking.reuse_check` and `chunking.embed_new` with the counts.
+3. **Upload a similar-but-not-identical contract on the New contract path.** The filing card should
+   offer the existing matter with a percentage and a *File as a new round* button — and still let
+   you create a new matter instead, because a new SOW off the same template looks the same from here.
+4. **Upload something unrelated.** No suggestion at all.
 
 ### Your feedback
 

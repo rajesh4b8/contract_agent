@@ -88,6 +88,18 @@ export interface FilingProposal {
   summary?: string;
 }
 
+/** A matter that shares enough text with the upload to be worth offering. */
+export interface SuggestedMatter {
+  matter_ref: string;
+  title: string;
+  /** The weaker of the two directions — neither alone can carry a match. */
+  score: number;
+  /** How much of the uploaded document this matter explains. */
+  forward: number;
+  /** How much of this matter the uploaded document covers. */
+  backward: number;
+}
+
 export interface UploadResult {
   message: string;
   filename: string;
@@ -101,6 +113,14 @@ export interface UploadResult {
   /** Present when the round was filed, or when the bytes were already known. */
   matter_ref?: string;
   version?: number;
+  /**
+   * Matters this document looks like a new round of. **Advisory only** — a new
+   * SOW for a different vendor off the same template is indistinguishable from
+   * a new round, and only the user knows which it is.
+   */
+  suggested_matters?: SuggestedMatter[];
+  /** How many chunks were stored, and how many were already on file. */
+  chunks?: { chunks: number; reused: number; embedded: number; failed: number };
 }
 
 async function readJson<T>(response: Response, fallback: string): Promise<T> {
@@ -162,6 +182,27 @@ export async function fileAsNewMatter(input: {
     body: JSON.stringify(input),
   });
   return readJson(response, 'Could not create the matter');
+}
+
+/**
+ * File a document already on the server as the next round of a matter.
+ *
+ * The other answer to the question the filing card asks. If the advisory match
+ * was right, this takes it up without re-uploading the same bytes.
+ */
+export async function attachVersion(
+  matterRef: string,
+  contractId: string,
+): Promise<{ matter_ref: string; version: number }> {
+  const response = await apiFetch(
+    `/api/matters/${encodeURIComponent(matterRef)}/versions`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contract_id: contractId }),
+    },
+  );
+  return readJson(response, `Could not file into ${matterRef}`);
 }
 
 export async function changeMatterStatus(

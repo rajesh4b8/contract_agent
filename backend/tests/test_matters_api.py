@@ -277,6 +277,71 @@ class TestFilingANewContract:
         assert response.status_code == 403
 
 
+class TestTakingUpASuggestion:
+    """Filing a document already on the server, rather than re-uploading it.
+
+    The other answer to the question the filing card asks: the advisory match
+    said this looks like a new round of MSA-2026-0042, and the reviewer agreed.
+    """
+
+    def test_it_files_the_existing_document(self, client, matters):
+        matters.attach_version.return_value = {"matter_ref": "MSA-2026-0042", "n": 2}
+
+        response = client.post("/api/matters/MSA-2026-0042/versions", headers=HEADERS,
+                               json={"contract_id": "UPLOADED_AAA"})
+
+        assert response.status_code == 200
+        assert response.json()["version"] == 2
+
+    def test_a_closed_matter_refuses_by_name(self, client, matters):
+        from backend.infrastructure.matter_repository import MatterClosed
+
+        matters.attach_version.side_effect = MatterClosed("MSA-2026-0042")
+
+        response = client.post("/api/matters/MSA-2026-0042/versions", headers=HEADERS,
+                               json={"contract_id": "UPLOADED_AAA"})
+
+        assert response.status_code == 409
+        assert "MSA-2026-0042" in response.json()["detail"]
+
+    def test_a_document_already_filed_elsewhere_says_where(self, client, matters):
+        from backend.infrastructure.matter_repository import MatterNotFound
+
+        matters.attach_version.side_effect = MatterNotFound("x")
+        matters.matter_for_version.return_value = {"matter_ref": "SOW-2026-0001", "n": 1}
+
+        response = client.post("/api/matters/MSA-2026-0042/versions", headers=HEADERS,
+                               json={"contract_id": "UPLOADED_AAA"})
+
+        assert response.status_code == 409
+        assert "SOW-2026-0001" in response.json()["detail"]
+
+    def test_an_unknown_matter_is_404(self, client, matters):
+        from backend.infrastructure.matter_repository import MatterNotFound
+
+        matters.attach_version.side_effect = MatterNotFound("x")
+        matters.matter_for_version.return_value = None
+
+        response = client.post("/api/matters/MSA-2026-9999/versions", headers=HEADERS,
+                               json={"contract_id": "UPLOADED_AAA"})
+
+        assert response.status_code == 404
+
+    def test_junk_in_the_reference_never_reaches_a_query(self, client, matters):
+        response = client.post("/api/matters/..%2F..%2Fetc/versions", headers=HEADERS,
+                               json={"contract_id": "UPLOADED_AAA"})
+
+        assert response.status_code == 404
+        matters.attach_version.assert_not_called()
+
+    def test_a_viewer_may_not(self, client, matters):
+        response = client.post("/api/matters/MSA-2026-0042/versions",
+                               headers={**HEADERS, "X-User-Role": "VIEWER"},
+                               json={"contract_id": "UPLOADED_AAA"})
+
+        assert response.status_code == 403
+
+
 class TestMovingAMatterAlong:
     def test_a_reviewed_matter_can_be_sent_to_the_counterparty(self, client, matters):
         matters.get_matter.return_value = A_MATTER

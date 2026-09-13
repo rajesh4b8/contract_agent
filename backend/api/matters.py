@@ -29,6 +29,8 @@ from backend.domain.matter import (
 from backend.governance.rbac import Permission, get_current_tenant, requires_permission
 from backend.infrastructure.matter_repository import (
     AlreadyFiled,
+    MatterClosed,
+    MatterNotFound,
     MatterRepository,
 )
 from backend.shared.debug import note, trace_step
@@ -216,6 +218,49 @@ async def create_matter(
         "title": title,
         "status": MatterStatus.DRAFT.value,
     }
+
+
+class AttachVersionRequest(BaseModel):
+    contract_id: str = Field(description="an uploaded document that is not yet filed")
+
+
+@router.post("/{matter_ref}/versions",
+             dependencies=[Depends(requires_permission(Permission.UPLOAD))])
+async def attach_version(
+    matter_ref: str,
+    request: AttachVersionRequest,
+    tenant_id: str = Depends(get_current_tenant),
+):
+    """File a document already on the server as the next round of a matter.
+
+    The counterpart to `POST /api/matters` for the other answer to the same
+    question. A document uploaded on the new-contract path sits unfiled while
+    the reviewer decides; if the advisory match was right and it *is* a new
+    round, this files it without making them upload the same bytes again.
+    """
+    if not is_reference(matter_ref):
+        raise HTTPException(status_code=404, detail=f"No matter {matter_ref}")
+
+    try:
+        filed = repository.attach_version(tenant_id, matter_ref, request.contract_id)
+    except MatterClosed:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{matter_ref} is closed. Reopen it before adding a new round.",
+        )
+    except MatterNotFound:
+        existing = repository.matter_for_version(tenant_id, request.contract_id)
+        if existing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{request.contract_id} is already version {existing['n']} "
+                       f"of {existing['matter_ref']}",
+            )
+        raise HTTPException(status_code=404, detail=f"No matter {matter_ref}")
+
+    note("matter", "version_attached", matter_ref=matter_ref, version=filed["n"])
+    return {"matter_ref": filed["matter_ref"], "version": filed["n"],
+            "version_id": request.contract_id}
 
 
 class StatusChangeRequest(BaseModel):

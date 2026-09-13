@@ -10,11 +10,13 @@ import { DebugEventPanel } from '../components/features/debug/DebugEventPanel';
 import { useDebugEnabled } from '../services/debugApi';
 import { useContractHistory } from '../contexts/ContractHistoryContext';
 import {
+  attachVersion,
   listMatters,
   uploadContract,
   fileAsNewMatter,
   type FilingProposal,
   type MatterSummary,
+  type SuggestedMatter,
 } from '../services/mattersApi';
 
 /** Only runs while a row says "Analysing"; idle pages make no requests. */
@@ -51,9 +53,11 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
   const [notice, setNotice] = useState<string | null>(null);
 
   // Set when a document has been extracted but not yet filed.
-  const [pending, setPending] = useState<{ contractId: string; proposal: FilingProposal } | null>(
-    null,
-  );
+  const [pending, setPending] = useState<{
+    contractId: string;
+    proposal: FilingProposal;
+    suggestions: SuggestedMatter[];
+  } | null>(null);
   const [filing, setFiling] = useState(false);
 
   const [total, setTotal] = useState<number | null>(null);
@@ -148,6 +152,7 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
               counterparty: '',
               contract_type: '',
             },
+            suggestions: result.suggested_matters ?? [],
           });
           return;
         }
@@ -164,6 +169,28 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
       }
     },
     [model, onOpenMatter],
+  );
+
+  /**
+   * Take up a suggestion: file the document already on the server as a round of
+   * an existing matter, rather than re-uploading it.
+   */
+  const fileIntoExisting = useCallback(
+    async (matterRef: string) => {
+      if (!pending) return;
+      setFiling(true);
+      setUploadError(null);
+      try {
+        await attachVersion(matterRef, pending.contractId);
+        setPending(null);
+        onOpenMatter(matterRef);
+      } catch (e) {
+        setUploadError(e instanceof Error ? e.message : `Could not file into ${matterRef}`);
+      } finally {
+        setFiling(false);
+      }
+    },
+    [pending, onOpenMatter],
   );
 
   const confirmFiling = useCallback(
@@ -214,6 +241,8 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
             <FilingCard
               proposal={pending.proposal}
               busy={filing}
+              suggestions={pending.suggestions}
+              onFileInto={fileIntoExisting}
               onConfirm={confirmFiling}
               onCancel={() => setPending(null)}
             />

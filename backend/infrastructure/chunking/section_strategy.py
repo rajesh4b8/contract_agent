@@ -43,6 +43,23 @@ class SectionStrategy(ChunkingStrategy):
             r'^\([0-9]+\)\s+',  # (1), (2), (3) subsections
         ]
     
+    def has_section_headers(self, text: str) -> bool:
+        """Whether any line actually looks like a section heading.
+
+        Not the same question as "did chunking produce sections".
+        `_identify_sections` always returns at least one section for non-empty
+        text — the trailing block — so a document where no pattern matched comes
+        back looking exactly like a well-structured one. Chunk identity depends
+        on the difference: with real headings, boundaries are anchored to the
+        document's own structure and an insertion is local; without them, text
+        is packed greedily and one insertion shifts every boundary after it.
+        """
+        for line in (text or "").split("\n"):
+            stripped = line.strip()
+            if stripped and any(re.match(p, stripped) for p in self.section_patterns):
+                return True
+        return False
+
     def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:
         """Chunk text by section boundaries."""
         sections = self._identify_sections(text)
@@ -60,7 +77,17 @@ class SectionStrategy(ChunkingStrategy):
             else:
                 chunks.append(section)
         
-        return self._add_overlap(chunks, text, metadata)
+        # No overlap. `_add_overlap` used to prepend 20% of chunk *i* onto chunk
+        # *i+1*, which made a chunk's identity depend on its neighbour — the one
+        # thing identity cannot do. It also mutated `next_chunk['content']` in
+        # place and then used the grown chunk as the source for the next
+        # overlap, so overlap compounded down a chain of sub-chunks. In the
+        # measured simulation that is what dropped one chunk to 0.584 similarity
+        # against its own unedited self while everything else scored 0.998+.
+        #
+        # Retrieval context comes from joining neighbours by INCLUDES order at
+        # query time instead, which costs nothing and is exact.
+        return chunks
     
     def _identify_sections(self, text: str) -> List[Dict[str, Any]]:
         """Identify section boundaries in legal text."""
@@ -187,29 +214,5 @@ class SectionStrategy(ChunkingStrategy):
                 'chunk_type': 'fallback',
                 'size': len(chunk_content)
             })
-        
-        return chunks
-    
-    def _add_overlap(self, chunks: List[Dict[str, Any]], text: str, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Add section-aware overlap between chunks."""
-        if len(chunks) <= 1:
-            return chunks
-        
-        overlap_ratio = 0.2  # 20% overlap for section-based chunks
-        
-        for i in range(len(chunks) - 1):
-            current_chunk = chunks[i]
-            next_chunk = chunks[i + 1]
-            
-            # Only add overlap if chunks are from same section or adjacent sections
-            if (current_chunk.get('chunk_type') == 'section_part' and 
-                next_chunk.get('chunk_type') == 'section_part' and
-                current_chunk.get('parent_section') == next_chunk.get('parent_section')):
-                
-                overlap_size = int(len(current_chunk['content']) * overlap_ratio)
-                current_end = current_chunk['content'][-overlap_size:]
-                next_chunk['content'] = current_end + "\n" + next_chunk['content']
-                next_chunk['has_overlap'] = True
-                next_chunk['overlap_size'] = overlap_size
         
         return chunks
