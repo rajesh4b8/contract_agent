@@ -1225,7 +1225,7 @@ order. It is purely additive — it adds a label and a `Matter` and writes to no
 idempotent, so it is safe to re-run. A test asserts that no statement it issues contains `DELETE`,
 `REMOVE` or `Redline`. Dry-run against your database: **51 contracts** would be migrated.
 
-**Tests: 359 → 541**, all offline. The failure-case table above is walked row by row in
+**Tests: 359 → 544**, all offline. The failure-case table above is walked row by row in
 `backend/tests/test_matters.py::TestTheFailureCases`.
 
 | file | covers |
@@ -1354,7 +1354,13 @@ Four on the frontend:
   the `catch` called `removeItem`, which throws for the same reason, and the exception escaped the
   provider — taking the whole app down for the sake of a cache.
 
-Tests: **526 → 541**, plus 21 checks against a live Neo4j covering the concurrency and atomicity
+Copilot's own agent pushed a fix for two of these to the branch while this was being written —
+the redline return value and the duplicate destination, both of which had been fixed here
+independently. The two were merged rather than one discarded: its `_duplicate_upload_response`
+is kept, because it also handles the case where the winning version cannot be identified at all,
+and the duplicate helper written here was removed.
+
+Tests: **526 → 544**, plus 21 checks against a live Neo4j covering the concurrency and atomicity
 claims with real threads and a deliberately failed write.
 
 ### One thing this increment could not finish
@@ -1381,7 +1387,7 @@ worked. Everything new type-checks clean and lints clean.
 make test
 ```
 
-541 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
+544 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
 
 Then, with the stack up (`make run`):
 
