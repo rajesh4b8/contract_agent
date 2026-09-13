@@ -140,6 +140,41 @@ class TestAnAnalysisThatFinishesElsewhereShowsUp:
         assert "if (!analysing) return;" in page
 
 
+class TestTheClientDoesNotAssumeWhatTheServerKnows:
+    def test_a_200_is_not_taken_as_proof_the_review_was_saved(self):
+        """The server answers with the in-memory results and a warning while
+        marking the version FAILED when persistence fails."""
+        panel = source("components/features/intelligence/ContractIntelligence.tsx")
+
+        assert "void loadStored({ quiet: true });" in panel, (
+            "the panel assumes COMPLETE instead of asking the server"
+        )
+
+    def test_a_rejected_action_does_not_replace_the_whole_page(self):
+        """A double-clicked status change used to eject the reviewer to the
+        "Back to matters" card, losing their place in the review."""
+        page = source("pages/MatterPage.tsx")
+
+        assert "actionError" in page
+        assert "setActionError" in page
+
+    def test_a_refresh_does_not_truncate_the_pages_already_loaded(self):
+        """Loading more, then having a row start analysing, made the extra
+        pages vanish on the next poll."""
+        page = source("pages/MattersPage.tsx")
+
+        assert "loadedRef" in page
+        assert "Math.max(PAGE_SIZE, loadedRef.current)" in page
+
+    def test_the_cache_cleanup_cannot_stop_the_app_mounting(self):
+        """If `getItem` threw because storage is disabled, `removeItem` throws
+        for the same reason — and that exception escapes the provider."""
+        context = source("contexts/ContractHistoryContext.tsx")
+
+        head = context[: context.index("export const ContractHistoryProvider")]
+        assert head.count("try {") >= 2, "removeItem is not itself guarded"
+
+
 class TestAFailedAnalysisIsNeverShownAsNoFindings:
     @pytest.mark.parametrize("relative", [
         "pages/MatterPage.tsx",

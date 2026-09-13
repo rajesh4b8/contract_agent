@@ -40,7 +40,15 @@ function readCache(): MatterSummary[] {
         typeof (m as MatterSummary)?.matter_ref === 'string',
     );
   } catch {
-    localStorage.removeItem(STORAGE_KEY);
+    // Best-effort, like the write paths. If `getItem` threw because storage is
+    // disabled, `removeItem` throws for the same reason — and an exception
+    // escaping here stops the provider mounting, taking the whole app with it
+    // for the sake of a cache.
+    try {
+      localStorage.removeItem(STORAGE_KEY);
+    } catch {
+      // Nothing to do; the cache is advisory.
+    }
     return [];
   }
 }

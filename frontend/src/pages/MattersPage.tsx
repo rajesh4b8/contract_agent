@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Card } from '../components/shared/ui/card';
 import { Button } from '../components/shared/ui/button';
 import { Loader } from '../components/shared/ui/loader';
@@ -19,6 +19,7 @@ import {
 
 /** Only runs while a row says "Analysing"; idle pages make no requests. */
 const LIST_POLL_MS = 10000;
+const PAGE_SIZE = 100;
 
 interface MattersPageProps {
   onOpenMatter: (matterRef: string) => void;
@@ -59,10 +60,17 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
 
+  // How many rows are on screen. A refresh — manual or from the poll — has to
+  // re-request *that* range, not the default first page: otherwise loading more
+  // and then having one row start analysing made the extra pages vanish ten
+  // seconds later.
+  const loadedRef = useRef(PAGE_SIZE);
+
   const refresh = useCallback(async () => {
     try {
-      const page = await listMatters();
+      const page = await listMatters(0, Math.max(PAGE_SIZE, loadedRef.current));
       setMatters(page.matters);
+      loadedRef.current = Math.max(PAGE_SIZE, page.matters.length);
       setTotal(page.total);
       setHasMore(page.hasMore);
       cacheMatters(page.matters);
@@ -77,8 +85,12 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
   const loadMore = useCallback(async () => {
     setLoadingMore(true);
     try {
-      const page = await listMatters(matters.length);
-      setMatters((current) => [...current, ...page.matters]);
+      const page = await listMatters(matters.length, PAGE_SIZE);
+      setMatters((current) => {
+        const merged = [...current, ...page.matters];
+        loadedRef.current = merged.length;
+        return merged;
+      });
       setTotal(page.total);
       setHasMore(page.hasMore);
     } catch (e) {

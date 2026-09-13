@@ -138,7 +138,20 @@ async def _duplicate_upload_response(
     matters: MatterRepository,
     repo,
 ) -> dict:
-    """Answer a duplicate upload without switching it onto the wrong path."""
+    """Answer a duplicate upload without switching it onto the wrong path.
+
+    Three different answers, and picking the wrong one is how a reviewer ends up
+    looking at a round that is not there:
+
+    * already filed elsewhere — report that matter, so they land on the contract
+      that actually owns these bytes;
+    * unfiled, and this request named a destination — honour the destination.
+      The reviewer clicked *Upload new round* on a specific matter; handing them
+      a new-contract card instead makes the page close the uploader on a version
+      that never appears;
+    * unfiled, with no destination — re-offer the confirmation card, so a
+      cancelled confirmation can be picked back up.
+    """
     version_id = twin.get("version_id")
     if twin.get("matter_ref"):
         return _duplicate_response(filename, model, twin)
@@ -439,7 +452,7 @@ async def upload_pdf(
                     # instead of storing the document a second time; if this
                     # request named a matter, file the existing version there.
                     note("upload", "unfiled_duplicate", filename=file.filename,
-                         contract_id=twin["version_id"])
+                         contract_id=twin["version_id"], matter_ref=matter_ref)
                     os.path.exists(temp_path) and os.remove(temp_path)
                     return await _duplicate_upload_response(
                         filename=file.filename,

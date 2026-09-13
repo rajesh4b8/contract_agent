@@ -219,7 +219,13 @@ class ContractIntelligenceService:
         `replace=False` when drafting failed. An empty list then means "we could
         not draft", not "none were needed", and wiping the stored set on the
         strength of a transient model error would destroy drafts a reviewer may
-        already be working from.
+        already be working from. That is a deliberate skip, not a failure, so it
+        returns True.
+
+        Returns whether the stored redlines match what the caller was handed.
+        A swallowed write failure here used to leave the version COMPLETE with
+        the drafted language missing — the response promised redlines that
+        reopening the matter would not show.
         """
         if not replace:
             logger.warning(
@@ -292,9 +298,9 @@ class ContractIntelligenceService:
             note("analysis", "store_redlines", contract_id=contract_id, redlines=len(redlines))
             return True
         except Exception as e:
-            # Non-fatal to the request: the caller already has the analysis. But
-            # the stored snapshot is incomplete, so the version must not be
-            # marked COMPLETE.
+            # Not raised — the analysis itself succeeded and the caller has it —
+            # but reported, so the version is marked FAILED rather than claiming
+            # a complete review whose redlines are not there.
             logger.error(f"Failed to store redlines for {contract_id}: {e}")
             note(
                 "analysis",
@@ -329,9 +335,36 @@ class ContractIntelligenceService:
         Returns whether the write succeeded, so the caller can mark the version
         FAILED rather than claiming a review it does not have.
         """
+        risk = intelligence.risk_assessment
+        summary = {
+            "risk_score": risk.overall_risk_score,
+            "risk_level": risk.risk_level,
+            "violations_count": len(intelligence.violations or []),
+            "clauses_count": len(intelligence.clauses or []),
+            "redlines_count": len(intelligence.redlines or []),
+            "intelligence_status": "completed",
+            "processing_time": intelligence.processing_time,
+            "cuad_analysis_status": "completed",
+            "deviation_count": len(intelligence.cuad_deviations or []),
+            "jurisdiction_detected": (intelligence.jurisdiction_info or {}).get(
+                "jurisdiction", "unknown"),
+            "industry_detected": (intelligence.jurisdiction_info or {}).get(
+                "industry", "general"),
+            "precedent_matches": len(intelligence.precedent_matches or []),
+            "semantic_analysis_enabled": True,
+            "cache_enabled": True,
+            "performance_optimized": True,
+            # The narrative half of the risk assessment. Only the score and the
+            # level used to be kept, so a reopened review showed "72/100 HIGH"
+            # with nothing to say why.
+            "critical_issues": list(risk.critical_issues or []),
+            "risk_recommendations": list(risk.recommendations or []),
+        }
+
         findings = [
             {
                 "finding_id": self._finding_id(contract_id, index, clause),
+                "tenant_id": tenant_id,
                 "index": index,
                 "clause_type": clause.clause_type or "",
                 "risk_level": clause.risk_level or "LOW",
@@ -348,6 +381,7 @@ class ContractIntelligenceService:
         violations = [
             {
                 "violation_id": f"{contract_id}_{v.rule_id or 'UNCITED'}_{index}",
+                "tenant_id": tenant_id,
                 "index": index,
                 "rule_id": v.rule_id,
                 "clause_index": v.clause_index,
@@ -362,57 +396,73 @@ class ContractIntelligenceService:
         ]
 
         try:
-            # Delete-then-create in one statement per label. The delete runs on
-            # the row that reaches it, so an analysis that legitimately found
-            # nothing still clears the previous run's findings.
+            # **One statement.** Summary, findings and violations are replaced
+            # together or not at all.
+            #
+            # They used to be three `graph.query` calls, and every call is its
+            # own auto-commit transaction: a failure between them left the new
+            # score beside the new clauses and the *previous* run's violations,
+            # marked FAILED — a review that is not a review of anything. The
+            # score is written here rather than by the caller for exactly that
+            # reason.
+            #
+            # The deletes run on the row that reaches them, so an analysis that
+            # legitimately found nothing still clears the previous run.
             self.repository.graph.query(
                 """
                 MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
-                OPTIONAL MATCH (c)-[:HAS_FINDING]->(old:ClauseFinding)
-                DETACH DELETE old
+                SET c += $summary,
+                    c.intelligence_updated = datetime()
+                WITH c
+                OPTIONAL MATCH (c)-[:HAS_FINDING]->(old_finding:ClauseFinding)
+                DETACH DELETE old_finding
                 WITH DISTINCT c
-                UNWIND $findings AS f
-                CREATE (c)-[:HAS_FINDING]->(:ClauseFinding {
-                    finding_id: f.finding_id,
-                    tenant_id: $tenant_id,
-                    position: f.index,
-                    clause_type: f.clause_type,
-                    risk_level: f.risk_level,
-                    confidence_score: f.confidence_score,
-                    evidence_span: f.evidence_span,
-                    location: f.location,
-                    violated_policy: f.violated_policy,
-                    suggested_redline: f.suggested_redline,
-                    human_review_required: f.human_review_required,
-                    created_at: datetime()
-                })
-                """,
-                {"contract_id": contract_id, "tenant_id": tenant_id, "findings": findings},
-            )
-
-            self.repository.graph.query(
-                """
-                MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
-                OPTIONAL MATCH (c)-[:HAS_VIOLATION]->(old:PolicyViolation)
-                DETACH DELETE old
+                OPTIONAL MATCH (c)-[:HAS_VIOLATION]->(old_violation:PolicyViolation)
+                DETACH DELETE old_violation
                 WITH DISTINCT c
-                UNWIND $violations AS v
-                CREATE (c)-[:HAS_VIOLATION]->(:PolicyViolation {
-                    violation_id: v.violation_id,
-                    tenant_id: $tenant_id,
-                    position: v.index,
-                    rule_id: v.rule_id,
-                    clause_index: v.clause_index,
-                    section_reference: v.section_reference,
-                    clause_type: v.clause_type,
-                    issue: v.issue,
-                    severity: v.severity,
-                    suggested_fix: v.suggested_fix,
-                    clause_content: v.clause_content,
-                    created_at: datetime()
-                })
+                CALL (c) {
+                    UNWIND $findings AS f
+                    CREATE (c)-[:HAS_FINDING]->(:ClauseFinding {
+                        finding_id: f.finding_id,
+                        tenant_id: f.tenant_id,
+                        position: f.index,
+                        clause_type: f.clause_type,
+                        risk_level: f.risk_level,
+                        confidence_score: f.confidence_score,
+                        evidence_span: f.evidence_span,
+                        location: f.location,
+                        violated_policy: f.violated_policy,
+                        suggested_redline: f.suggested_redline,
+                        human_review_required: f.human_review_required,
+                        created_at: datetime()
+                    })
+                }
+                CALL (c) {
+                    UNWIND $violations AS v
+                    CREATE (c)-[:HAS_VIOLATION]->(:PolicyViolation {
+                        violation_id: v.violation_id,
+                        tenant_id: v.tenant_id,
+                        position: v.index,
+                        rule_id: v.rule_id,
+                        clause_index: v.clause_index,
+                        section_reference: v.section_reference,
+                        clause_type: v.clause_type,
+                        issue: v.issue,
+                        severity: v.severity,
+                        suggested_fix: v.suggested_fix,
+                        clause_content: v.clause_content,
+                        created_at: datetime()
+                    })
+                }
+                RETURN count(c) AS updated
                 """,
-                {"contract_id": contract_id, "tenant_id": tenant_id, "violations": violations},
+                {
+                    "contract_id": contract_id,
+                    "tenant_id": tenant_id,
+                    "summary": summary,
+                    "findings": findings,
+                    "violations": violations,
+                },
             )
 
             logger.info(
@@ -839,75 +889,26 @@ class ContractIntelligenceService:
             return False
 
         try:
-            # Update contract with intelligence data including CUAD fields
-            intelligence_data = {
-                "risk_score": intelligence.risk_assessment.overall_risk_score,
-                "risk_level": intelligence.risk_assessment.risk_level,
-                "violations_count": len(intelligence.violations),
-                "clauses_count": len(intelligence.clauses),
-                "redlines_count": len(intelligence.redlines),
-                "intelligence_status": "completed",
-                "processing_time": intelligence.processing_time,
-                # CUAD-specific fields
-                "cuad_analysis_status": "completed",
-                "deviation_count": len(intelligence.cuad_deviations),
-                "jurisdiction_detected": intelligence.jurisdiction_info.get("jurisdiction", "unknown"),
-                "industry_detected": intelligence.jurisdiction_info.get("industry", "general"),
-                "precedent_matches": len(intelligence.precedent_matches),
-                "semantic_analysis_enabled": True,
-                "cache_enabled": True,
-                "performance_optimized": True,
-                # The narrative half of the risk assessment. Only the score and
-                # the level were kept, so a reopened review showed "72/100 HIGH"
-                # with nothing to say why.
-                "critical_issues": list(intelligence.risk_assessment.critical_issues or []),
-                "risk_recommendations": list(intelligence.risk_assessment.recommendations or []),
-            }
-            
-            # Store in Neo4j with CUAD fields
-            query = """
-            MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
-            SET c.risk_score = $risk_score,
-                c.risk_level = $risk_level,
-                c.violations_count = $violations_count,
-                c.clauses_count = $clauses_count,
-                c.redlines_count = $redlines_count,
-                c.intelligence_status = $intelligence_status,
-                c.processing_time = $processing_time,
-                c.cuad_analysis_status = $cuad_analysis_status,
-                c.deviation_count = $deviation_count,
-                c.jurisdiction_detected = $jurisdiction_detected,
-                c.industry_detected = $industry_detected,
-                c.precedent_matches = $precedent_matches,
-                c.semantic_analysis_enabled = $semantic_analysis_enabled,
-                c.cache_enabled = $cache_enabled,
-                c.performance_optimized = $performance_optimized,
-                c.critical_issues = $critical_issues,
-                c.risk_recommendations = $risk_recommendations,
-                c.intelligence_updated = datetime()
-            RETURN c
-            """
-            
-            self.repository.graph.query(query, {
-                "contract_id": contract_id,
-                "tenant_id": tenant_id,
-                **intelligence_data
-            })
-
+            # The score, the findings and the violations in one statement, so a
+            # failure cannot leave a new score beside the previous run's
+            # violations. See `_store_clause_findings`.
             if not self._store_clause_findings(contract_id, tenant_id, intelligence):
-                # The findings are the review. Without them the version holds a
-                # score and nothing to justify it, which must not read as COMPLETE.
                 return False
 
+            # Redlines are separate on purpose: they carry human decisions and
+            # so have preserve-rather-than-replace semantics of their own. But a
+            # failure here still means the review on disk is not the review the
+            # caller was handed, so it counts against completion.
             if not self._store_redlines(
                 contract_id, tenant_id, intelligence.redlines,
                 replace=intelligence.redlines_generated,
             ):
                 return False
-            
-            # Store performance metrics
+
+            # Metrics are telemetry. Losing them does not make the review wrong,
+            # so they are the one thing here that cannot fail the save.
             self._store_performance_metrics(contract_id, tenant_id, intelligence)
-            
+
             logger.info(f"Stored intelligence results for contract: {contract_id}")
             return True
             

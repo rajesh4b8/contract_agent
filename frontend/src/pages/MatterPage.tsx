@@ -45,7 +45,12 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack, onOpe
 
   const [matter, setMatter] = useState<MatterDetail | null>(null);
   const [loading, setLoading] = useState(true);
+  // Failing to *load* the matter replaces the page; failing to *do* something
+  // to it must not. A rejected transition — a double-click, or a status that
+  // moved under you — used to write here and eject the reviewer to the "Back to
+  // matters" card, losing their place in the review they were reading.
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
 
   const [model, setModel] = useState<string>('');
@@ -139,11 +144,12 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack, onOpe
 
   const moveTo = useCallback(
     async (status: Parameters<typeof changeMatterStatus>[1]) => {
+      setActionError(null);
       try {
         await changeMatterStatus(matterRef, status);
         await refresh();
       } catch (e) {
-        setError(e instanceof Error ? e.message : 'Could not change the status');
+        setActionError(e instanceof Error ? e.message : 'Could not change the status');
       }
     },
     [matterRef, refresh],
@@ -236,6 +242,11 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack, onOpe
             </div>
           )}
 
+          {actionError && (
+            <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {actionError}
+            </div>
+          )}
           {uploadError && (
             <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700">
               {uploadError}

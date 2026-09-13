@@ -1225,16 +1225,16 @@ order. It is purely additive — it adds a label and a `Matter` and writes to no
 idempotent, so it is safe to re-run. A test asserts that no statement it issues contains `DELETE`,
 `REMOVE` or `Redline`. Dry-run against your database: **51 contracts** would be migrated.
 
-**Tests: 359 → 526**, all offline. The failure-case table above is walked row by row in
+**Tests: 359 → 541**, all offline. The failure-case table above is walked row by row in
 `backend/tests/test_matters.py::TestTheFailureCases`.
 
 | file | covers |
 |---|---|
-| `test_matters.py` (85) | the failure-case table, reference numbers, derived status and transitions, source hashing, the migration |
+| `test_matters.py` (87) | the failure-case table, reference numbers, derived status and transitions, source hashing, the migration |
 | `test_matters_api.py` (25) | the wire — 404 for an unknown *and* another tenant's reference, 409 on a double-clicked confirm, 422 on a derived status, 403 for a VIEWER |
-| `test_review_is_resumable.py` (22) | findings reach the graph, a failed analysis never erases a good review, the read-back shape |
+| `test_review_is_resumable.py` (24) | findings reach the graph, a failed analysis never erases a good review, the read-back shape |
 | `test_upload_paths.py` (23) | the four bugs, pinned by inspecting what the routes actually declare |
-| `test_frontend_navigation.py` (12) | static checks that a review has a URL and the list comes from the server |
+| `test_frontend_navigation.py` (23) | static checks that a review has a URL, the list comes from the server, and a background analysis lands without a refresh |
 
 **Also verified against the live stack** (a throwaway tenant, since removed): every statement this
 increment introduces, the full new-contract → confirm → analyse → decide → re-analyse flow, the
@@ -1301,6 +1301,62 @@ Nothing is discarded — every copy keeps its own redline decisions under its ow
 
 Tests: **504 → 526.**
 
+### Second review round (Copilot, PR #8)
+
+The re-review found nine more, and they were right about all of them. Four were about the same
+thing again — **a guarantee that is not enforced where the write happens is not a guarantee**:
+
+- **The review was persisted across three separate transactions.** Every `graph.query` call
+  auto-commits, so a failure between the summary write, the findings and the violations left the new
+  score beside the new clauses and the *previous* run's violations — marked FAILED, and not a review
+  of anything. All three are now one statement. Verified by killing the write mid-flight against a
+  live database: the previous review comes back whole, score and clauses and violations together.
+- **`COMPLETE` was claimed when redline storage failed.** `_store_redlines` caught every write
+  exception and returned normally, so the response promised drafted language that reopening the
+  matter would not show. It reports failure now, and the version is marked FAILED.
+- **Two confirmations of one document could each create a matter.** The unfiled check and the
+  `CREATE` were both reads, and nothing in the schema limits a version to one incoming
+  `HAS_VERSION`. The version is now write-locked before the ownership check, so the loser resumes
+  after the winner commits and sees the relationship. Verified: four concurrent confirmations, one
+  winner, one `HAS_VERSION` edge.
+- **A refused attach burned a version number.** The matter's counter was incremented before the
+  ownership check, so a rejected round left a gap — "version 1, version 3". The counter now moves
+  only on rows that pass. Verified: four concurrent rounds produce 2, 3, 4, 5.
+
+The migration took three more:
+
+- **A run that died part-way split one document across two references.** Everything before the
+  failure had committed, so a retry grouped the unattached remainder and made it a *second* matter.
+  It now recovers the matter a previous run created and attaches only what is missing.
+- **Every textless legacy contract hashed the empty string**, so a tenant's documents with no
+  `full_text` and no `summary` would have arrived as versions of one matter — grouping on the
+  absence of evidence. They get an identity of their own.
+- The scan comment now says *why* `pending_migration` exists, since that is the only thing making
+  the two exclusions correct rather than contradictory.
+
+And the upload path had one more destination bug:
+
+- **An unfiled duplicate ignored `matter_ref`.** Uploading a round whose bytes already exist as an
+  unfiled version returned the new-contract confirmation flow, so the matter page closed the
+  uploader and no version ever appeared. The destination the reviewer asked for is honoured.
+
+Four on the frontend:
+
+- **A 200 was taken as proof of persistence.** The server answers with the in-memory results and a
+  warning while marking the version FAILED when saving fails, so the panel claimed a review the
+  server knew it did not have. It re-reads the stored status instead of assuming.
+- **A rejected status transition ejected the reviewer from the matter**, because it wrote into the
+  same state as "could not load this matter" and the render guard replaced the whole page. Action
+  errors are separate and render inline.
+- **Refreshing after *Load more* truncated back to the first page**, so one row starting an analysis
+  made the extra pages vanish ten seconds later. A refresh re-requests the loaded range.
+- **The cache cleanup could stop the app mounting.** If `getItem` threw because storage is disabled,
+  the `catch` called `removeItem`, which throws for the same reason, and the exception escaped the
+  provider — taking the whole app down for the sake of a cache.
+
+Tests: **526 → 541**, plus 21 checks against a live Neo4j covering the concurrency and atomicity
+claims with real threads and a deliberately failed write.
+
 ### One thing this increment could not finish
 
 `frontend/src/services/enhancedSearchApi.ts:1` is fixed (bug #2), but **that was not the only thing
@@ -1325,7 +1381,7 @@ worked. Everything new type-checks clean and lints clean.
 make test
 ```
 
-526 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
+541 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
 
 Then, with the stack up (`make run`):
 

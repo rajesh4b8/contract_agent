@@ -224,9 +224,14 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       // Report analysis completion with full results
       if (data.results?.risk_assessment) {
         lastNotified.current = 'COMPLETE';
-        setStoredStatus('COMPLETE');
         onAnalysisComplete?.(contractId, data.results.risk_assessment.overall_risk_score, data.results.risk_assessment.risk_level, data.results);
       }
+
+      // A 200 is not proof it was saved. The server answers with the in-memory
+      // results and a warning while marking the version FAILED when persistence
+      // fails, so assuming COMPLETE here would leave this panel claiming a
+      // review the server knows it does not have. Ask it.
+      void loadStored({ quiet: true });
       
       // Final workflow status update
       setTimeout(async () => {

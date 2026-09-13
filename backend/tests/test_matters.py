@@ -496,8 +496,9 @@ class TestMigratingContractsThatPredateMatters:
     ]
 
     #: What one single-version group costs, in order: mark pending, record the
-    #: version, the unfiled check, the counter, the CREATE, clear pending.
-    ONE_GROUP = ([], [{"version_id": "x"}], [{"version_id": "x"}], [{"n": 1}],
+    #: version, the resume check (nothing found), the unfiled check, the
+    #: counter, the CREATE, clear pending.
+    ONE_GROUP = ([], [{"version_id": "x"}], [], [{"version_id": "x"}], [{"n": 1}],
                  [{"matter_ref": "MSA-2026-0001"}], [])
 
     def test_it_never_writes_to_a_redline(self):
@@ -569,14 +570,54 @@ class TestMigratingContractsThatPredateMatters:
 
         assert planned["source_sha256"] == source_sha256("Payment within ninety (90) days.")
 
+    def test_a_run_that_died_part_way_does_not_split_one_document_in_two(self):
+        """Every step before a failure has already committed.
+
+        If the matter was created and attaching a later copy failed, a retry
+        that simply created another matter would put one document under two
+        reference numbers.
+        """
+        repository = repo(
+            self.LEGACY,
+            [],                                    # mark pending
+            [{"version_id": "x"}],                 # record_version
+            [{"matter_ref": "MSA-2026-0001"}],     # a previous run already made it
+            [{"matter_ref": "MSA-2026-0001", "n": 1}],  # matter_for_version: filed
+            [],                                    # clear pending
+        )
+
+        result = repository.migrate_legacy_contracts()
+
+        assert result["created"][0]["matter_ref"] == "MSA-2026-0001"
+        assert result["created"][0]["resumed"] is True
+        assert not any("CREATE (m:Matter" in s for s in repository.graph.statements), (
+            "a second matter was created for a document that already had one"
+        )
+
+    def test_a_textless_legacy_contract_is_not_grouped_with_other_textless_ones(self):
+        """Hashing "" would group on the absence of evidence.
+
+        Every legacy row with no `full_text` and no `summary` hashes the empty
+        string, so a pile of unrelated documents would arrive as versions of one
+        matter.
+        """
+        blank = [
+            {**self.LEGACY[0], "version_id": "UPLOADED_X", "full_text": "", "summary": ""},
+            {**self.LEGACY[0], "version_id": "UPLOADED_Y", "full_text": None, "summary": None},
+        ]
+        repository = repo(blank)
+
+        planned = repository.migrate_legacy_contracts(dry_run=True)["planned"]
+
+        assert len(planned) == 2, "unrelated textless contracts were merged"
+
     def test_one_bad_document_does_not_stop_the_rest(self):
         repository = repo(
             self.LEGACY + [{**self.LEGACY[0], "version_id": "UPLOADED_BBB_20260802",
                             "full_text": "A different contract entirely."}],
             [],                                   # mark pending (first)
             RuntimeError("node is locked"),       # record_version blows up
-            [], [{"version_id": "x"}], [{"version_id": "x"}], [{"n": 1}],
-            [{"matter_ref": "MSA-2026-0001"}], [],
+            *self.ONE_GROUP,                      # the second one goes through
         )
 
         result = repository.migrate_legacy_contracts()

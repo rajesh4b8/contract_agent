@@ -319,6 +319,18 @@ class MatterRepository:
         rows = self.graph.query(
             """
             MATCH (v:ContractVersion {version_id: $version_id, tenant_id: $tenant_id})
+            // Take the write lock on the version *before* asking whether it is
+            // already filed. Without this the check above and this one are both
+            // reads: two confirmations of the same document could each see it
+            // unfiled, and each create a matter pointing at it — two references
+            // for one contract, and no constraint to stop it, since nothing
+            // limits a version to one incoming HAS_VERSION.
+            //
+            // A transaction that blocks here resumes *after* the winner
+            // commits, and the predicate below is evaluated at that point, so
+            // it sees the relationship and yields no rows.
+            SET v.filing_attempts = coalesce(v.filing_attempts, 0) + 1
+            WITH v
             WHERE NOT (:Matter)-[:HAS_VERSION]->(v)
             CREATE (m:Matter {
                 matter_ref: $matter_ref,
@@ -377,7 +389,15 @@ class MatterRepository:
             MATCH (m:Matter {matter_ref: $matter_ref, tenant_id: $tenant_id})
             WHERE m.status <> $closed
             MATCH (v:ContractVersion {version_id: $version_id, tenant_id: $tenant_id})
-            WHERE NOT (m)-[:HAS_VERSION]->(v)
+            // The version's lock first, so the ownership check below is made
+            // under it — same reason as `create_matter`. A version belongs to
+            // exactly one matter, and nothing in the schema enforces that.
+            SET v.filing_attempts = coalesce(v.filing_attempts, 0) + 1
+            WITH m, v
+            WHERE NOT (:Matter)-[:HAS_VERSION]->(v)
+            // Only now the matter's counter, so a refused attach leaves no gap
+            // in the version numbers. Concurrent rounds serialise on this SET
+            // and get 2 and 3 rather than both getting 2.
             SET m.version_count = coalesce(m.version_count, 0) + 1,
                 m.updated_at = datetime(),
                 m.status = CASE WHEN m.status = $awaiting THEN $draft ELSE m.status END
@@ -599,6 +619,11 @@ class MatterRepository:
             MATCH (c:Contract)
             WHERE ($tenant_id IS NULL OR c.tenant_id = $tenant_id)
               AND NOT (:Matter)-[:HAS_VERSION]->(c)
+              // Already a version and not filed means one of two things: a
+              // confirmation card the reviewer has not answered — auto-filing
+              // that would burn a reference on a decision they never made — or
+              // this migration's own interrupted work, which `pending_migration`
+              // marks so a retry picks it up.
               AND (NOT c:ContractVersion OR c.pending_migration = true)
               // The losing half of a duplicate race. Filing it would put back
               // the duplicate the constraint refused.
@@ -624,7 +649,16 @@ class MatterRepository:
             # The stored text is what the analysis has always read, so it is the
             # right thing to hash: a re-upload of the same PDF then matches the
             # migrated version rather than forking a second one.
-            digest = source_sha256(row.get("full_text") or row.get("summary") or "")
+            text = row.get("full_text") or row.get("summary") or ""
+            if text.strip():
+                digest = source_sha256(text)
+            else:
+                # No source at all. Hashing "" would make every textless legacy
+                # contract in a tenant hash the same and collapse a pile of
+                # unrelated documents into one matter — grouping on the absence
+                # of evidence. They get an identity of their own instead, and no
+                # `source_key`, so they never match a future upload either.
+                digest = f"no-source:{row['version_id']}"
             groups.setdefault((contract_tenant, digest), []).append(row)
 
         planned: List[Dict[str, Any]] = []
@@ -649,35 +683,56 @@ class MatterRepository:
         versions = 0
         for item in planned:
             version_ids = item["version_ids"]
+            tenant = item["tenant_id"]
             try:
                 for version_id in version_ids:
-                    self._mark_pending_migration(item["tenant_id"], version_id)
+                    self._mark_pending_migration(tenant, version_id)
                     self.record_version(
-                        item["tenant_id"], version_id,
+                        tenant, version_id,
                         source_sha256=item["source_sha256"], filename=version_id,
                         # Repeat uploads of one document share a hash by
                         # definition, so they cannot all claim the unique key.
                         claim_source=False,
                     )
 
-                result = self.create_matter(
-                    item["tenant_id"], version_ids[0],
-                    title=item["title"],
-                    counterparty=item["counterparty"],
-                    contract_type=item["contract_type"],
-                )
-                versions += 1
+                # A previous run may have created the matter and then died
+                # part-way through attaching the rest of the group. Every step
+                # before the failure has committed — `graph.query` is one
+                # transaction per call — so a retry that just created a second
+                # matter would split one document across two references.
+                # Recover the existing one and attach only what is missing.
+                matter_ref = self._matter_holding_any(tenant, version_ids)
+                resumed = matter_ref is not None
+
+                if matter_ref is None:
+                    result = self.create_matter(
+                        tenant, version_ids[0],
+                        title=item["title"],
+                        counterparty=item["counterparty"],
+                        contract_type=item["contract_type"],
+                    )
+                    matter_ref = result["matter_ref"]
+                    versions += 1
+                    remaining = version_ids[1:]
+                else:
+                    logger.info(
+                        f"Resuming migration of {matter_ref}: it already holds part "
+                        f"of this document"
+                    )
+                    remaining = [v for v in version_ids
+                                 if self.matter_for_version(tenant, v) is None]
 
                 # The remaining copies become later rounds of the same matter.
                 # Each keeps its own redline decisions under its own number.
-                for version_id in version_ids[1:]:
-                    self.attach_version(item["tenant_id"], result["matter_ref"], version_id)
+                for version_id in remaining:
+                    self.attach_version(tenant, matter_ref, version_id)
                     versions += 1
 
                 for version_id in version_ids:
-                    self._clear_pending_migration(item["tenant_id"], version_id)
+                    self._clear_pending_migration(tenant, version_id)
 
-                created.append({**result, "versions": len(version_ids)})
+                created.append({"matter_ref": matter_ref, "n": 1,
+                                "versions": len(version_ids), "resumed": resumed})
             except Exception as e:
                 # One bad document must not stop the rest from migrating.
                 logger.error(f"Could not migrate {version_ids[0]}: {e}")
@@ -685,6 +740,19 @@ class MatterRepository:
 
         return {"migrated": len(created), "versions": versions, "created": created,
                 "failed": failed, "dry_run": False}
+
+    def _matter_holding_any(self, tenant_id: str, version_ids: List[str]) -> Optional[str]:
+        """The matter a previous, interrupted run already made for this document."""
+        rows = self.graph.query(
+            """
+            MATCH (m:Matter {tenant_id: $tenant_id})-[:HAS_VERSION]->(v:ContractVersion)
+            WHERE v.version_id IN $version_ids
+            RETURN m.matter_ref AS matter_ref
+            LIMIT 1
+            """,
+            {"tenant_id": tenant_id, "version_ids": version_ids},
+        )
+        return rows[0]["matter_ref"] if rows else None
 
     def _mark_pending_migration(self, tenant_id: str, version_id: str) -> None:
         """Claim a contract for the migration before labelling it.
