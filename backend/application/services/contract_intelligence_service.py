@@ -3,6 +3,8 @@ from backend.domain.entities import ContractIntelligence, ContractClause, Policy
 from backend.infrastructure.contract_repository import Neo4jContractRepository
 from backend.llm_manager import LLMManager
 from backend.shared.errors import LLMProviderError, raise_if_provider_error
+from backend.shared.debug import atrace_step, note, trace_step
+import asyncio
 import json
 import logging
 import time
@@ -87,8 +89,10 @@ class ContractIntelligenceService:
         
         try:
             # Get contract text from database
-            contract_data = await self.repository.get_contract_by_id(contract_id, tenant_id)
-            
+            async with atrace_step("analysis", "load_contract", contract_id=contract_id) as step:
+                contract_data = await self.repository.get_contract_by_id(contract_id, tenant_id)
+                step.set(found=bool(contract_data))
+
             if not contract_data:
                 logger.error(f"Contract not found: {contract_id}")
                 return None
@@ -106,16 +110,42 @@ class ContractIntelligenceService:
                 logger.error(f"Contract data keys: {list(contract_data.keys())}")
                 return None
             
-            # Perform analysis with optional planning
-            intelligence = self.analyze_contract_intelligence(
+            # Perform analysis with optional planning.
+            #
+            # On a worker thread, because this is a minute of synchronous work —
+            # three sequential model calls — reached from a coroutine. Run
+            # in-line it blocks the event loop for its whole duration, and while
+            # it is blocked the server answers nothing at all: not the debug
+            # stream, not the 500ms `/api/workflow/status` poll this very page
+            # is making, not another user's request. Measured before this
+            # change: a trivial `/api/debug/status` call took 6.4s to answer
+            # because it waited for the analysis to finish.
+            #
+            # `to_thread` copies the context, so the correlation id still
+            # reaches the analysis and its debug events.
+            intelligence = await asyncio.to_thread(
+                self.analyze_contract_intelligence,
                 contract_text, model, use_planning,
-                tenant_id=tenant_id,
-                contract_type=contract_data.get("contract_type") or "general",
+                tenant_id,
+                contract_data.get("contract_type") or "general",
             )
-            
+
             # Store intelligence results back to database
-            self._store_intelligence_results(contract_id, tenant_id, intelligence)
-            
+            with trace_step("analysis", "store_results", contract_id=contract_id) as step:
+                self._store_intelligence_results(contract_id, tenant_id, intelligence)
+                step.set(
+                    clauses=len(intelligence.clauses or []),
+                    violations=len(intelligence.violations or []),
+                )
+
+            note(
+                "analysis",
+                "completed",
+                contract_id=contract_id,
+                clauses=len(intelligence.clauses or []),
+                violations=len(intelligence.violations or []),
+                processing_s=round(intelligence.processing_time or 0, 2),
+            )
             return intelligence
             
         except Exception as e:
@@ -210,9 +240,18 @@ class ContractIntelligenceService:
             )
 
             logger.info(f"Stored {len(redlines)} redlines for contract {contract_id}")
+            note("analysis", "store_redlines", contract_id=contract_id, redlines=len(redlines))
         except Exception as e:
             # Non-fatal: the analysis itself succeeded and is already saved.
             logger.error(f"Failed to store redlines for {contract_id}: {e}")
+            note(
+                "analysis",
+                "store_redlines",
+                "error",
+                contract_id=contract_id,
+                error_type=type(e).__name__,
+                error=str(e),
+            )
 
     def get_redlines(self, contract_id: str, tenant_id: str = "default-tenant") -> list:
         """Read back the stored redlines for a contract."""

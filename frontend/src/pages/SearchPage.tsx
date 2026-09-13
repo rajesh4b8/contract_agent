@@ -2,6 +2,8 @@ import React, { useState, useCallback } from 'react';
 import { EnhancedSearchInterface, EnhancedSearchParams } from '../components/features/search/EnhancedSearchInterface';
 import { EnhancedSearchResults } from '../components/features/search/EnhancedSearchResults';
 import { enhancedSearchApi, EnhancedSearchResponse } from '../services/enhancedSearchApi';
+import { DebugEventPanel } from '../components/features/debug/DebugEventPanel';
+import { useDebugEnabled } from '../services/debugApi';
 
 interface SearchState {
   results: EnhancedSearchResponse | null;
@@ -10,6 +12,7 @@ interface SearchState {
 }
 
 export const SearchPage: React.FC = () => {
+  const debugEnabled = useDebugEnabled();
   const [searchState, setSearchState] = useState<SearchState>({
     results: null,
     isLoading: false,
@@ -74,6 +77,9 @@ export const SearchPage: React.FC = () => {
           searchLevel={lastSearchParams.searchLevel}
         />
       )}
+
+      {/* A semantic query embeds first, so this page has its own slow step. */}
+      {debugEnabled && <DebugEventPanel />}
     </div>
   );
 };

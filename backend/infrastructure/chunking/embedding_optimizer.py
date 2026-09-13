@@ -1,9 +1,12 @@
 """Embedding optimization using Template Method and Decorator patterns."""
 
 import asyncio
+import threading
 from typing import List, Dict, Any, Tuple
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+
+from backend.shared.debug import note, trace_step
 
 
 @dataclass
@@ -264,6 +267,19 @@ class ChunkSizeValidator(EmbeddingOptimizer):
         return sorted(chunks, key=lambda x: x.token_count)
 
 
+class _Counter:
+    """Thread-safe tally of embedded chunks, for progress reporting only."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._value = 0
+
+    def next(self) -> int:
+        with self._lock:
+            self._value += 1
+            return self._value
+
+
 class BatchProcessor:
     """Optimizes embedding generation with batch processing."""
     
@@ -280,21 +296,34 @@ class BatchProcessor:
         # Process batches with concurrency control
         results = []
         semaphore = asyncio.Semaphore(self.max_concurrent)
-        
+
+        # This loop is one network call per chunk plus a rate-limit sleep between
+        # each, so on a real contract it is the longest silent stretch of an
+        # upload. `done` is reported as chunks land so the debug panel shows
+        # progress rather than a stalled step.
+        done = _Counter()
+
         async def process_batch(batch):
             async with semaphore:
-                return await self._process_single_batch(batch, embedding_service)
-        
-        # Process all batches
-        batch_tasks = [process_batch(batch) for batch in batches]
-        batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
-        
-        # Flatten results
-        for batch_result in batch_results:
-            if isinstance(batch_result, Exception):
-                continue
-            results.extend(batch_result)
-        
+                return await self._process_single_batch(
+                    batch, embedding_service, done, len(chunks)
+                )
+
+        with trace_step("upload", "chunking.embed", chunks=len(chunks), batches=len(batches)) as step:
+            # Process all batches
+            batch_tasks = [process_batch(batch) for batch in batches]
+            batch_results = await asyncio.gather(*batch_tasks, return_exceptions=True)
+
+            # Flatten results
+            failed_batches = 0
+            for batch_result in batch_results:
+                if isinstance(batch_result, Exception):
+                    failed_batches += 1
+                    continue
+                results.extend(batch_result)
+
+            step.set(embedded=len(results), failed_batches=failed_batches)
+
         return results
     
     def _create_batches(self, chunks: List[OptimizedChunk]) -> List[List[OptimizedChunk]]:
@@ -322,11 +351,12 @@ class BatchProcessor:
         
         return batches
     
-    async def _process_single_batch(self, batch: List[OptimizedChunk], 
-                                  embedding_service) -> List[Tuple[OptimizedChunk, List[float]]]:
+    async def _process_single_batch(self, batch: List[OptimizedChunk],
+                                  embedding_service, done=None,
+                                  total=None) -> List[Tuple[OptimizedChunk, List[float]]]:
         """Process a single batch of chunks."""
         results = []
-        
+
         for chunk in batch:
             try:
                 gen_async = getattr(embedding_service, "generate_embedding_async", None)
@@ -337,13 +367,16 @@ class BatchProcessor:
                         embedding_service.generate_embedding, chunk.content
                     )
                 results.append((chunk, embedding))
-                
+                if done is not None:
+                    note("upload", "chunking.embed.progress", done=done.next(), total=total)
+
                 # Small delay to avoid rate limits
                 await asyncio.sleep(0.1)
-                
+
             except Exception as e:
                 # Log error but continue processing
                 print(f"Failed to generate embedding for chunk: {e}")
+                note("upload", "chunking.embed.failed", error_type=type(e).__name__, error=str(e))
                 results.append((chunk, []))
         
         return results

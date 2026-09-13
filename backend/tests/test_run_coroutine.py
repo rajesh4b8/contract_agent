@@ -21,8 +21,15 @@ def test_runs_when_no_loop_is_active():
 
 
 async def test_runs_when_called_from_inside_a_running_loop():
-    """The server case: a sync callee reached from async code."""
-    assert await asyncio.to_thread(lambda: run_coroutine(_answer())) == 42
+    """The server case: a sync callee reached from async code.
+
+    Called directly from the loop's own thread, so `get_running_loop` succeeds
+    and the executor branch is the one under test. Going through
+    `asyncio.to_thread` would put the call in a worker with no running loop,
+    which takes the plain `asyncio.run` path instead — passing without ever
+    touching the code this is meant to cover.
+    """
+    assert run_coroutine(_answer()) == 42
 
 
 def test_exceptions_propagate():
@@ -35,3 +42,28 @@ def test_exceptions_propagate():
         assert "inner failure" in str(e)
     else:
         raise AssertionError("exception should propagate to the caller")
+
+
+async def test_the_correlation_id_survives_the_thread_hop():
+    """`ThreadPoolExecutor.submit` drops contextvars unless the context is copied.
+
+    Everything the analysis does runs behind this hop, so without the copy the
+    request's correlation id is absent from its logs and its debug events — the
+    two places you go looking when an analysis takes two minutes.
+    """
+    from backend.shared.utils.logger import correlation_id_var
+
+    async def read_it():
+        return correlation_id_var.get()
+
+    token = correlation_id_var.set("run-abc")
+    try:
+        # Directly, not via `asyncio.to_thread`: this has to be the executor
+        # branch. `to_thread` propagates the context itself and leaves no
+        # running loop in the worker, so the test would pass either way and
+        # pin nothing.
+        seen = run_coroutine(read_it())
+    finally:
+        correlation_id_var.reset(token)
+
+    assert seen == "run-abc"

@@ -19,6 +19,7 @@ import json
 import logging
 from typing import Optional
 
+from backend.shared.debug import note as debug_note, trace_step
 from backend.shared.utils.logger import get_logger
 logger = get_logger(__name__)
 
@@ -50,7 +51,15 @@ async def analyze_contract_intelligence(
     
     try:
         logger.info(f"Starting intelligence analysis for contract: {contract_id}")
-        
+        debug_note(
+            "analysis",
+            "requested",
+            contract_id=contract_id,
+            model=model,
+            use_planning=use_planning,
+            tenant=tenant_id,
+        )
+
         # Create service with injected agent manager
         intelligence_service = ContractIntelligenceServiceFactory.create_service(llm_mgr)
         
@@ -351,14 +360,23 @@ async def decide_redline(
     service = ContractIntelligenceServiceFactory.create_service(llm_mgr)
 
     try:
-        return service.record_redline_decision(
-            redline_id,
-            tenant_id,
-            request.decision,
-            edited_text=request.edited_text,
-            note=request.note,
-            decided_by=role.value,
-        )
+        with trace_step(
+            "redline",
+            "decision",
+            redline_id=redline_id,
+            decision=getattr(request.decision, "value", str(request.decision)),
+            by=role.value,
+        ) as step:
+            result = service.record_redline_decision(
+                redline_id,
+                tenant_id,
+                request.decision,
+                edited_text=request.edited_text,
+                note=request.note,
+                decided_by=role.value,
+            )
+            step.set(previous_status=result.get("previous_status"))
+            return result
     except LookupError:
         # Also the answer for another tenant's redline: reporting 403 would
         # confirm that it exists.

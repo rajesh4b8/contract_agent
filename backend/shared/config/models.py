@@ -243,6 +243,22 @@ def configured_model_ids() -> list[str]:
     return [m.id for m in MODEL_OPTIONS if provider_configured(m.provider)]
 
 
+def _debug_callbacks(option: ModelOption) -> list | None:
+    """The debug panel's LLM callback, or ``None`` when debug is off.
+
+    Returning ``None`` rather than ``[]`` keeps the model's own default callback
+    handling untouched in the normal case.
+    """
+    from backend.shared.debug.events import debug_events_enabled
+
+    if not debug_events_enabled():
+        return None
+
+    from backend.shared.debug.llm_callback import DebugLLMCallback
+
+    return [DebugLLMCallback(option.id, option.provider)]
+
+
 def build_llm(model_id: str | None, *, temperature: float = 0):
     """Construct the raw LangChain chat model for a public model id.
 
@@ -252,23 +268,27 @@ def build_llm(model_id: str | None, *, temperature: float = 0):
     """
     option = get_model(model_id)
     name = option.backend_model
+    # This is the only place a chat model is built, so the debug panel gets every
+    # model call in the app from this one line — including the provider SDK's own
+    # retry backoff, which otherwise reads as a single unexplained stall.
+    cb = _debug_callbacks(option)
 
     if option.provider == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        return ChatGoogleGenerativeAI(model=name, temperature=temperature)
+        return ChatGoogleGenerativeAI(model=name, temperature=temperature, callbacks=cb)
     if option.provider == "openai":
         from langchain_openai import ChatOpenAI
 
-        return ChatOpenAI(model=name, temperature=temperature)
+        return ChatOpenAI(model=name, temperature=temperature, callbacks=cb)
     if option.provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        return ChatAnthropic(model=name, temperature=temperature)
+        return ChatAnthropic(model=name, temperature=temperature, callbacks=cb)
     if option.provider == "mistral":
         from langchain_mistralai import ChatMistralAI
 
-        return ChatMistralAI(model=name)
+        return ChatMistralAI(model=name, callbacks=cb)
     if option.provider == "openrouter":
         # OpenRouter speaks the OpenAI wire protocol, so the OpenAI client works
         # against it with a different base URL and key.
@@ -283,6 +303,7 @@ def build_llm(model_id: str | None, *, temperature: float = 0):
         return ChatOpenAI(
             model=name,
             temperature=temperature,
+            callbacks=cb,
             base_url=_env("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
             api_key=api_key,
             # Shared free tiers return transient upstream 429s far more often

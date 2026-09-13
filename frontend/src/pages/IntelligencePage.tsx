@@ -6,6 +6,8 @@ import { Card } from '../components/shared/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/shared/ui/select';
 import { useContractHistory } from '../contexts/ContractHistoryContext';
 import { useModels } from '../services/modelsApi';
+import { DebugEventPanel } from '../components/features/debug/DebugEventPanel';
+import { useDebugEnabled } from '../services/debugApi';
 
 interface UploadResult {
   filename: string;
@@ -17,6 +19,8 @@ interface UploadResult {
 
 export const IntelligencePage: React.FC = () => {
   const { models, defaultModel } = useModels();
+  // Set by DEBUG_EVENTS in .env — the backend owns the switch.
+  const debugEnabled = useDebugEnabled();
   const [selectedModel, setSelectedModel] = useState(defaultModel);
 
   // Adopt the backend default once the catalogue loads, unless the user already picked.
@@ -221,6 +225,10 @@ export const IntelligencePage: React.FC = () => {
           </div>
         </Card>
       </div>
+
+      {/* Pipeline debug — full width, because a timeline does not fit in the
+          upload column. Rendered only when the backend reports debug on. */}
+      {debugEnabled && <DebugEventPanel />}
     </div>
   );
 };

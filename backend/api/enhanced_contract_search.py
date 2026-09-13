@@ -6,6 +6,7 @@ from backend.domain.search_entities import SearchLevel, SearchParams
 from backend.application.services.enhanced_search_service import EnhancedSearchService
 from backend.shared.utils.search_mapper import SearchResponseMapper
 from backend.shared.errors import raise_if_provider_error
+from backend.shared.debug import trace_step
 import logging
 
 from backend.shared.utils.logger import get_logger
@@ -75,8 +76,16 @@ async def enhanced_contract_search(request: EnhancedSearchRequest):
             max_end_date=request.max_end_date
         )
         
-        # Execute search using service
-        result = search_service.search(search_params)
+        # Execute search using service. A semantic query is embedded first, so
+        # this covers a network round trip as well as the graph scan.
+        with trace_step(
+            "search",
+            "enhanced",
+            level=getattr(request.search_level, "value", str(request.search_level)),
+            query_chars=len(request.query or ""),
+        ) as step:
+            result = search_service.search(search_params)
+            step.set(results=result.total_count, items=len(result.items))
         
         logger.info(f"Raw Search Result:")
         logger.info(f"  Total Count: {result.total_count}")

@@ -13,6 +13,7 @@ from backend.infrastructure.playbook_loader import (
     load_rules_for_tenant,
 )
 from backend.shared.errors import describe_llm_error, raise_if_provider_error
+from backend.shared.debug import note, trace_step
 import json
 import logging
 
@@ -26,17 +27,25 @@ def run_coroutine(coro):
     so a bare ``asyncio.run`` raises "cannot be called from a running event
     loop". That failure killed the whole analysis — clauses included — whenever a
     contract was complex enough for a pattern to be selected.
+
+    The context is copied across because ``ThreadPoolExecutor.submit`` does not
+    carry ``contextvars`` into the worker. Without this the request's correlation
+    id is lost for everything that runs inside, so the analysis's log lines — and
+    the debug panel's events — arrive unattributed and cannot be tied back to the
+    request that caused them.
     """
     import asyncio
     import concurrent.futures
+    import contextvars
 
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
 
+    context = contextvars.copy_context()
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        return executor.submit(asyncio.run, coro).result()
+        return executor.submit(context.run, asyncio.run, coro).result()
 
 
 def _stage_warnings(state: dict) -> list:
@@ -67,21 +76,44 @@ class IntelligenceOrchestrator:
         self.planning_agent = PlanningAgentFactory.create_planning_agent()
         self.execution_engine = PlanExecutionEngine(llm, model_id)
     
+    @staticmethod
+    def _traced(name: str, node):
+        """Report a graph node's timing to the debug panel.
+
+        Wrapping at registration keeps the instrumentation in one place rather
+        than threading a context manager through six node bodies that each
+        handle their own failures differently.
+        """
+        def run(state: IntelligenceState) -> IntelligenceState:
+            with trace_step("analysis", name) as step:
+                result = node(state)
+                if isinstance(result, dict):
+                    # Keys from IntelligenceState. `.get` rather than indexing:
+                    # each node only writes the slice it owns.
+                    step.set(
+                        clauses=len(result.get("extracted_clauses") or []),
+                        violations=len(result.get("policy_violations") or []),
+                        redlines=len(result.get("redline_suggestions") or []),
+                    )
+                return result
+
+        return run
+
     def _build_workflow(self) -> StateGraph:
         """Build workflow with proper state management"""
         
         workflow = StateGraph(IntelligenceState)
         
         # Add nodes with descriptive names (no conflicts)
-        workflow.add_node("clause_extraction", self._extract_clauses)
-        workflow.add_node("pattern_analysis", self._pattern_analysis)  # NEW: Pattern integration
-        workflow.add_node("policy_checking", self._check_policies)
-        workflow.add_node("risk_calculation", self._calculate_risks)
+        workflow.add_node("clause_extraction", self._traced("clause_extraction", self._extract_clauses))
+        workflow.add_node("pattern_analysis", self._traced("pattern_analysis", self._pattern_analysis))  # NEW: Pattern integration
+        workflow.add_node("policy_checking", self._traced("policy_checking", self._check_policies))
+        workflow.add_node("risk_calculation", self._traced("risk_calculation", self._calculate_risks))
         
         # NEW: CUAD mitigation step (Phase 1)
-        workflow.add_node("cuad_mitigation", self._cuad_mitigation)
+        workflow.add_node("cuad_mitigation", self._traced("cuad_mitigation", self._cuad_mitigation))
         
-        workflow.add_node("redline_generation", self._generate_redlines)
+        workflow.add_node("redline_generation", self._traced("redline_generation", self._generate_redlines))
         
         # Define workflow with pattern and CUAD steps
         workflow.set_entry_point("clause_extraction")
@@ -466,6 +498,14 @@ class IntelligenceOrchestrator:
                          tenant_id: str = "default-tenant",
                          contract_type: str = "general") -> dict:
         """Run analysis with optional autonomous planning"""
+        note(
+            "analysis",
+            "started",
+            path="planning" if use_planning else "traditional",
+            chars=len(contract_text),
+            model=self.model_id,
+            tenant=tenant_id,
+        )
         try:
             if use_planning:
                 try:
@@ -476,8 +516,16 @@ class IntelligenceOrchestrator:
                         loop = asyncio.get_running_loop()
                         # If we're in an event loop, create a task
                         import concurrent.futures
+                        import contextvars
+
+                        # copy_context, because submit() does not carry
+                        # contextvars into the worker — without it the whole
+                        # analysis runs with no correlation id, so its logs and
+                        # its debug events cannot be tied to the request.
+                        context = contextvars.copy_context()
                         with concurrent.futures.ThreadPoolExecutor() as executor:
                             future = executor.submit(
+                                context.run,
                                 asyncio.run,
                                 self._analyze_with_planning(contract_text, tenant_id, contract_type),
                             )
@@ -494,6 +542,12 @@ class IntelligenceOrchestrator:
                     # the fallback and go straight back to the caller.
                     raise_if_provider_error(planning_error, self.model_id)
                     logger.error(f"Planning agent failed: {planning_error}, falling back to traditional workflow")
+                    note(
+                        "analysis",
+                        "planning_fallback",
+                        error_type=type(planning_error).__name__,
+                        error=str(planning_error),
+                    )
                     return self._analyze_traditional(contract_text, tenant_id, contract_type)
             else:
                 return self._analyze_traditional(contract_text, tenant_id, contract_type)

@@ -4,7 +4,9 @@
 Run `make test`, then `make eval` with the stack up and the playbook seeded.
 
 Also awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
-(out-of-increment bug fix, from your report of an unexplained "processing error").
+(out-of-increment bug fix, from your report of an unexplained "processing error") and
+**[Debug — a live timeline of what the pipeline is doing](#debug--a-live-timeline-of-what-the-pipeline-is-doing)**
+(out-of-increment, from your report that uploads take a long time with nothing on screen to say why).
 
 This file is the live state of the POC work. It is committed, so any session on any machine can
 pick up by reading it first. The detailed reasoning behind the plan lives in the session that
@@ -838,6 +840,171 @@ GOOGLE_API_KEY=not-a-real-key      # → "rejected the API key as invalid or exp
 Or pick a model whose provider has no key set at all (the dropdown marks these "API key not set")
 and analyse a contract: the panel should name the missing variable rather than showing an empty
 analysis. The real quota case is the Gemini free tier — a few analyses in a day will reach it.
+
+### Your feedback
+
+_(write here)_
+
+---
+
+## Debug — a live timeline of what the pipeline is doing
+
+**Status: `awaiting your test`.** Not an increment — from your report: *"it is taking a lot of time
+to upload and then process… I want to know exactly where it is in terms of technical steps… logs
+should have worked but it's very noisy and I can't find the things I need."*
+
+### What you get
+
+A **Pipeline Debug** panel below Document Upload on the Intelligence page (and on Search and Chat),
+rendered only when `DEBUG_EVENTS=true` is set in `.env`. It shows every technical step as it happens
+— the one currently running ticks a live timer — with the duration of each and the few facts that
+explain it. Plus **Copy JSON**, so a whole trace can be pasted into a session instead of hunting
+through `make logs`.
+
+This is a different thing from the logs and from Phoenix. The logs have the detail and none of the
+shape; Phoenix has the LLM calls but not the PDF extraction, chunking, embedding or Neo4j writes, and
+neither tells you where a request is *right now*.
+
+### What it measures — the answer to your question
+
+A real 25-second upload of `TinyContract-Fast.pdf` on `gemini-flash-lite`:
+
+```
+ read_file / validate / duplicate_check / save_temp      ~4ms total
+ pdf_extract                              58ms    chars=1058
+ chunking                               2820ms    chunks=8 strategy=section quality=0.9
+   chunking.embed                       1687ms    8 progress events, one per chunk
+ process_pdf                           22039ms
+   pdf_agent.extract_text                  2ms    ← the same PDF, extracted a second time
+   pdf_agent.analyze_contract          20940ms
+     llm call                          20938ms    in 907 / out 306 tokens
+   pdf_agent.store_contract             1070ms
+     embed_summary / neo4j.create / link_parties
+```
+
+**One model call is 84% of the upload.** Chunking is 11%, and everything else — validation, file I/O,
+three Neo4j round trips — is under 1% put together. And an analysis of the same contract:
+
+```
+ extract_clauses    2289ms  (llm 2285ms)
+ check_policies     3678ms  (llm 3674ms)
+ assess_risk           0.1ms
+ cuad_mitigation       7ms
+ validate_results      0.0ms
+ generate_redlines  2444ms  (llm 2442ms)
+ store_results       394ms  → 5 clauses, 6 violations
+```
+
+8.4 seconds, of which 8.4 is three sequential model calls. That is now a measurement rather than an
+assumption.
+
+### How it works
+
+- **`backend/shared/debug/`** — a bounded in-memory ring buffer (1000 events), `trace_step()` for
+  timing a block, and a LangChain callback attached in `build_llm()`. Because `build_llm` is the only
+  place a chat model is constructed, that one line instruments *every* model call in the app,
+  including the provider SDK's own retry backoff — the 1s→17s walk that otherwise reads as a single
+  unexplained stall.
+- **`/api/debug/status | events | events/stream`** — SSE, polled off the ring buffer every 200ms so
+  events emitted from worker threads are safe. Reconnects carry `since=<seq>`, so a dropped
+  connection during a two-minute analysis resumes instead of losing what it missed. Mounted under
+  `/api` because Vite proxies only that; the pre-existing `/debug` router is unreachable from a
+  browser. No `VIEW_AUDIT` dependency — the dev default role does not hold it, and copying that
+  pattern would give a permanently empty panel.
+- **Grouping** reuses the correlation id the tracing middleware already sets. The frontend now sends
+  its own `X-Correlation-ID` per action, so a run is one block rather than a flat list.
+
+### Three bugs this work fixed or found
+
+1. **The correlation id was being dropped for the entire analysis.** `run_coroutine` and
+   `analyze_contract` hand work to a `ThreadPoolExecutor`, and `submit()` does not carry
+   `contextvars`. Everything the analysis logged was therefore unattributed. Fixed with
+   `contextvars.copy_context()`; the existing JSON logs benefit too.
+2. **Telemetry broke the thing it measured — twice, in live testing.** A step reporting a fact it
+   called `status` collided with `emit`'s own parameter and failed an upload; then a `note` keyword
+   relabelled an event instead of recording the fact. Fields are now passed as a dict and the
+   reserved parameters are positional-only, so no field name can shadow the envelope. Pinned by
+   tests over every envelope key.
+3. **The chat is rejecting ordinary questions.** "Summarise the indemnification clauses in our
+   contracts" is refused by the prompt guard as `OUT_OF_SCOPE` in 33ms. Not touched here — but it is
+   the first thing the panel showed, and it explains a chat that looks broken.
+
+Also visible, not fixed: **every upload extracts the PDF twice**, once in the API and once in the
+agent's `extract_text` node.
+
+### How to test
+
+```bash
+make test    # 359 passed, 3 skipped
+```
+
+I have set `DEBUG_EVENTS=true` in your `.env` and restarted the backend, so it is on now. In the app:
+
+1. Upload `sample-contracts/TinyContract-Fast.pdf` with `gemini-flash-lite`. The panel fills in live.
+2. Click **Analyze** and watch the six planned steps.
+3. Refresh mid-run — the panel refills from the buffer rather than starting blank.
+4. Approve a redline, run a search, send a chat message; each appears under its own phase.
+5. Set `DEBUG_EVENTS=false` and restart the backend: the panel must not render and
+   `/api/debug/events` must 404.
+
+```bash
+curl -N http://localhost:8000/api/debug/events/stream   # the raw feed, no UI
+```
+
+### Addressed in review (Copilot, PR #7)
+
+Four findings, all valid:
+
+- **"Development only" was documentation, not code.** The router was mounted unconditionally, so
+  `DEBUG_EVENTS=true` on a production deployment would have exposed filenames, tenant ids, contract
+  ids and provider errors to an unauthenticated caller. The gate now lives in
+  `debug_events_enabled()` itself, so a misconfigured production process does not even *buffer* the
+  events — there is nothing to leak however the endpoints are reached — and the router is mounted
+  only in development on top of that.
+- **Which uncovered a real deployment hole.** `ENVIRONMENT` was never passed into the backend
+  container, and the root `.env` is not copied into the image — so the container has always run as
+  `development`. That is why the production gate did nothing until compose was fixed, and it means
+  **RBAC's fail-closed-to-VIEWER path has never been reachable in this stack either.**
+- **Time to first token was measured from the wrong frame.** The stream carries `updates` frames and
+  tool-call chunks, and the flag was set on the first item of any kind — so the number reported was
+  earlier than the first token. It now waits for a non-empty `AIMessageChunk`.
+- **The test pinning the correlation-id fix did not exercise the branch it claimed to.**
+  `asyncio.to_thread` propagates the context itself and leaves the worker with no running loop, so
+  `run_coroutine` took the plain `asyncio.run` path and the test passed with or without the fix.
+  Called directly from the loop thread now — verified to fail when `copy_context` is reverted. The
+  pre-existing test above it had the same flaw and the same fix.
+- **Concurrent runs cancelled each other's "running" indicator.** `inFlightSteps` keyed on
+  `phase/step` across every run the panel holds, so one run finishing `upload/process_pdf` cleared it
+  for another still inside it. Keyed by correlation id as well.
+
+### Addressed from your manual testing
+
+**"Analysis events don't appear until it's finished."** The cause was not the panel — the analysis
+was running *on the event loop thread*. `analyze_contract_by_id` is a coroutine, but it called the
+synchronous `analyze_contract_intelligence` in line, so for the whole analysis the server answered
+nothing at all: not the debug stream, not the 500ms `/api/workflow/status` poll the page itself was
+making, not another user's request. Measured before the fix, a trivial `/api/debug/status` call took
+**6.4 seconds** to answer because it waited for the analysis to finish. It now runs via
+`asyncio.to_thread` (which copies the context, so the correlation id still reaches it). Measured
+after: probe latency stays at **2ms** throughout, and the first events land ~1s in.
+
+That is a product bug in its own right — the upload path already awaited properly, which is why its
+events always streamed.
+
+**"Show the latest first."** Runs were already newest-first; the steps inside a run now are too.
+`buildRows` still folds start/end pairs chronologically — only the display is reversed. While there:
+`chunking.embed.progress` events now fold into their parent row as a live `done=n total=m` instead of
+becoming one row per chunk, which on a real contract was a hundred lines of scrolling between you and
+everything else.
+
+### Limits
+
+- **In-memory, single process.** A backend restart loses the buffer.
+- **Not a profiler.** Durations are wall-clock around a step, so nested steps overlap their parent —
+  `process_pdf` includes the LLM call inside it.
+- **Not for production.** The endpoints are unauthenticated by design; the flag defaults off and they
+  do not exist when it is off.
+- **Additive.** The `/api/workflow/status` poll and the "🤖 PDF Processing Agent" banner are unchanged.
 
 ### Your feedback
 
