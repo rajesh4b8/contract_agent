@@ -1,6 +1,8 @@
 from backend.agents.contract_intelligence_agents import ContractIntelligenceAgentFactory
 from backend.domain.entities import ContractIntelligence, ContractClause, PolicyViolation, RiskAssessment, RedlineRecommendation
+from backend.domain.matter import AnalysisStatus
 from backend.infrastructure.contract_repository import Neo4jContractRepository
+from backend.infrastructure.matter_repository import MatterRepository
 from backend.llm_manager import LLMManager
 from backend.shared.errors import LLMProviderError, raise_if_provider_error
 from backend.shared.debug import atrace_step, note, trace_step
@@ -19,6 +21,9 @@ class ContractIntelligenceService:
     def __init__(self, llm_manager: LLMManager):
         self.llm_manager = llm_manager
         self.repository = Neo4jContractRepository()
+        # Versions carry the analysis status, so a matter opened mid-analysis
+        # shows "running" rather than an empty review.
+        self.matters = MatterRepository()
     
     def analyze_contract_intelligence(self, contract_text: str, model: str = "gemini-2.5-flash",
                                       use_planning: bool = True,
@@ -80,6 +85,7 @@ class ContractIntelligenceService:
                 ),
                 redlines=[],
                 redlines_generated=False,
+                clauses_extracted=False,
                 warnings=[f"The analysis did not complete: {e}"],
                 processing_time=time.time() - start_time
             )
@@ -109,6 +115,12 @@ class ContractIntelligenceService:
                 logger.error(f"No text content found for contract: {contract_id}")
                 logger.error(f"Contract data keys: {list(contract_data.keys())}")
                 return None
+
+            # Marked running *before* the work starts. A two-minute analysis is
+            # long enough that a reviewer will open the matter while it is under
+            # way, and an empty review is the one thing that page must never
+            # show them — it reads as "this contract is clean".
+            self._set_analysis_status(contract_id, tenant_id, AnalysisStatus.RUNNING)
             
             # Perform analysis with optional planning.
             #
@@ -132,10 +144,36 @@ class ContractIntelligenceService:
 
             # Store intelligence results back to database
             with trace_step("analysis", "store_results", contract_id=contract_id) as step:
-                self._store_intelligence_results(contract_id, tenant_id, intelligence)
+                stored = self._store_intelligence_results(contract_id, tenant_id, intelligence)
                 step.set(
                     clauses=len(intelligence.clauses or []),
                     violations=len(intelligence.violations or []),
+                    stored=stored,
+                )
+
+            # The version outlives the analysis. COMPLETE is claimed only when
+            # the review was actually written down — an analysis that ran
+            # perfectly and then failed to save is, to whoever reopens the
+            # matter, indistinguishable from one that never ran. Either way the
+            # reason is recorded, so reopening shows a warning rather than a
+            # clean bill of health.
+            if stored:
+                self._set_analysis_status(contract_id, tenant_id, AnalysisStatus.COMPLETE)
+            else:
+                reason = "; ".join(intelligence.warnings or []) or (
+                    "the analysis did not complete"
+                    if not intelligence.clauses_extracted
+                    else "the analysis ran but its results could not be saved"
+                )
+                self._set_analysis_status(
+                    contract_id, tenant_id, AnalysisStatus.FAILED, error=reason,
+                )
+                # And the caller is told, so the response carries the warning
+                # rather than presenting an unsaved review as a saved one.
+                intelligence.warnings = list(intelligence.warnings or []) + (
+                    [] if not intelligence.clauses_extracted
+                    else ["The analysis ran but its results could not be saved; "
+                          "reopening this version will not show them."]
                 )
 
             note(
@@ -151,13 +189,24 @@ class ContractIntelligenceService:
         except Exception as e:
             # None means "no such contract" to the caller, which answers 404.
             # A quota failure is not a missing contract.
+            self._set_analysis_status(
+                contract_id, tenant_id, AnalysisStatus.FAILED, error=str(e)
+            )
             raise_if_provider_error(e, model)
             logger.error(f"Failed to analyze contract {contract_id}: {e}")
             return None
+
+    def _set_analysis_status(self, contract_id: str, tenant_id: str,
+                             status: AnalysisStatus, error: str = "") -> None:
+        """Best-effort bookkeeping — never the reason an analysis fails."""
+        try:
+            self.matters.set_analysis_status(tenant_id, contract_id, status, error=error)
+        except Exception as e:
+            logger.warning(f"Could not record analysis status for {contract_id}: {e}")
     
 
     def _store_redlines(self, contract_id: str, tenant_id: str, redlines,
-                        replace: bool = True) -> None:
+                        replace: bool = True) -> bool:
         """Persist redlines as (:Contract)-[:HAS_REDLINE]->(:Redline).
 
         Only `redlines_count` used to be stored, so the drafted language existed
@@ -170,14 +219,20 @@ class ContractIntelligenceService:
         `replace=False` when drafting failed. An empty list then means "we could
         not draft", not "none were needed", and wiping the stored set on the
         strength of a transient model error would destroy drafts a reviewer may
-        already be working from.
+        already be working from. That is a deliberate skip, not a failure, so it
+        returns True.
+
+        Returns whether the stored redlines match what the caller was handed.
+        A swallowed write failure here used to leave the version COMPLETE with
+        the drafted language missing — the response promised redlines that
+        reopening the matter would not show.
         """
         if not replace:
             logger.warning(
                 f"Redline drafting failed for {contract_id}; keeping the previously "
                 f"stored redlines rather than replacing them"
             )
-            return
+            return True
 
         try:
             # A redline is identified by the breach it fixes, not by its
@@ -241,8 +296,11 @@ class ContractIntelligenceService:
 
             logger.info(f"Stored {len(redlines)} redlines for contract {contract_id}")
             note("analysis", "store_redlines", contract_id=contract_id, redlines=len(redlines))
+            return True
         except Exception as e:
-            # Non-fatal: the analysis itself succeeded and is already saved.
+            # Not raised — the analysis itself succeeded and the caller has it —
+            # but reported, so the version is marked FAILED rather than claiming
+            # a complete review whose redlines are not there.
             logger.error(f"Failed to store redlines for {contract_id}: {e}")
             note(
                 "analysis",
@@ -252,6 +310,300 @@ class ContractIntelligenceService:
                 error_type=type(e).__name__,
                 error=str(e),
             )
+            return False
+
+    def _store_clause_findings(self, contract_id: str, tenant_id: str,
+                               intelligence: ContractIntelligence) -> bool:
+        """Persist the findings themselves, not just how many there were.
+
+        This is the gap that made a review un-reopenable. `_store_intelligence_results`
+        wrote `clauses_count`, `violations_count` and `risk_score` — three numbers
+        — so "open this review again" meant re-running a two-minute analysis and
+        hoping the model said the same thing twice. The evidence spans, the rule
+        citations and the risk narrative existed only in one HTTP response.
+
+        Findings are replaced wholesale on each run. Unlike redlines they carry
+        no human decision — a reviewer rules on a redline, never on a finding —
+        so there is nothing here to preserve across a re-analysis, and keeping
+        superseded findings would double-count the violations on the matter list.
+
+        An analysis that did not run never reaches here — `_store_intelligence_results`
+        returns before calling this — because an empty list would then mean "we do
+        not know", and wiping a good stored review on the strength of a transient
+        model failure would lose exactly what this method exists to keep.
+
+        Returns whether the write succeeded, so the caller can mark the version
+        FAILED rather than claiming a review it does not have.
+        """
+        risk = intelligence.risk_assessment
+        summary = {
+            "risk_score": risk.overall_risk_score,
+            "risk_level": risk.risk_level,
+            "violations_count": len(intelligence.violations or []),
+            "clauses_count": len(intelligence.clauses or []),
+            "redlines_count": len(intelligence.redlines or []),
+            "intelligence_status": "completed",
+            "processing_time": intelligence.processing_time,
+            "cuad_analysis_status": "completed",
+            "deviation_count": len(intelligence.cuad_deviations or []),
+            "jurisdiction_detected": (intelligence.jurisdiction_info or {}).get(
+                "jurisdiction", "unknown"),
+            "industry_detected": (intelligence.jurisdiction_info or {}).get(
+                "industry", "general"),
+            "precedent_matches": len(intelligence.precedent_matches or []),
+            "semantic_analysis_enabled": True,
+            "cache_enabled": True,
+            "performance_optimized": True,
+            # The narrative half of the risk assessment. Only the score and the
+            # level used to be kept, so a reopened review showed "72/100 HIGH"
+            # with nothing to say why.
+            "critical_issues": list(risk.critical_issues or []),
+            "risk_recommendations": list(risk.recommendations or []),
+        }
+
+        findings = [
+            {
+                "finding_id": self._finding_id(contract_id, index, clause),
+                "tenant_id": tenant_id,
+                "index": index,
+                "clause_type": clause.clause_type or "",
+                "risk_level": clause.risk_level or "LOW",
+                "confidence_score": float(clause.confidence_score or 0.0),
+                "evidence_span": clause.evidence_span or clause.content or "",
+                "location": clause.location or "",
+                "violated_policy": clause.violated_policy,
+                "suggested_redline": clause.suggested_redline,
+                "human_review_required": bool(clause.human_review_required),
+            }
+            for index, clause in enumerate(intelligence.clauses or [])
+        ]
+
+        violations = [
+            {
+                "violation_id": f"{contract_id}_{v.rule_id or 'UNCITED'}_{index}",
+                "tenant_id": tenant_id,
+                "index": index,
+                "rule_id": v.rule_id,
+                "clause_index": v.clause_index,
+                "section_reference": v.section_reference or "",
+                "clause_type": v.clause_type or "",
+                "issue": v.issue or "",
+                "severity": v.severity or "LOW",
+                "suggested_fix": v.suggested_fix or "",
+                "clause_content": v.clause_content or "",
+            }
+            for index, v in enumerate(intelligence.violations or [])
+        ]
+
+        try:
+            # **One statement.** Summary, findings and violations are replaced
+            # together or not at all.
+            #
+            # They used to be three `graph.query` calls, and every call is its
+            # own auto-commit transaction: a failure between them left the new
+            # score beside the new clauses and the *previous* run's violations,
+            # marked FAILED — a review that is not a review of anything. The
+            # score is written here rather than by the caller for exactly that
+            # reason.
+            #
+            # The deletes run on the row that reaches them, so an analysis that
+            # legitimately found nothing still clears the previous run.
+            self.repository.graph.query(
+                """
+                MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
+                SET c += $summary,
+                    c.intelligence_updated = datetime()
+                WITH c
+                OPTIONAL MATCH (c)-[:HAS_FINDING]->(old_finding:ClauseFinding)
+                DETACH DELETE old_finding
+                WITH DISTINCT c
+                OPTIONAL MATCH (c)-[:HAS_VIOLATION]->(old_violation:PolicyViolation)
+                DETACH DELETE old_violation
+                WITH DISTINCT c
+                CALL (c) {
+                    UNWIND $findings AS f
+                    CREATE (c)-[:HAS_FINDING]->(:ClauseFinding {
+                        finding_id: f.finding_id,
+                        tenant_id: f.tenant_id,
+                        position: f.index,
+                        clause_type: f.clause_type,
+                        risk_level: f.risk_level,
+                        confidence_score: f.confidence_score,
+                        evidence_span: f.evidence_span,
+                        location: f.location,
+                        violated_policy: f.violated_policy,
+                        suggested_redline: f.suggested_redline,
+                        human_review_required: f.human_review_required,
+                        created_at: datetime()
+                    })
+                }
+                CALL (c) {
+                    UNWIND $violations AS v
+                    CREATE (c)-[:HAS_VIOLATION]->(:PolicyViolation {
+                        violation_id: v.violation_id,
+                        tenant_id: v.tenant_id,
+                        position: v.index,
+                        rule_id: v.rule_id,
+                        clause_index: v.clause_index,
+                        section_reference: v.section_reference,
+                        clause_type: v.clause_type,
+                        issue: v.issue,
+                        severity: v.severity,
+                        suggested_fix: v.suggested_fix,
+                        clause_content: v.clause_content,
+                        created_at: datetime()
+                    })
+                }
+                RETURN count(c) AS updated
+                """,
+                {
+                    "contract_id": contract_id,
+                    "tenant_id": tenant_id,
+                    "summary": summary,
+                    "findings": findings,
+                    "violations": violations,
+                },
+            )
+
+            logger.info(
+                f"Stored {len(findings)} findings and {len(violations)} violations "
+                f"for contract {contract_id}"
+            )
+            note("analysis", "store_findings", contract_id=contract_id,
+                 findings=len(findings), violations=len(violations))
+            return True
+        except Exception as e:
+            # Non-fatal, like redline storage: the caller already has the
+            # analysis, and failing the request would throw it away entirely.
+            # The version is marked FAILED, so nobody reads the gap as good news.
+            logger.error(f"Failed to store findings for {contract_id}: {e}")
+            note("analysis", "store_findings", "error", contract_id=contract_id,
+                 error_type=type(e).__name__, error=str(e))
+            return False
+
+    @staticmethod
+    def _finding_id(contract_id: str, index: int, clause) -> str:
+        """Stable within a version: the same evidence keeps the same id.
+
+        Keyed on the normalised evidence span rather than the position, for the
+        reason the redline ids are — re-extraction reorders clauses, and an id
+        that moves with the ordering is no id at all. The index is the
+        tie-breaker for two findings quoting identical text.
+        """
+        import hashlib
+
+        text = getattr(clause, "evidence_span", "") or getattr(clause, "content", "") or ""
+        normalised = " ".join(text.split()).casefold()
+        digest = hashlib.sha1(normalised.encode("utf-8")).hexdigest()[:10]
+        return f"{contract_id}_{clause.clause_type or 'CLAUSE'}_{digest}_{index}"
+
+    def get_stored_analysis(self, contract_id: str, tenant_id: str = "default-tenant") -> Optional[dict]:
+        """Read a completed review back, in the shape the analyse endpoint returns.
+
+        This is what makes a review resumable: reopening a matter serves the
+        stored findings instead of spending two minutes and a model call
+        re-deriving them, and a reviewer who refreshes the page keeps their place.
+
+        Returns None when there is no such contract for this tenant — an
+        unanalysed one answers with empty results and its analysis status, which
+        is a different thing and the caller must be able to tell them apart.
+        """
+        header = self.repository.graph.query(
+            """
+            MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
+            RETURN c.file_id AS contract_id,
+                   coalesce(c.analysis_status, 'NOT_STARTED') AS analysis_status,
+                   c.analysis_error AS analysis_error,
+                   toString(c.analysis_updated_at) AS analysis_updated_at,
+                   c.intelligence_status AS intelligence_status,
+                   toString(c.intelligence_updated) AS analysed_at,
+                   c.processing_time AS processing_time,
+                   c.risk_score AS risk_score,
+                   c.risk_level AS risk_level,
+                   coalesce(c.critical_issues, []) AS critical_issues,
+                   coalesce(c.risk_recommendations, []) AS recommendations,
+                   c.contract_type AS contract_type,
+                   c.summary AS summary
+            """,
+            {"contract_id": contract_id, "tenant_id": tenant_id},
+        )
+        if not header:
+            return None
+        row = header[0]
+
+        clauses = self.repository.graph.query(
+            """
+            MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
+                  -[:HAS_FINDING]->(f:ClauseFinding)
+            RETURN f.clause_type AS clause_type,
+                   f.risk_level AS risk_level,
+                   f.evidence_span AS evidence_span,
+                   f.confidence_score AS confidence,
+                   f.violated_policy AS violated_policy,
+                   f.suggested_redline AS suggested_redline,
+                   f.human_review_required AS human_review_required,
+                   f.location AS location
+            ORDER BY f.position
+            """,
+            {"contract_id": contract_id, "tenant_id": tenant_id},
+        )
+
+        violations = self.repository.graph.query(
+            """
+            MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
+                  -[:HAS_VIOLATION]->(v:PolicyViolation)
+            RETURN v.rule_id AS rule_id,
+                   v.clause_index AS clause_index,
+                   v.section_reference AS section_reference,
+                   v.clause_type AS clause_type,
+                   v.issue AS issue,
+                   v.severity AS severity,
+                   v.suggested_fix AS suggested_fix,
+                   v.clause_content AS clause_content
+            ORDER BY v.position
+            """,
+            {"contract_id": contract_id, "tenant_id": tenant_id},
+        )
+
+        redlines = self.get_redlines(contract_id, tenant_id)
+
+        warnings = []
+        if row.get("analysis_error"):
+            # Surfaced as a warning, never as an absence of findings.
+            warnings.append(str(row["analysis_error"]))
+
+        return {
+            "contract_id": contract_id,
+            "analysis_status": row.get("analysis_status") or "NOT_STARTED",
+            # When the status last moved. A version left RUNNING by a server
+            # that restarted mid-analysis would otherwise poll for ever; the
+            # page uses this to say it looks stuck rather than "still working".
+            "analysis_updated_at": row.get("analysis_updated_at"),
+            "analysed_at": row.get("analysed_at"),
+            "processing_time": row.get("processing_time"),
+            "contract_type": row.get("contract_type"),
+            "summary": row.get("summary") or "",
+            "warnings": warnings,
+            "results": {
+                "clauses": [
+                    {
+                        **clause,
+                        # The UI still reads these older names.
+                        "content": clause.get("evidence_span") or "",
+                        "confidence_score": clause.get("confidence") or 0.0,
+                    }
+                    for clause in clauses
+                ],
+                "violations": violations,
+                "risk_assessment": {
+                    "overall_risk_score": row.get("risk_score") or 0.0,
+                    "risk_level": row.get("risk_level") or "UNKNOWN",
+                    "critical_issues": list(row.get("critical_issues") or []),
+                    "recommendations": list(row.get("recommendations") or []),
+                },
+                "redlines": redlines,
+            },
+        }
 
     def get_redlines(self, contract_id: str, tenant_id: str = "default-tenant") -> list:
         """Read back the stored redlines for a contract."""
@@ -513,70 +865,62 @@ class ContractIntelligenceService:
         
         return intelligence
     
-    def _store_intelligence_results(self, contract_id: str, tenant_id: str, intelligence: ContractIntelligence):
-        """Store intelligence analysis results in the database"""
-        
-        try:
-            # Update contract with intelligence data including CUAD fields
-            intelligence_data = {
-                "risk_score": intelligence.risk_assessment.overall_risk_score,
-                "risk_level": intelligence.risk_assessment.risk_level,
-                "violations_count": len(intelligence.violations),
-                "clauses_count": len(intelligence.clauses),
-                "redlines_count": len(intelligence.redlines),
-                "intelligence_status": "completed",
-                "processing_time": intelligence.processing_time,
-                # CUAD-specific fields
-                "cuad_analysis_status": "completed",
-                "deviation_count": len(intelligence.cuad_deviations),
-                "jurisdiction_detected": intelligence.jurisdiction_info.get("jurisdiction", "unknown"),
-                "industry_detected": intelligence.jurisdiction_info.get("industry", "general"),
-                "precedent_matches": len(intelligence.precedent_matches),
-                "semantic_analysis_enabled": True,
-                "cache_enabled": True,
-                "performance_optimized": True
-            }
-            
-            # Store in Neo4j with CUAD fields
-            query = """
-            MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
-            SET c.risk_score = $risk_score,
-                c.risk_level = $risk_level,
-                c.violations_count = $violations_count,
-                c.clauses_count = $clauses_count,
-                c.redlines_count = $redlines_count,
-                c.intelligence_status = $intelligence_status,
-                c.processing_time = $processing_time,
-                c.cuad_analysis_status = $cuad_analysis_status,
-                c.deviation_count = $deviation_count,
-                c.jurisdiction_detected = $jurisdiction_detected,
-                c.industry_detected = $industry_detected,
-                c.precedent_matches = $precedent_matches,
-                c.semantic_analysis_enabled = $semantic_analysis_enabled,
-                c.cache_enabled = $cache_enabled,
-                c.performance_optimized = $performance_optimized,
-                c.intelligence_updated = datetime()
-            RETURN c
-            """
-            
-            self.repository.graph.query(query, {
-                "contract_id": contract_id,
-                "tenant_id": tenant_id,
-                **intelligence_data
-            })
+    def _store_intelligence_results(self, contract_id: str, tenant_id: str,
+                                    intelligence: ContractIntelligence) -> bool:
+        """Store intelligence analysis results in the database.
 
-            self._store_redlines(
+        Returns whether the review was actually written, which is what decides
+        the version's COMPLETE / FAILED status. Claiming completion on the
+        strength of the in-memory result alone marks a review complete that
+        whoever reopens it will find empty.
+
+        **Nothing is written at all when the analysis did not run.** The failure
+        path builds a result with risk 0.0, level "UNKNOWN" and every count at
+        zero; storing that overwrites a good previous review with numbers that
+        read, on the matters list, as a contract with nothing wrong with it.
+        """
+        if not intelligence.clauses_extracted:
+            logger.warning(
+                f"Analysis of {contract_id} did not complete; keeping the previously "
+                f"stored review rather than replacing it with an empty one"
+            )
+            note("analysis", "store_results", "skipped", contract_id=contract_id,
+                 reason="the analysis did not complete")
+            return False
+
+        try:
+            # The score, the findings and the violations in one statement, so a
+            # failure cannot leave a new score beside the previous run's
+            # violations. See `_store_clause_findings`.
+            if not self._store_clause_findings(contract_id, tenant_id, intelligence):
+                return False
+
+            # Redlines are separate on purpose: they carry human decisions and
+            # so have preserve-rather-than-replace semantics of their own. But a
+            # failure here still means the review on disk is not the review the
+            # caller was handed, so it counts against completion.
+            if not self._store_redlines(
                 contract_id, tenant_id, intelligence.redlines,
                 replace=intelligence.redlines_generated,
-            )
-            
-            # Store performance metrics
+            ):
+                return False
+
+            # Metrics are telemetry. Losing them does not make the review wrong,
+            # so they are the one thing here that cannot fail the save.
             self._store_performance_metrics(contract_id, tenant_id, intelligence)
-            
+
             logger.info(f"Stored intelligence results for contract: {contract_id}")
+            return True
             
         except Exception as e:
+            # Reported, not raised: the caller already has the analysis and
+            # failing the request would throw it away. But the version is marked
+            # FAILED rather than COMPLETE, so reopening says the review could not
+            # be saved instead of showing nothing and implying all is well.
             logger.error(f"Failed to store intelligence results for {contract_id}: {e}")
+            note("analysis", "store_results", "error", contract_id=contract_id,
+                 error_type=type(e).__name__, error=str(e))
+            return False
     
     def _store_performance_metrics(self, contract_id: str, tenant_id: str, intelligence: ContractIntelligence):
         """Store performance metrics in database"""

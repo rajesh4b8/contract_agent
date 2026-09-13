@@ -13,6 +13,8 @@ interface ContractClause {
 
 interface ClausesDetailProps {
   clauses: ContractClause[];
+  /** Passed by every caller; kept so the props match what is actually sent. */
+  contractId?: string;
 }
 
 export const ClausesDetail: React.FC<ClausesDetailProps> = ({ clauses }) => {

@@ -36,7 +36,11 @@ def get_llm_manager(request: Request):
 @router.post("/contracts/{contract_id}/analyze", dependencies=[Depends(requires_permission(Permission.ANALYZE))])
 async def analyze_contract_intelligence(
     contract_id: str,
-    tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
+    # The tenant comes from the caller, not the URL. It used to be a query
+    # parameter here and a header on the redline endpoints, so an analysis
+    # landed in `default-tenant` while its redlines were looked up under the
+    # header's tenant — the same contract, two different tenants.
+    tenant_id: str = Depends(get_current_tenant),
     model: str = Query(default=DEFAULT_MODEL_ID, description="LLM model to use for analysis"),
     use_planning: bool = Query(default=True, description="Use autonomous planning agent"),
     llm_mgr: LLMManager = Depends(get_llm_manager)
@@ -151,14 +155,19 @@ async def analyze_contract_intelligence(
         raise HTTPException(status_code=500, detail=f"Analysis failed: {str(e)}")
 
 @router.get("/contracts/{contract_id}/status")
-async def get_intelligence_status(contract_id: str):
+async def get_intelligence_status(
+    contract_id: str,
+    tenant_id: str = Depends(get_current_tenant),
+):
     """Get the current intelligence analysis status for a contract"""
     
     try:
         # Query contract intelligence status
         query = """
         MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
-        RETURN c.intelligence_status as status,
+        RETURN coalesce(c.analysis_status, 'NOT_STARTED') as analysis_status,
+               c.analysis_error as analysis_error,
+               c.intelligence_status as status,
                c.risk_score as risk_score,
                c.risk_level as risk_level,
                c.violations_count as violations_count,
@@ -168,7 +177,7 @@ async def get_intelligence_status(contract_id: str):
                c.intelligence_updated as updated
         """
         
-        result = repository.graph.query(query, {"contract_id": contract_id, "tenant_id": "default-tenant"})
+        result = repository.graph.query(query, {"contract_id": contract_id, "tenant_id": tenant_id})
         
         if not result:
             raise HTTPException(status_code=404, detail=f"Contract {contract_id} not found")
@@ -177,6 +186,12 @@ async def get_intelligence_status(contract_id: str):
         
         return {
             "contract_id": contract_id,
+            # The version's own status: RUNNING while the analysis is under way,
+            # FAILED with a reason when it died. `intelligence_status` only ever
+            # said "completed", so a failed run was indistinguishable from one
+            # that had never started.
+            "analysis_status": contract_data.get("analysis_status") or "NOT_STARTED",
+            "analysis_error": contract_data.get("analysis_error") or "",
             "intelligence_status": contract_data.get("status", "not_analyzed"),
             "risk_score": contract_data.get("risk_score"),
             "risk_level": contract_data.get("risk_level"),
@@ -197,7 +212,7 @@ async def get_intelligence_status(contract_id: str):
 async def batch_analyze_contracts(
     background_tasks: BackgroundTasks,
     contract_ids: list[str],
-    tenant_id: str = Query(default="default-tenant", description="Tenant ID for data isolation"),
+    tenant_id: str = Depends(get_current_tenant),
     model: str = Query(default=DEFAULT_MODEL_ID, description="LLM model to use for analysis"),
     llm_mgr: LLMManager = Depends(get_llm_manager)
 ):
@@ -239,7 +254,7 @@ async def batch_analyze_contracts(
         raise HTTPException(status_code=500, detail=f"Batch analysis failed: {str(e)}")
 
 @router.get("/dashboard/summary", dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])
-async def get_intelligence_dashboard():
+async def get_intelligence_dashboard(tenant_id: str = Depends(get_current_tenant)):
     """Get summary statistics for intelligence dashboard"""
     
     try:
@@ -256,7 +271,7 @@ async def get_intelligence_dashboard():
             sum(c.redlines_count) as total_redlines
         """
         
-        result = repository.graph.query(query, {"tenant_id": "default-tenant"})
+        result = repository.graph.query(query, {"tenant_id": tenant_id})
         
         if result:
             stats = result[0]
@@ -294,6 +309,32 @@ async def get_available_models():
         "default_model": DEFAULT_MODEL_ID,
         "recommended_models": [m["id"] for m in models if m["recommended"]],
     }
+
+
+@router.get("/contracts/{contract_id}/analysis",
+            dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])
+async def get_stored_analysis(
+    contract_id: str,
+    tenant_id: str = Depends(get_current_tenant),
+    llm_mgr: LLMManager = Depends(get_llm_manager),
+):
+    """The stored review, without re-running the analysis.
+
+    The counterpart to POST /analyze, and the endpoint that makes a review
+    resumable: reopening a matter, or simply refreshing the page, serves the
+    findings already on the graph rather than spending two minutes and a model
+    call re-deriving them — and the reviewer keeps their place.
+
+    `analysis_status` is part of the answer, not an afterthought. A version
+    whose analysis is still RUNNING, and one whose analysis FAILED, both return
+    no findings; rendering either as "no findings" would tell a reviewer the
+    contract is clean.
+    """
+    service = ContractIntelligenceServiceFactory.create_service(llm_mgr)
+    stored = service.get_stored_analysis(contract_id, tenant_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail=f"Contract {contract_id} not found")
+    return stored
 
 
 @router.get("/contracts/{contract_id}/redlines",

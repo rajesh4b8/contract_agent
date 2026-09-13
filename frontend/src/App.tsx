@@ -1,8 +1,8 @@
-import React from 'react';
 import { ThemeProvider } from './components/shared/theme-provider';
 import { Navigation } from './components/layout/Navigation';
 import { ChatPage } from './pages/ChatPage';
-import { IntelligencePage } from './pages/IntelligencePage';
+import { MattersPage } from './pages/MattersPage';
+import { MatterPage } from './pages/MatterPage';
 import { DocumentationPage } from './pages/DocumentationPage';
 import { SearchPage } from './pages/SearchPage';
 import { ErrorBoundary } from './components/shared/ErrorBoundary';
@@ -11,14 +11,21 @@ import { useRouter } from './lib/useRouter';
 import './App.css';
 
 function App() {
-  const { currentPage, navigate } = useRouter();
+  const { route, navigate } = useRouter();
 
   const renderPage = () => {
-    switch (currentPage) {
+    switch (route.page) {
+      case 'matter':
+        return (
+          <MatterPage
+            key={route.matterRef}
+            matterRef={route.matterRef!}
+            onBack={() => navigate('matters')}
+            onOpenMatter={(ref) => navigate('matter', ref)}
+          />
+        );
       case 'chat':
         return <ChatPage />;
-      case 'intelligence':
-        return <IntelligencePage />;
       case 'agents':
         return <DocumentationPage />;
       case 'search':
@@ -27,8 +34,9 @@ function App() {
             <SearchPage />
           </ErrorBoundary>
         );
+      case 'matters':
       default:
-        return <IntelligencePage />;
+        return <MattersPage onOpenMatter={(ref) => navigate('matter', ref)} />;
     }
   };
 
@@ -37,7 +45,12 @@ function App() {
       <ThemeProvider defaultTheme="light" storageKey="vite-ui-theme">
         <div className="min-h-screen bg-slate-50">
           <div className="mx-auto max-w-7xl p-6">
-            <Navigation currentPage={currentPage} onNavigate={navigate} />
+            <Navigation
+              // A matter is still "matters" as far as the nav is concerned:
+              // the tab stays lit while you are inside one.
+              currentPage={route.page === 'matter' ? 'matters' : route.page}
+              onNavigate={(page) => navigate(page)}
+            />
             {renderPage()}
           </div>
         </div>

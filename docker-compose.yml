@@ -31,12 +31,46 @@ services:
         condition: service_healthy
     networks:
       - net
+    # `uvicorn --reload` rather than the image's `fastapi dev`, for one reason:
+    # `--reload-exclude`. Editing a test file restarted the server, and a reload
+    # occasionally kills the worker without starting a replacement — so writing
+    # a test could take the API down for anyone using the app. Tests are not
+    # imported by the server; they have no business restarting it.
+    command:
+      - uv
+      - run
+      - uvicorn
+      - backend.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - backend
+      - --reload-exclude
+      - backend/tests/*
+      - --reload-exclude
+      - "*/__pycache__/*"
     volumes:
-      # Live-mount source so `fastapi dev` --reload picks up host edits without
+      # Live-mount source so the reloader picks up host edits without
       # rebuilding the image. Keeps container deps (/app/.venv) intact.
       - ./backend:/app/backend
     ports:
       - 8000:8000
+    # `fastapi dev`'s reloader can kill its worker and fail to start a
+    # replacement — seen after a bulk file change, such as a git checkout or
+    # rebase rewriting several files at once. The reloader process survives, so
+    # without this the container still reports "Up" while answering nothing, and
+    # the UI just spins. Now `docker ps` says `unhealthy`, and the fix is
+    # `docker compose restart backend`.
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/models', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
   ui:
     build:
       context: ./frontend

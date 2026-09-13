@@ -1,12 +1,22 @@
 # POC Progress Tracker
 
-**Resume point: Increment 5 — `awaiting your test`.**
-Run `make test`, then `make eval` with the stack up and the playbook seeded.
+**Resume point: Increment 7 — `specified, not started`.**
+Increments 0–6 are accepted. Increment 7's specification is complete; start there.
 
-Also awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
+Still awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
 (out-of-increment bug fix, from your report of an unexplained "processing error") and
 **[Debug — a live timeline of what the pipeline is doing](#debug--a-live-timeline-of-what-the-pipeline-is-doing)**
 (out-of-increment, from your report that uploads take a long time with nothing on screen to say why).
+
+**Increments 7–9 are specified and ready to build.** In order: chunk identity so unchanged text is
+never re-embedded (7), analysing the whole contract rather than its first 12,000 characters (8), and
+the cross-version change report (9).
+
+Two sections are worth knowing about before starting anything:
+[Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) (settled — what this
+system is the record of) and
+[Roadmap — is Neo4j the right store?](#roadmap--is-neo4j-the-right-store-open-not-decided)
+(**open**, full evidence recorded, deliberately not decided yet).
 
 This file is the live state of the POC work. It is committed, so any session on any machine can
 pick up by reading it first. The detailed reasoning behind the plan lives in the session that
@@ -31,7 +41,11 @@ produced it; this file is what you and I actually work from.
 | 2 | Ground policy checks in one real playbook | accepted |
 | 3 | Redlines that are real and persisted | accepted |
 | 4 | Human-in-the-loop approve / edit / reject | accepted |
-| 5 | One measurable outcome | **awaiting your test** |
+| 5 | One measurable outcome | accepted |
+| 6 | Multiple contracts, each resumable | accepted |
+| 7 | Content-addressed chunks | **specified — not started** |
+| 8 | Analyse the whole contract | specified — not started |
+| 9 | Incremental re-analysis and the change report | specified — not started |
 
 ---
 
@@ -765,7 +779,7 @@ failing a build over.
 
 ### Your feedback
 
-_(write here)_
+_Passed testing 2026-09-13. Accepted._
 
 ---
 
@@ -1012,6 +1026,719 @@ _(write here)_
 
 ---
 
+## Increment 6 — Multiple contracts, each resumable
+
+**Status: `accepted`** (2026-09-13, after your manual testing — two rounds of Copilot review and
+two reports from you folded in). Follows from the
+[Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) decision: if this
+system is the record of the *review*, a review has to be a durable object you can leave and come
+back to.
+
+**Goal:** today a review lives in one browser tab. `selectedContractId` and the current page are
+`useState` with no URL, so a refresh empties the screen; the contract list is in `localStorage`, so
+a colleague or a second machine sees nothing. Worse, the backend could not answer even if the UI
+asked — `_store_intelligence_results` persists **counts only** (`clauses_count`,
+`violations_count`, `risk_score`) plus the redlines. The clause findings, evidence spans and
+violations are never written to the graph at all, so "reopen this review" would mean re-running a
+two-minute analysis. There is also no list-contracts endpoint the app can call: the only one is
+`/api/documents/debug/contracts`, gated on `VIEW_AUDIT`, which the default `LEGAL_REVIEWER` role
+does not hold.
+
+### Failure cases, settled first
+
+Increment 4's approach, for the same reason: this is the increment where getting it wrong loses a
+reviewer's place, or files their work against the wrong contract.
+
+| case | behaviour |
+|---|---|
+| upload a byte-identical document to an existing version | **no new version.** Open that matter with "Exactly matches version N of MSA-2026-0042" |
+| user chooses "New contract" for a document much like an existing one | **honoured without argument.** A new SOW for a different vendor off the same template is exactly this case, and only the user knows |
+| extraction fails on a new contract | no matter created, **no reference number burned** — no gaps in the sequence |
+| upload a new version to a `CLOSED` matter | 409 naming the matter; reopening is an explicit action |
+| two uploads race for the same reference | counter increments in one atomic statement; refs are unique |
+| analysis fails after the version is stored | the version exists, findings empty, the failure shown as a warning — never rendered as "no findings" |
+| matter opened while its analysis is still running | shows the in-progress state, not an empty review |
+| a matter with no versions | cannot exist. A matter is created only after one successful extraction |
+| reference number for an unknown or other-tenant matter | 404, not 403 — same rule as redlines |
+
+### The model
+
+```
+(:Matter {matter_ref, tenant_id, title, counterparty, contract_type,
+          status, created_at, updated_at})
+  -[:HAS_VERSION {n}]->(:ContractVersion {version_id, source_sha256, uploaded_at,
+                                          analysis_status})
+      -[:HAS_FINDING]->(:ClauseFinding)      <- new; the gap this increment closes
+      -[:HAS_REDLINE]->(:Redline)            <- exists already, re-pointed at the version
+```
+
+Chunks are attached to the version in Increment 7; this increment leaves chunking exactly as it is.
+
+**Status** is derived wherever it can be. `IN_REVIEW` vs `REVIEWED` is `pending == 0`, which
+`redline_review_summary()` already computes. Only the transitions a human makes are stored:
+
+```
+DRAFT -> IN_REVIEW -> REVIEWED -> AWAITING_COUNTERPARTY -> CLOSED
+```
+
+### Settled: one document per matter
+
+Decided 2026-09-13. **One document per matter**, full stop — no `Matter -> Document -> Version`
+nesting. If an SOW and its MSA need to be related later, that is a *link between two matters* by
+reference number — "SOW-2026-0051 is issued under MSA-2026-0042" — not a container. A
+`(:Matter)-[:ISSUED_UNDER]->(:Matter)` edge costs nothing to add later and keeps this model flat.
+
+### Reference numbers
+
+`{TYPE}-{YYYY}-{NNNN}` — `MSA-2026-0042` — sequential per tenant per year, allocated from a counter
+node in a single statement so concurrent uploads cannot collide:
+
+```cypher
+MERGE (c:Counter {tenant_id: $t, year: $y, kind: $k})
+  ON CREATE SET c.n = 0
+SET c.n = c.n + 1
+RETURN c.n
+```
+
+Sequential rather than a UUID because the reference is the thing people say out loud and put in
+emails. Allocated **after** extraction succeeds.
+
+### The two upload paths
+
+**Into a matter (the common one).** The reviewer opens `MSA-2026-0042` and clicks *Upload new
+round*. The matter is in the URL; nothing is inferred, nothing is asked.
+
+**New contract.** Button at the top of the list. File picker first, then extraction, then a
+confirmation card **pre-filled** with the counterparty, contract type and dates the upload pipeline
+already extracts — so the user corrects rather than types. Confirming allocates the reference and
+creates the matter.
+
+No similarity matching in this increment: the user always chooses. Advisory match suggestions
+arrive in Increment 7, once chunks have identity.
+
+### The one automatic case
+
+`source_sha256` — a hash of the canonical full text — is stored on every version. If an upload
+matches an existing version exactly, that is not a judgement call: no version is created, and the
+user lands on that matter with the note. Prevents double-clicks producing v2 = v1.
+
+### Fixes folded in
+
+Small, and all in the path this increment rewrites:
+
+- **The model dropdown does nothing on upload.** `DocumentUpload.tsx:68` sends `model` in the
+  `FormData` body, but the endpoint declares `model: str = Query(...)`. Every upload has therefore
+  used `DEFAULT_MODEL_ID` — currently `free-large`, at 50–130s a call. This is very likely the
+  "uploads take a long time" report.
+- **Upload ignores the tenant header.** `apiFetch` sends `X-Tenant-ID`, but upload reads
+  `tenant_id` from a query parameter the frontend never sets, so contracts always land in
+  `default-tenant` while redlines are looked up under the header's tenant.
+- **Tenant resolution is a three-way split** — query parameter on upload/analyze, `X-Tenant-ID`
+  header on redlines, hardcoded `"default-tenant"` on status and dashboard. Collapsed to
+  `Depends(get_current_tenant)` everywhere. `default-tenant` stays the only tenant in use and is
+  never surfaced in the UI; this is so there is one seam to change when auth lands.
+- **The duplicate check never fires.** `MATCH (c:Contract) WHERE c.file_id CONTAINS $filename`
+  compares against `UPLOADED_{random}_{date}`, which never contains the filename. Replaced by
+  `source_sha256`.
+
+### What changed
+
+**The findings are on the graph now.** `_store_intelligence_results` wrote three numbers —
+`clauses_count`, `violations_count`, `risk_score` — and the redlines. The clause findings, the
+evidence spans, the rule citations and the risk narrative were never persisted at all, so
+"reopen this review" meant re-running a two-minute analysis and hoping the model agreed with
+itself. They are now `(:ContractVersion)-[:HAS_FINDING]->(:ClauseFinding)` and
+`-[:HAS_VIOLATION]->(:PolicyViolation)`, with `critical_issues` and `recommendations` stored
+alongside the score. `GET /api/intelligence/contracts/{id}/analysis` reads the lot back in the
+same shape `POST /analyze` returns, so the page renders identically whether it analysed or
+reopened. Measured against the live stack: an analysis that took **71s** reopens in **136ms**.
+
+**A version is the existing `Contract` node, given a second label.** The one structural decision
+worth knowing about:
+
+```
+(:Matter {matter_ref, tenant_id, title, counterparty, contract_type, status, version_count, …})
+  -[:HAS_VERSION {n}]->(:Contract:ContractVersion {version_id, source_sha256, uploaded_at,
+                                                   analysis_status, analysis_error})
+      -[:HAS_FINDING]->(:ClauseFinding)
+      -[:HAS_VIOLATION]->(:PolicyViolation)
+      -[:HAS_REDLINE]->(:Redline)          <- already there, already pointing at the version
+```
+
+Not a separate node beside the contract. Every redline decision from Increment 4 hangs off
+`(:Contract)-[:HAS_REDLINE]->(:Redline)` and is looked up by `file_id`, and every URL in the app
+carries that same id. A distinct node would have meant re-pointing all of it and migrating the
+decisions across — the one thing this increment must not risk. A label re-points nothing, and
+`version_id == file_id` keeps the analyse/decide flow working untouched.
+
+**Reference numbers** are allocated from a `(:Counter {tenant_id, year, kind})` node in one
+statement, so two uploads racing for `MSA-2026-0042` cannot both get it — the second waits on the
+lock the first holds. Version numbers are allocated the same way, inside the statement that
+increments the matter's counter. Allocation happens at the *confirmation*, after extraction has
+already succeeded and after the version is known to exist, so a PDF that fails to parse and a card
+the reviewer cancels both burn nothing.
+
+**Two upload paths**, distinguished by one optional field:
+
+| path | what happens |
+|---|---|
+| `matter_ref` given | the reviewer opened the matter and clicked *Upload new round*. Nothing inferred, nothing asked. The matter is checked for existence and closure **before** extraction, so a closed matter costs a second rather than two minutes. |
+| no `matter_ref` | extracted and stored as an *unfiled* version. The response carries a proposal — title, counterparty, type, dates — pre-filled from what the pipeline already found. `POST /api/matters` confirms it. |
+
+**The one automatic case.** `source_sha256` — SHA-256 over the whitespace-folded full text — is
+stored on every version. An exact match returns "Exactly matches version N of MSA-2026-0042" and
+creates nothing. Folding whitespace is deliberate: PDF extraction is not byte-stable across runs,
+so hashing the raw string would report the same file as different. A matching version that is
+*unfiled* re-offers its confirmation card instead, so a cancelled card never leaves two copies.
+
+**Status is derived wherever it can be.** `IN_REVIEW` vs `REVIEWED` is `pending == 0` on the latest
+version, computed from the redlines rather than stored beside them where it could drift.
+`AWAITING_COUNTERPARTY` and `CLOSED` are human statements and are never overridden by a count.
+`PATCH /api/matters/{ref}/status` is guarded by `APPROVE_REDLINE`, not `ANALYZE` — `VIEWER` holds
+`ANALYZE`, and closing a matter is a judgement about the negotiation, not a query against it.
+
+**An analysis that fails is said out loud.** `analysis_status` moves `NOT_STARTED → RUNNING →
+COMPLETE | FAILED` on the version, written around the run rather than after it. A matter opened
+mid-analysis shows the in-progress state; one whose analysis died shows the reason as a warning.
+Neither is ever rendered as "no findings", which reads as a clean contract. `clauses_extracted` was
+added to `ContractIntelligence` alongside the existing `redlines_generated` so a failed run cannot
+replace a good stored review with nothing.
+
+**The frontend navigates by URL.** `/` is the matters list, `/matters/MSA-2026-0042` is one matter.
+`useRouter` uses `pushState` and `popstate`, so the back button works, a matter opens in a new tab,
+and a hard refresh keeps your place. `localStorage` is demoted to what its name now says — a
+`matters_cache_v1` that paints the last known list while the request is in flight and is replaced
+wholesale by whatever the server says. `IntelligencePage` and `DocumentUpload` are gone; their work
+happens inside a matter, and `/intelligence` redirects to the list rather than 404ing.
+
+**The four bugs, fixed:**
+
+| bug | what it was doing |
+|---|---|
+| model dropdown | `DocumentUpload.tsx` sent `model` in the FormData body; the endpoint declared `model: str = Query(...)`. Every upload has run on `DEFAULT_MODEL_ID`. The endpoint now reads both, body first — `scripts/evaluate_pipeline.py` passes it as a query parameter and still works. Confirmed live: `"model_used":"gemini-flash-lite"`. |
+| upload ignored the tenant header | it read `tenant_id` from a query parameter the frontend never set, so contracts landed in `default-tenant` while redlines were looked up under the header's tenant. |
+| three-way tenant split | query parameter on upload/analyze, header on redlines, hardcoded `"default-tenant"` on status and dashboard. All ten tenant-scoped endpoints now use `Depends(get_current_tenant)`, and a test walks the route table to keep it that way. |
+| duplicate check never fired | `WHERE c.file_id CONTAINS $filename` compared against `UPLOADED_{random}_{date}`, which never contains the filename — and it had no tenant filter, so a collision would have returned another tenant's contract id (bug #1 in the architecture review). Replaced by the tenant-scoped `source_sha256` lookup. |
+
+**Migration.** `scripts/migrate_matters.py` (`make check-matters` / `make migrate-matters`) gives
+every contract that predates matters a single-version matter, with references allocated in upload
+order. It is purely additive — it adds a label and a `Matter` and writes to no `(:Redline)` — and
+idempotent, so it is safe to re-run. A test asserts that no statement it issues contains `DELETE`,
+`REMOVE` or `Redline`. Dry-run against your database: **51 contracts** would be migrated.
+
+**Tests: 359 → 550**, all offline. The failure-case table above is walked row by row in
+`backend/tests/test_matters.py::TestTheFailureCases`.
+
+| file | covers |
+|---|---|
+| `test_matters.py` (87) | the failure-case table, reference numbers, derived status and transitions, source hashing, the migration |
+| `test_matters_api.py` (25) | the wire — 404 for an unknown *and* another tenant's reference, 409 on a double-clicked confirm, 422 on a derived status, 403 for a VIEWER |
+| `test_review_is_resumable.py` (24) | findings reach the graph, a failed analysis never erases a good review, the read-back shape |
+| `test_upload_paths.py` (23) | the four bugs, pinned by inspecting what the routes actually declare |
+| `test_frontend_navigation.py` (29) | static checks that a review has a URL, the list comes from the server, and a background analysis lands without a refresh |
+
+**Also verified against the live stack** (a throwaway tenant, since removed): every statement this
+increment introduces, the full new-contract → confirm → analyse → decide → re-analyse flow, the
+duplicate short circuit, the 409 on a closed matter, and that version 1's approved redline survived
+a re-analysis. That check found one real bug — `list_matters` counted a matter with *no* redlines as
+having one pending, because `coalesce(rl.status, 'PENDING')` over a null `OPTIONAL MATCH` row reads
+as `PENDING`. Fixed, and pinned by a test.
+
+### Addressed in review (Copilot, PR #8)
+
+Nine findings, all nine fixed. Four were about the same thing, and it is the thing this increment
+is *for*: a check performed before a two-minute extraction is not a guarantee.
+
+- **The duplicate check was check-then-write.** Two uploads of the same PDF both pass the
+  pre-flight hash lookup, then spend two minutes extracting, then both write — the exact
+  double-click the increment claims to prevent. The lookup is now the fast path only. The guarantee
+  is a **uniqueness constraint** on `source_key` (`tenant_id|source_sha256`), so the loser is
+  rejected by the database and told which version won. Verified with two real threads: exactly one
+  wins.
+- **`MERGE` does not make a counter singleton.** Two first allocations for the same
+  `(tenant, year, kind)` could create two `Counter` nodes that each return `1`, and two matters
+  claiming one reference. Added uniqueness constraints for the counter, the matter reference and
+  the source key, created at startup and by the migration. Verified: eight concurrent allocations
+  produce eight distinct references and one counter node.
+- **A failed analysis still overwrote the stored review.** `_store_clause_findings` was guarded but
+  `_store_intelligence_results` was not, so the failure path's risk 0.0 / `UNKNOWN` / every-count-zero
+  result replaced a good previous review — and on the matters list that reads as a contract with
+  nothing wrong with it. Nothing is written now unless the analysis ran.
+- **`COMPLETE` was claimed without checking that anything was saved.** A Neo4j write failure was
+  swallowed and the version marked complete anyway. Persistence now reports success, and the status
+  follows it: an analysis that ran and then failed to save is, to whoever reopens the matter,
+  indistinguishable from one that never ran.
+- **A filing failure was reported as success.** `MatterPage` treats every non-error response as
+  filed, so a failed `attach_version` closed the uploader on a round that is not there — and a
+  failed `record_version` produced a confirmation card whose confirmation could only 404.
+  `needs_filing` is now set only once the version is known to exist, and a filing failure returns
+  an explicit recoverable error.
+- **The landing page silently truncated.** For a system whose whole claim is that the review is
+  durable, "the work is there and there is no way back to it" is the worst failure available. The
+  list is paged and says so — `total`, `offset`, `has_more` — with a *Load more* button.
+- **The migration would have filed cancelled uploads.** A version uploaded since this increment and
+  left unfiled is a confirmation card the reviewer has not answered; the scan would have picked it
+  up and burned a reference on a decision they never made. It now skips anything already labelled
+  `:ContractVersion`, while still recovering its own interrupted work via `pending_migration`.
+- **The drop zone was mouse-only.** A click-only `div` in front of a `display: none` input, so
+  keyboard users could not upload at all. It is a `<button>` now.
+- **The duplicate case stayed on the wrong page.** Uploading bytes that belong to a different matter
+  showed a note and left the reviewer looking at the wrong contract. It opens the matter that owns
+  them.
+- **A failed restore looked like an unanalysed contract**, whose obvious next move is to spend two
+  minutes re-deriving a review that is already on the graph. Network and server failures are shown
+  with a retry; only a genuine 404 stays quiet.
+
+**One thing the review did not ask for, found while fixing it.** The loser of a duplicate race
+leaves a `(:Contract)` that never became a version — unreachable, but the migration would later
+file it as a matter of its own and put the duplicate back. It is marked `superseded_by` rather than
+deleted: deletion is irreversible and the node is evidence that two uploads raced.
+
+**And one the legacy data forced.** Migrating the development database showed what the broken
+duplicate check actually did: **52 contracts are 8 distinct documents**, one of them uploaded 18
+times. Filing those as 52 matters would have put the old bug on the landing page and buried the
+eight real contracts. Repeat uploads are grouped into rounds of one matter instead, oldest first.
+Nothing is discarded — every copy keeps its own redline decisions under its own version number.
+
+Tests: **504 → 526.**
+
+### Second review round (Copilot, PR #8)
+
+The re-review found nine more, and they were right about all of them. Four were about the same
+thing again — **a guarantee that is not enforced where the write happens is not a guarantee**:
+
+- **The review was persisted across three separate transactions.** Every `graph.query` call
+  auto-commits, so a failure between the summary write, the findings and the violations left the new
+  score beside the new clauses and the *previous* run's violations — marked FAILED, and not a review
+  of anything. All three are now one statement. Verified by killing the write mid-flight against a
+  live database: the previous review comes back whole, score and clauses and violations together.
+- **`COMPLETE` was claimed when redline storage failed.** `_store_redlines` caught every write
+  exception and returned normally, so the response promised drafted language that reopening the
+  matter would not show. It reports failure now, and the version is marked FAILED.
+- **Two confirmations of one document could each create a matter.** The unfiled check and the
+  `CREATE` were both reads, and nothing in the schema limits a version to one incoming
+  `HAS_VERSION`. The version is now write-locked before the ownership check, so the loser resumes
+  after the winner commits and sees the relationship. Verified: four concurrent confirmations, one
+  winner, one `HAS_VERSION` edge.
+- **A refused attach burned a version number.** The matter's counter was incremented before the
+  ownership check, so a rejected round left a gap — "version 1, version 3". The counter now moves
+  only on rows that pass. Verified: four concurrent rounds produce 2, 3, 4, 5.
+
+The migration took three more:
+
+- **A run that died part-way split one document across two references.** Everything before the
+  failure had committed, so a retry grouped the unattached remainder and made it a *second* matter.
+  It now recovers the matter a previous run created and attaches only what is missing.
+- **Every textless legacy contract hashed the empty string**, so a tenant's documents with no
+  `full_text` and no `summary` would have arrived as versions of one matter — grouping on the
+  absence of evidence. They get an identity of their own.
+- The scan comment now says *why* `pending_migration` exists, since that is the only thing making
+  the two exclusions correct rather than contradictory.
+
+And the upload path had one more destination bug:
+
+- **An unfiled duplicate ignored `matter_ref`.** Uploading a round whose bytes already exist as an
+  unfiled version returned the new-contract confirmation flow, so the matter page closed the
+  uploader and no version ever appeared. The destination the reviewer asked for is honoured.
+
+Four on the frontend:
+
+- **A 200 was taken as proof of persistence.** The server answers with the in-memory results and a
+  warning while marking the version FAILED when saving fails, so the panel claimed a review the
+  server knew it did not have. It re-reads the stored status instead of assuming.
+- **A rejected status transition ejected the reviewer from the matter**, because it wrote into the
+  same state as "could not load this matter" and the render guard replaced the whole page. Action
+  errors are separate and render inline.
+- **Refreshing after *Load more* truncated back to the first page**, so one row starting an analysis
+  made the extra pages vanish ten seconds later. A refresh re-requests the loaded range.
+- **The cache cleanup could stop the app mounting.** If `getItem` threw because storage is disabled,
+  the `catch` called `removeItem`, which throws for the same reason, and the exception escaped the
+  provider — taking the whole app down for the sake of a cache.
+
+Copilot's own agent pushed a fix for two of these to the branch while this was being written —
+the redline return value and the duplicate destination, both of which had been fixed here
+independently. The two were merged rather than one discarded: its `_duplicate_upload_response`
+is kept, because it also handles the case where the winning version cannot be identified at all,
+and the duplicate helper written here was removed.
+
+Tests: **526 → 544**, plus 21 checks against a live Neo4j covering the concurrency and atomicity
+claims with real threads and a deliberately failed write.
+
+### From your manual testing
+
+- **"The word Matters is confusing, can we replace it with Contracts?"** Left as *matter* for now —
+  see the [Decisions log](#decisions-log) for why, and the list page now says what the word means
+  instead of assuming it.
+- **"The app is stuck here"** — the matter page on `Loading SER-2026-0001…` indefinitely. The dev
+  backend had stopped answering (see below); the bug this exposed is that the page had no deadline,
+  no error and no way out. Fixed on both counts.
+- **"After the analysis is complete, the page didn't load the findings without hitting refresh."**
+  Fixed. The analysis runs on a worker thread and outlives the request that started it, which is why
+  leaving the page does not stop it — but the page that came back found the version `RUNNING` and
+  then never asked again. The review panel now polls quietly while a version is running, and the
+  matter page and the matters list do the same for the summary beside each round, so a row stops
+  saying "Analysing" by itself. All three poll only while there is something to watch; an idle page
+  makes no requests. It gives up after ten minutes rather than waiting for ever on a version left
+  `RUNNING` by a server that restarted, and says so.
+
+### A dev-stack trap worth knowing about
+
+Hit twice during your testing, and it looks exactly like an application bug.
+
+**`fastapi dev`'s reloader sometimes kills its worker and never starts a
+replacement.** Seen after a *bulk* file change — a git checkout or rebase
+rewriting several files at once; single edits reload fine. The reloader process
+survives, so the container still reports `Up`, the port is still open, and every
+request simply hangs. The app itself is fine: importing it inside the container
+succeeds, and the lifespan starts and shuts down cleanly in 1.1s.
+
+```bash
+docker compose restart backend      # the fix
+```
+
+Two things were added so it costs a minute instead of an hour:
+
+- a **healthcheck** on the backend service, so `docker ps` says `unhealthy`
+  rather than `Up`;
+- a **30-second deadline on every frontend request** (`apiFetch`), because
+  `fetch` has none of its own. That is what turned *"the app is stuck here"*
+  — `Loading SER-2026-0001…` for ever, no error, no retry, no way back — into a
+  message and a *Try again* button. The calls that genuinely take minutes, the
+  upload and the analysis, opt out with `timeoutMs: 0`.
+
+And the trigger turned out to be plainer than "bulk changes": **editing a single
+test file restarted the server**, and one of those restarts wedged it. Tests are
+never imported by the server, so `docker-compose.yml` now runs
+`uvicorn --reload --reload-exclude 'backend/tests/*'` instead of `fastapi dev`,
+which has no such flag. Verified: touching a test file no longer reloads;
+touching `backend/api/matters.py` still does.
+
+### One thing this increment could not finish
+
+`frontend/src/services/enhancedSearchApi.ts:1` is fixed (bug #2), but **that was not the only thing
+breaking `npm run build`**. The build fails on **31 TypeScript errors across 15 files** — unused
+imports, implicit `any`, index-signature errors — none of them in code this increment wrote. Fixing
+bug #2 alone does not produce a working production build, and the note in *Known issues* implying
+it would is wrong.
+
+What I did: fixed bug #2, then fixed the ten errors that were in files this increment touches
+(`ContractIntelligence.tsx`, `ClausesDetail.tsx`, `useModal.ts`, and by deleting `DocumentUpload.tsx`).
+That took the count from **41 to 31**, and lint in those files from 4 errors to 2. The rest sit in `ViolationsDetail`, `ErrorBoundary`, the
+documentation tabs, `theme-provider`, `tabs.tsx`, the chat input and the search results — files
+this increment has no reason to touch and no test coverage for. I left them rather than change
+behaviour in areas I cannot verify offline.
+
+`npx vite build` succeeds (esbuild does not type-check), which is why the dev server has always
+worked. Everything new type-checks clean and lints clean.
+
+### How to test
+
+```bash
+make test
+```
+
+550 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
+
+Then, with the stack up (`make run`):
+
+```bash
+make check-matters      # writes nothing; lists what it would do
+make migrate-matters    # creates the matters, and the uniqueness constraints
+```
+
+On your database that is **51 contracts becoming 8 matters** — the repeat uploads the old duplicate
+check never caught become rounds of one matter rather than 51 separate ones. Nothing is discarded:
+every copy keeps its own redline decisions under its own version number. The migration is additive
+and idempotent, and your Increment 4 decisions come through untouched. Then, in the browser:
+
+1. **The landing page is the matters list.** `/` shows every contract from the server, with its
+   reference number, counterparty, version count and how many redlines are still pending.
+2. **The existing flow, in its new home.** Open a migrated matter, press *Analyze*, decide a
+   redline. This is the Increment 1–4 path; it should behave exactly as before.
+3. **Hard-refresh.** The list is intact, the matter reopens on the same clause findings — no
+   re-analysis, no two-minute wait — and the decision is still recorded.
+4. **`/matters/MSA-2026-0001` in a new tab** loads that matter directly. The back button works.
+5. **Upload two different contracts as new matters.** Each shows a confirmation card pre-filled
+   with the counterparty and type from extraction. Correct anything, confirm, and the reference is
+   allocated. Cancelling one burns no number.
+6. **Re-upload a byte-identical file.** No new version — it opens the matter with
+   *"Exactly matches version 1 of …"*, and returns in about a second rather than two minutes.
+7. **Upload a new round from a matter's own page.** It becomes version 2, and version 1's
+   decisions are still there under version 1.
+8. **Close a matter, then try to upload into it.** Refused by name, immediately. *Reopen* puts it
+   back in review.
+9. **Pick `gemini-flash-lite` and upload.** The debug panel should show the call using it — this
+   is the `model` fix. It is noticeably faster than the old silent default.
+
+Worth knowing before you start: `npm run build` still fails (see above), but the dev server the
+stack runs is unaffected.
+
+### Your feedback
+
+_(write here)_
+
+---
+
+## Increment 7 — Content-addressed chunks
+
+**Status: `specified — not started`.**
+
+**Goal:** give every chunk an identity derived from its content, so unchanged text is never
+re-embedded and two versions of a contract can be compared at all. Chunk embedding is one network
+call per chunk — measured at ~210ms each, so ~42s for a 200-chunk contract — and today every upload
+pays it in full even when one paragraph changed.
+
+### Why the hash definition must be settled in this increment
+
+Everything that determines *what the hash is* has to land together. If a later increment changes
+the hash from "whole chunk" to "body only, no overlap", **every stored hash is invalidated**: the
+version membership, the match results and the embedding reuse all become meaningless, and
+recovering needs a migration that re-hashes and re-embeds everything. So heading-stripping and
+overlap-removal belong here, not later.
+
+### What changes
+
+- **`canonical()`** — NFKC, soft hyphens removed, de-hyphenation across line breaks, smart quotes
+  folded, whitespace collapsed, casefolded. The existing `_redline_id` normalisation
+  (`contract_intelligence_service.py:294`) is the germ of this but is too weak for PDF text.
+- **Heading stripped before hashing.** The section number is kept as a property on the membership
+  relationship, not in the hashed body — otherwise inserting a section renumbers every heading
+  after it and invalidates the whole document.
+- **Overlap off.** `_add_overlap` (`section_strategy.py:193`) prepends 20% of chunk *i* onto chunk
+  *i+1*, so a chunk's identity depends on its neighbour. It also mutates `next_chunk['content']` in
+  place and then uses the grown chunk as the source for the next overlap, so overlap compounds down
+  a chain of sub-chunks. Deleting it fixes both. Retrieval context comes from joining neighbours by
+  `INCLUDES` order at query time instead.
+- **Section strategy pinned, profile recorded.** `ChunkingProfile` on each version: extractor,
+  normaliser version, chunker version, strategy, min/max size, overlap. Strategy selection runs
+  **once, for version 1**; later versions reuse the recorded profile rather than re-running
+  threshold-based scoring that can flip on a one-word edit (`strategy_selector.py:76-90`).
+- **`MERGE (c:Chunk {tenant_id, hash})` — never on `hash` alone.** A global key would collapse
+  identical boilerplate ("governed by the laws of the State of Delaware") from two customers into
+  one shared node: a tenancy violation, and a GDPR deletion that cannot be performed without
+  destroying someone else's version.
+- **`(:ContractVersion)-[:INCLUDES {order, heading}]->(:Chunk)`** as the version's membership list.
+  Unchanged chunks are referenced, not copied.
+- **Embedding reuse.** Falls out of the MERGE: if the chunk node exists, so does its embedding.
+  Guarded by `embedding_model` and `embedding_dimensions` stored on the chunk — the pattern already
+  used for `Section` and `Clause` in `embedding_service.py:96,112` — so a model change forces a
+  re-embed rather than silently serving stale vectors.
+- **Advisory match on the New-contract path.** Not a scan: look up only the incoming document's
+  hashes and let the graph walk back to matters.
+
+```cypher
+UNWIND $hashes AS h
+MATCH (c:Chunk {tenant_id: $tenant, hash: h})
+        <-[:INCLUDES]-(v:ContractVersion)<-[:HAS_VERSION]-(m:Matter)
+WHERE m.status <> 'CLOSED'
+RETURN m.matter_ref, m.title, v.n, count(DISTINCT h) AS shared
+ORDER BY shared DESC LIMIT 5
+```
+
+O(chunks in the new document), not O(chunks in the tenant). Two numbers per candidate, because one
+is not enough: `forward = shared/|new|` and `backward = shared/|matter|`. A genuine new round scores
+high on both; an SOW that merely quotes an MSA's boilerplate scores low on `backward`. Weight shared
+chunks by `1/log(1+df)`, where `df` is the chunk node's degree, so boilerplate contributes almost
+nothing. Anything at or above **80%** is shown as a link with its percentage. **It never decides
+anything** — it sits next to the choice the user was going to make anyway.
+
+### Retention: nothing is deleted
+
+A superseded chunk is still referenced by the version that used it, so it is not garbage — it is the
+history this system exists to keep. Never delete a chunk because a newer version replaced it;
+deletion is only ever justified by no version referencing it:
+
+```cypher
+MATCH (c:Chunk) WHERE NOT (:ContractVersion)-[:INCLUDES]->(c) DETACH DELETE c
+```
+
+True orphans arise only from failed uploads or an explicitly withdrawn version.
+
+### Stability tests — the part that makes it trustworthy
+
+All offline, no stack, no keys:
+
+- **Edit is local.** Change one paragraph; assert at most two chunk hashes move. This is the
+  regression guard — if anyone later swaps in a greedy token packer, it fails immediately instead
+  of quietly doubling the embedding bill.
+- **Insertion is local.** Insert a whole new section; assert every chunk after it is unchanged.
+- **Golden hashes.** A fixture's hash list is pinned; changing it requires bumping
+  `chunker_version`.
+- **Reconstruction.** Concatenating chunks in `order` returns the canonical text. Catches
+  overlap contamination and dropped text outright.
+
+### Measured expectations, so nobody is surprised
+
+Simulated on `SampleContract-Shuttle.pdf` (24 sections) by inserting a new Section 4 and
+renumbering everything after it:
+
+| hashing scheme | chunks surviving | stable |
+|---|---|---|
+| naive, whole chunk | 18 / 37 | 49% |
+| heading stripped | 30 / 37 | **81%** |
+| heading stripped + refs masked | 31 / 37 | 84% |
+
+Reference masking is **not** in this increment: it buys 3 points here and would hide a lawyer
+deliberately repointing a cross-reference, which is a real edit. Revisit only if a
+reference-dense contract shows it hurting.
+
+The residual failures degrade gracefully — their similarity to the correct match is 0.998–0.999, so
+the Increment 9 diff still classifies them correctly and only the embedding skip is lost. Worst case
+overall is one full re-embed: ~42s and a fraction of a cent. **Content addressing is an
+optimisation layered on a diff that works without it.**
+
+### Known limits of chunk identity, and what to do about them
+
+Discussed and measured on 2026-09-13. None of these block the increment; they are written down so
+nobody rediscovers them.
+
+- **PDF re-export is the dominant real-world threat.** The counterparty edits in Word and
+  re-exports; ligatures, hyphenation and reading order shift, and every hash changes even though the
+  text did not. `canonical()` absorbs most of it, chunking on semantic boundaries absorbs more, and
+  the embedding-similarity fallback catches the rest. **Prefer DOCX wherever the workflow allows** —
+  extraction is far more stable than from PDF. Note also that
+  `TextExtractionService.extract_with_fallback` (`text_extractors.py:51`) tries extractors in order
+  and returns the first yielding >50 characters, **without recording which one won**; different
+  libraries produce different whitespace for the same file. That is why `extractor` is part of the
+  profile.
+
+- **Documents with no detectable headings lose boundary locality entirely.** If none of
+  `SectionStrategy`'s five patterns match — an unnumbered NDA, a scan with broken line breaks —
+  selection falls through to paragraph or sentence chunking, which packs greedily, so a single
+  insertion shifts every boundary after it and invalidates every hash downstream. Silently. The
+  principled fix is **content-defined chunking**: a rolling (Rabin) fingerprint placing boundaries
+  where the hash matches a mask, which is how rsync/restic/borg get locality without structural
+  anchors. Not in this increment — but it is the right answer when an unstructured document shows
+  up, and a cheap detector ("no section pattern matched") should at least *flag* the document as
+  having unstable chunk identity rather than pretending otherwise.
+
+- **Mid-chunk section numbers survive a leading-anchored strip.** Measured: after heading-stripping,
+  one residual chunk still differed only as `v1='13.' -> v2='14.'` — a *second* section number
+  inside the body, because that heading did not trigger a split. Fixing it means distinguishing
+  section numbers from dollar amounts and statute citations ("10115", "Title 21", "$2,500"), which
+  is real work for a small payoff. Left alone deliberately.
+
+- **Sub-chunk boundaries are the only failure that misleads.** In the same simulation one chunk fell
+  to **0.584** similarity — v1 1,607 chars, v2 663 — because `_split_large_section` re-divided an
+  oversized section differently, compounded by overlap. Everything else scored 0.998–0.999 and
+  classifies correctly. Removing overlap (above) is what fixes this, and it is the reason removal is
+  in scope rather than deferred.
+
+- **GDPR deletion is family-scoped, not version-scoped.** Because chunks are shared between
+  versions, "delete version 1" will **not** remove text that version 2 still references. That is
+  normally the desired behaviour, but if a document is uploaded by mistake and must genuinely be
+  gone, the honest answer is purging the whole matter. Worth knowing before a compliance
+  conversation assumes per-version deletion works.
+
+### How to test
+
+```bash
+make test    # the stability tests are the point
+```
+
+With the stack up: upload a contract, then upload a lightly edited copy as a **new matter**. The
+debug panel should show embeddings generated only for the changed chunks, and the New-contract flow
+should offer the existing matter with a percentage and a link — while still letting you create a
+new matter anyway.
+
+### Your feedback
+
+_(write here)_
+
+---
+
+## Increment 8 — Analyse the whole contract
+
+**Status: `specified — not started`.**
+
+**Goal:** `ClauseDetectorTool` truncates at 12,000 characters (`intelligence_tools.py:95`). On the
+real contracts in `data/`, that means the system silently ignores most of the document and reports
+the result as a completed review:
+
+| contract | chars | analysed | skipped |
+|---|---|---|---|
+| `Shell_Pacific_Corp_MESA.pdf` | 313,620 | 4% | **96%** |
+| `Salesforce_MSA.pdf` | 70,757 | 17% | **83%** |
+| `SampleContract-Shuttle.pdf` | 32,885 | 36% | **64%** |
+| every `evaluation/` fixture | ≤1,317 | 100% | 0% |
+
+Every clause finding, policy check, risk score and redline on a long contract comes from the first
+few pages. And the last row is why `make eval` reports 1.00 across the board: **all three fixtures
+fit inside the window**, so the metric is structurally incapable of seeing this. Increment 5 noted
+that "1.00 says the fixtures are not yet hard enough" — this is what it was saying.
+
+### What changes
+
+- **Chunk-aligned windows instead of truncation.** Not one call per chunk (200 calls on the Shell
+  MESA is unaffordable): pack consecutive whole chunks into windows up to the token budget, never
+  splitting a chunk. 313k characters becomes ~26 calls. Run them concurrently within the provider's
+  rate limit.
+- **Chunk-aligned is load-bearing.** Because every window is a set of whole chunks, findings map
+  back to specific chunks — which is exactly what makes Increment 9's incremental re-analysis
+  possible. It reuses Increment 7's `INCLUDES` membership rather than inventing a parallel
+  structure.
+- **Merge and dedupe across windows.** The same clause can surface twice at a boundary; merge on
+  clause type plus evidence-span hash. Grounding still validates against the window the finding
+  came from.
+- **Policy checking batched too.** It currently sends every clause in one prompt; a long contract
+  yields far more clauses, so it needs the same treatment.
+- **Longer eval fixtures, with breaches placed late.** Without these the evaluation still cannot
+  fail on this, and an increment whose metric cannot fail is not measured.
+
+### Expect the scores to drop
+
+Analysing previously invisible text means more findings and more chances to be wrong. That is the
+metric becoming honest, not a regression. Run `make eval` before and after so the two are
+distinguishable — the same discipline as Increment 5.
+
+### Your feedback
+
+_(write here)_
+
+---
+
+## Increment 9 — Incremental re-analysis and the change report
+
+**Status: `specified — not started`.** The payoff of the
+[Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) decision.
+
+**Goal:** answer the question a legal team actually asks — *what changed since last round, and did
+the counterparty accept our redline?* Nothing else on the market does this well.
+
+### What changes
+
+- **Profile enforcement.** Version N is chunked with version 1's recorded `ChunkingProfile`. If
+  profiles differ, refuse to diff: re-chunk and re-embed wholesale, and say so.
+- **The diff engine**, all stdlib. `difflib.SequenceMatcher(None, prev_hashes, new_hashes,
+  autojunk=False)` over hash lists gives equal/replace/delete/insert directly. `autojunk=False`
+  matters: the default heuristic discards elements appearing in >1% of sequences longer than 200,
+  which on a long contract with repeated boilerplate would silently misalign.
+- **Classify `replace` blocks** by similarity — cosine over the stored embeddings, which
+  Increment 7 already has. Above ~0.80 it is a MODIFIED chunk (show the word-level diff using the
+  existing `wordDiff.ts` LCS); below, it is a delete plus an insert.
+- **Moves are free.** A hash appearing in both the delete and insert sets is a relocation, not a
+  change — and a relocated indemnity clause is a real negotiation signal.
+- **Incremental re-analysis.** Re-analyse only the windows containing changed chunks. Carry findings
+  and redline decisions forward for unchanged ones, joined on `(rule_id, clause_hash)`.
+  `_redline_id` already keys on a hash of normalised clause text, so re-keying it on `matter_ref`
+  instead of `contract_id` is most of the work.
+- **`GET /api/matters/{ref}/changes?from=2&to=3`** and the UI that renders it.
+
+### Your feedback
+
+_(write here)_
+
+---
+
+## Out-of-increment — export the review
+
+Not scheduled, roughly a day, and worth doing whenever convenient. A reviewer can approve six
+redlines today and has **no way to get them out of the browser**: `final_text` is written, read
+back, rendered, and consumed by nothing. An export of the approved edits with their rationale is
+what makes the human-in-the-loop work into a work product. Under the Product-shape decision this is
+a *review* artifact — findings, decisions and suggested edits — **not** an amended contract.
+
+
 ## Decisions log
 
 Settled — do not re-litigate without saying so explicitly.
@@ -1022,12 +1749,187 @@ Settled — do not re-litigate without saying so explicitly.
 | **Quarantine, don't delete** unused subsystems | Supervisor consensus/quality gates/circuit breakers, the pattern orchestrator, the planning agent and the six chunking strategies move off the live path but stay in the repo. |
 | **One contract end-to-end, asserted** is the first milestone | Matches the design doc's own "POC Scope — Start Narrow" guidance. |
 | **Work on `main`** | A parallel session is also committing here; small increments reduce collision risk. |
+| **Source of truth for the _review_, not the contract** | Settled 2026-09-13. The contract stays in the customer's Word/CLM; this system owns the review history. See [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for). |
+| **A version *is* the `Contract` node, relabelled** | Settled while building Increment 6. `(:Contract:ContractVersion)` with `version_id == file_id`, rather than a new node beside it. Every Increment 4 redline decision hangs off that node by `file_id`, and every URL carries the same id — a separate node would have meant migrating the decisions across, which is exactly the risk the increment exists to remove. |
+| **The word stays "matter"** | Raised during your testing on 2026-09-13: *"The word Matters is confusing, can we replace it with Contracts?"* They are genuinely different — a matter is the negotiation, `(:Contract)` is one uploaded round — but since we settled one-document-per-matter, "contract" would arguably be the better word. It is not renamed because `Contract` is already taken in the code for a single version, so a UI-only rename creates a permanent vocabulary gap and a full rename is a data migration over live contracts and redlines. **Decided: keep it, and say what it means on the page** rather than assume the reader knows. Revisit if it confuses anyone else. |
+| **Status is derived, not stored, wherever it can be** | `IN_REVIEW` / `REVIEWED` is `pending == 0` over the latest version's redlines. Storing it would be a second copy of a fact the redlines already hold, free to drift. Only `DRAFT`, `AWAITING_COUNTERPARTY` and `CLOSED` — the transitions a human makes — are written down. |
+
+## Product shape — what this system is the source of truth for
+
+**Decided 2026-09-13.** The question was whether this system holds the contract and emits a
+final document each round, or whether it reviews a document that lives elsewhere. Three shapes
+were on the table:
+
+| | Shape | Verdict |
+|---|---|---|
+| A | Pure advisory — review one upload, output findings | Too thin. The reviewer's decisions have nowhere to go. |
+| B | System of record for the **contract** — apply redlines, emit v_next as DOCX | A product, not an increment. Needs document reconstruction from clause spans, formatting fidelity, compare/merge, eventually e-sign. Clause extraction does not even store character offsets into the source, so text cannot be spliced back into position today. |
+| **C** | **System of record for the _review_** | **Chosen.** |
+
+**C in one sentence:** the contract lives in the customer's Word or CLM and we never claim to own
+it; we own the review — every version, every finding, every human decision and the rationale behind
+it, across the whole negotiation.
+
+**Why.** It matches the design guide, which calls the system a "contract review **copilot**" whose
+Final Output is "contract summary, risk dashboard, clause-level findings, and suggested edits" —
+a review artifact, not a contract. It is also the only one of the three that produces something a
+legal team cannot already get: *"we rejected this indemnity wording twice in the last round"* is a
+question no drafting tool answers.
+
+**What follows from it, and is therefore in scope:**
+
+- A **contract family / version model**. A stable family id survives re-upload; each `Contract`
+  becomes a version under it. Decisions carry forward across versions by `(rule_id, clause_hash)`,
+  so a reviewer is never asked to re-approve language they already approved.
+- A **change report between versions** — what moved since last round, and whether the counterparty
+  accepted our redline. This is the feature, not a detail of it.
+- An **export** of the review. Today a reviewer can approve six redlines and has no way to get them
+  out of the browser; `final_text` is written, read back, rendered, and consumed by nothing.
+
+**What follows from it, and is therefore out of scope:** generating the amended contract, DOCX with
+track changes, and anything that would make this system the place the contract text is edited.
+
+**Three things the current code does that contradict C**, all to be fixed by the version model:
+
+1. `Contract.full_text` is written once at `CREATE` (`contract_repository.py:89`) and never updated,
+   so the stored copy never reflects an approved redline. Under C that is correct — but it should be
+   explicit, not accidental.
+2. ~~The duplicate check matches the filename against `file_id`~~ — **fixed in Increment 6.** It is
+   now a tenant-scoped `source_sha256` match, and a revised contract uploaded into its matter becomes
+   version 2 rather than a second unrelated `Contract`.
+3. Chunk storage `MERGE`s a `Document` on the **filename** (`document_upload.py:253`) and then
+   `CREATE`s fresh chunks, so v1 and v2 chunks accumulate under one node and semantic search returns
+   a blend of both with no way to tell which version a hit came from.
+
+~~`ContractVersion` / `HAS_VERSION` exist today only inside `enterprise_schema_migration.py`~~ —
+**closed by Increment 6.** `MatterRepository` reads and writes them, and every contract that
+predates them gets one from `scripts/migrate_matters.py`. Point 3 above — chunks accumulating under
+a `Document` MERGEd on the filename — is untouched and belongs to Increment 7.
+
 
 ## Deferred — in the design doc, deliberately not now
 
 Vector index and hybrid search (there is currently **no** vector index — similarity is a full
 cosine scan); Qwen teacher/student, LoRA, distillation, vLLM serving, risk-based model routing;
 Ragas / DeepEval; A/B shadow evaluation; data masking, anonymization and retention policies.
+
+## Roadmap — is Neo4j the right store? (open, **not decided**)
+
+Investigated at length on 2026-09-13. **Deliberately left open** — this records the evidence and
+both cases so the decision can be made later without re-deriving any of it. Nothing here is settled;
+do not treat it as a Decisions-log entry.
+
+### What the code actually does today
+
+- **Every relationship is a 1:N parent→child "owns" edge.** The live ones are `HAS_RULE`,
+  `HAS_CHUNK`, `HAS_SECTION`, `CONTAINS_CLAUSE`, `HAS_REDLINE`, `PARTY_TO`, `HAS_GOVERNING_LAW`.
+- **Zero multi-hop traversals.** Grepping for two-relationship patterns
+  (`)-[:X]->()-[:Y]->(`), variable-length paths (`*..`) and `shortestPath` returns nothing. The
+  deepest query in the repo is `MATCH (c:Contract)-[:HAS_SECTION]->(s:Section)` filtered by
+  `tenant_id` (`enhanced_contract_search_tool.py:153`) — i.e. `SELECT … FROM sections JOIN
+  contracts`.
+- **No graph algorithms.** Four sites call `gds.similarity.cosine`
+  (`advanced_rag_agent.py:75`, `policy_repository.py:200`, `chunk_embedding_service.py:198,215`)
+  but `docker-compose.yml:65` installs only APOC, so those would throw `Unknown function` if
+  reached. The live search path uses the built-in `vector.similarity.cosine` instead.
+- **No vector index exists.** Nothing issues `CREATE VECTOR INDEX`. The things named like vector
+  indexes in `multi_level_embeddings.py:41,53,73,78` are plain range indexes on a 1536-float list
+  property and do nothing for similarity — every semantic search is a full cosine scan.
+- **`neo4j:5-community`** (`docker-compose.yml:62`): no row-level security, no PITR backups, no
+  clustering, no multi-database.
+
+### What the project's own specs ask for
+
+- The design guide (`AI-Powered-Smart-Contract-Review-Guide.pdf`, p.~16): *"we utilize a robust
+  **vector database (such as Qdrant or pgvector)** to store and index our legal knowledge base…
+  hybrid search combining vector similarity with metadata filters"*, and Graph RAG is
+  *"**recommended for Phase 2** of the Proof of Concept. While it adds a layer of complexity…"*
+- `docs/Phase1_Core_Features_Design.md` specifies the **entire** core model — chunks, lineage,
+  embeddings, analysis results, tenancy with RLS, versioning — in **PostgreSQL DDL**, with
+  `ivfflat` vector indexes.
+- `docs/Enterprise_Database_Design.md` is polyglot and gives Neo4j one job: **data lineage and
+  amendment chains**.
+
+The implementation inverted this: the Phase-1 relational model became node labels
+(`ProcessingLineage`, `DocumentEmbedding`, `ContractVersion`, `ContractAnalysis` are literal
+translations of those tables), and the Phase-2 graph was never built.
+
+### The case for keeping Neo4j
+
+- **Cross-clause risk detection is genuinely graph-shaped.** The guide's own example — *"a liability
+  cap in one section subtly undermines an indemnification clause in another"* — is a query where the
+  path between two clauses is the answer. Recursive CTEs handle two hops; four gets unpleasant, and
+  you hand-roll cycle detection.
+- **Multi-hop reasoning**: termination → notice period → cure period.
+- **Obligation and deadline mapping**, queried in both directions.
+- **Amendment lineage** — "which version of clause 9 is in force as of date X, after three
+  amendments?" `ContractVersion`, `HAS_VERSION` and `HAS_LINEAGE` are defined and unused; this is
+  the shape they were for.
+- **Provenance DAGs** — document → chunk → embedding → extraction → human approval, walked
+  backwards to answer "what evidence produced this finding?"
+- **Schema flexibility while the clause relationships are still being discovered.**
+
+### The case against
+
+- **Vector search is its weakest axis and retrieval is the hot path.** HNSW only, no quantization,
+  no native reranking, manual hybrid fusion. Qdrant and pgvector both beat it here.
+- **No RLS, and tenancy is hand-rolled.** 75 `MATCH (c:Contract` sites; isolation depends on each
+  remembering `tenant_id`, with no database-level backstop. Several live ones don't (see Known
+  issues).
+- **Weak declarative integrity.** Community gives uniqueness constraints and nothing else — no FKs,
+  no CHECK. "MODIFIED requires edited_text" lives in Python because the DB cannot express it.
+- **Community edition vs the stated production requirements** (99.9% uptime, RTO <15min, RPO <5min,
+  multi-region) — that is Enterprise or Aura Professional+, materially pricier than managed
+  Postgres.
+- **Compliance tooling is thin**: GDPR right-to-be-forgotten, retention policies, PITR, column-level
+  encryption and temporal tables are all mature in Postgres and DIY here.
+- **Reporting is second-class** — no materialized views, window functions or partitioning.
+- **Polyglot cost.** Following the design doc and adding a vector DB makes Neo4j a *third* store
+  holding only relationships.
+
+### The crux
+
+Neo4j is a good fit for perhaps 20% of the data model and mediocre for the rest — but that 20% is
+the part that differentiates the product. The real problem is not graph vs. relational: it is that a
+**containment** graph was built (Contract *owns* Section *owns* Clause — hierarchy, which relational
+does better) where a **dependency** graph is needed (Clause *limits / conditions / supersedes*
+Clause — which only a graph does well).
+
+### The two paths, for whenever this is picked up
+
+**A — keep Neo4j and make it load-bearing.** Build the clause-dependency graph: `LIMITS`,
+`CONDITIONS`, `SUPERSEDES`, `CROSS_REFERENCES` between `Clause` nodes, and ship cross-clause risk
+detection. Roughly a day for a first version. This is the only thing that justifies the dependency,
+it is in the spec, and it would make the "GraphRAG" claim in `README.md` and
+`docs/RESUME_WRITEUP.md` true. It would also make the section-renumbering problem solve itself,
+since cross-references would resolve to stable section identities rather than numbers.
+
+**B — migrate to Postgres + pgvector.** A single-document extract → check → redline → approve
+pipeline with RLS, real constraints and real ANN search is better served there, and it drops a
+dependency. Cost: ~40 Cypher queries across ~15 files, and persistence is not abstracted — services
+call `repository.graph.query(...)` with raw Cypher directly.
+
+**Decision rule:** *does the product need to answer questions where the path between clauses is the
+answer?* The design guide says yes. The code says not yet. The expensive outcome is neither — paying
+Neo4j's costs without collecting its benefits.
+
+### Interim position (agreed 2026-09-13)
+
+Do not migrate, and do not defend the current schema. Neo4j is **not** the bottleneck — the debug
+traces put one LLM call at 84% of an upload and all three at ~100% of an analysis, with Neo4j round
+trips under 1% combined. Two cheap fixes are worth doing regardless of which path is eventually
+chosen: **a real vector index**, and **a single tenant-scoped query helper** so isolation is not
+re-implemented 75 times.
+
+**Revisit when:** Increment 9 lands, or a real customer contract makes full-scan similarity too slow
+— whichever comes first.
+
+### A framing note
+
+`README.md` and `docs/RESUME_WRITEUP.md` both lead with "Agentic GraphRAG" and "graph-based
+knowledge system". Anyone who opens the repo sees single-hop joins. Either describe it accurately
+("Neo4j-backed contract store with multi-level vector search") or take path A and earn the label.
+
 
 ## Known issues not yet scheduled
 
@@ -1041,3 +1943,21 @@ Ragas / DeepEval; A/B shadow evaluation; data masking, anonymization and retenti
 - No PII redaction on ingest; the security validator detects and warns only.
 - The LLM branches of section, clause and CUAD extraction are stubs whose response parsers
   `return []`; only the regex paths produce data.
+
+### Found 2026-09-13 during the architecture review — verify after the increments land
+
+Recorded rather than fixed, at your request. Several sit in code Increments 6–8 rewrite, so re-check
+each once those land rather than fixing them twice.
+
+| # | Bug | Where | Why it matters |
+|---|---|---|---|
+| 1 | ~~**Duplicate check has no tenant filter.**~~ **Fixed in Increment 6.** Replaced by `MatterRepository.version_by_source_hash`, which matches `(:ContractVersion {tenant_id, source_sha256})` — tenant-scoped by construction, and pinned by `test_upload_paths.py` | `api/document_upload.py` | was cross-tenant disclosure |
+| 2 | ~~**Frontend build is broken.**~~ The stale import is fixed in Increment 6 — but it was **not the only cause**. `npm run build` still fails on 31 `tsc` errors across 15 files (unused imports, implicit `any`, index-signature errors), down from 41. Increment 6 fixed the ten in files it touched; the rest sit in `ViolationsDetail`, `ErrorBoundary`, the documentation tabs, `theme-provider`, `tabs.tsx`, the chat input and the search results. `npx vite build` succeeds, which is why dev has always worked | `frontend/src/` (15 files) | still no production build; **needs its own scheduled pass** |
+| 3 | **Precedent matching silently returns nothing.** Query matches `[:CONTAINS]`, but the write path creates `[:CONTAINS_CLAUSE]` | `agents/enhanced_cuad_tools.py:354` | the missing `tenant_id` recorded in Increment 1 is not the whole story; this is the other half |
+| 4 | **Chat rejects ordinary contract questions.** `TopicValidator` matches `\bcontract\b`, which does **not** match "contracts", and its allowlist has "indemnity" but not "indemnification". "Summarise the indemnification clauses in our contracts" is refused as `OUT_OF_SCOPE` | `governance/validators/topic.py:8-13` | the symptom is noted in the debug-panel section; this is the root cause |
+| 5 | **Dead import.** `create_production_router` is imported and never mounted | `backend/main.py:15` | misleading — suggests a production route set that does not exist |
+| 6 | **Unused duplicate modules.** `backend/domain/contracts/` and `backend/domain/search/` duplicate `domain/entities.py` and `domain/search_entities.py`. Only `domain/policies/` and `domain/documentation/` are imported | — | two sources of truth for the same entities |
+
+All four bugs that were "covered by Increment 6 rather than listed above" are now fixed: the model
+dropdown having no effect on upload, upload ignoring `X-Tenant-ID`, the three-way tenant split, and
+the duplicate check never firing. See [Increment 6 — What changed](#increment-6--multiple-contracts-each-resumable).

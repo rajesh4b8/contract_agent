@@ -36,16 +36,65 @@ export function newCorrelationId(): string {
   return `fe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** `fetch`, with the caller's identity and a correlation id attached. */
-export async function apiFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  return fetch(path, {
-    ...init,
-    headers: {
-      ...identityHeaders(),
-      'X-Correlation-ID': newCorrelationId(),
-      ...(init.headers ?? {}),
-    },
-  });
+/**
+ * How long a request may hang before we call it dead.
+ *
+ * Generous, because an analysis legitimately takes minutes. But not infinite:
+ * `fetch` has no timeout of its own, so a backend that has stopped answering
+ * leaves the page on a spinner for ever — no error, no retry, no way out.
+ * Observed exactly that with a wedged dev server: "Loading SER-2026-0001…" and
+ * nothing else, indefinitely.
+ */
+export const DEFAULT_TIMEOUT_MS = 30_000;
+
+/** Thrown when a request ran out of time, so callers can say so specifically. */
+export class RequestTimeout extends Error {
+  constructor(path: string, ms: number) {
+    super(
+      `The server did not respond within ${Math.round(ms / 1000)}s (${path}). ` +
+      `It may be restarting.`,
+    );
+    this.name = 'RequestTimeout';
+  }
+}
+
+/**
+ * `fetch`, with the caller's identity, a correlation id, and a deadline.
+ *
+ * Pass `timeoutMs: 0` for the calls that are genuinely allowed to take as long
+ * as they take — running an analysis is minutes of model calls.
+ */
+export async function apiFetch(
+  path: string,
+  init: RequestInit & { timeoutMs?: number } = {},
+): Promise<Response> {
+  const { timeoutMs = DEFAULT_TIMEOUT_MS, ...rest } = init;
+
+  const controller = new AbortController();
+  const timer =
+    timeoutMs > 0 ? setTimeout(() => controller.abort(), timeoutMs) : undefined;
+
+  try {
+    return await fetch(path, {
+      ...rest,
+      // A caller's own signal wins; otherwise the deadline drives it.
+      signal: rest.signal ?? controller.signal,
+      headers: {
+        ...identityHeaders(),
+        'X-Correlation-ID': newCorrelationId(),
+        ...(rest.headers ?? {}),
+      },
+    });
+  } catch (e) {
+    // `AbortError` is what a timeout looks like from here, and "The user
+    // aborted a request" is not a useful thing to show a reviewer.
+    if (e instanceof DOMException && e.name === 'AbortError' && timeoutMs > 0) {
+      throw new RequestTimeout(path, timeoutMs);
+    }
+    throw e;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 /**
