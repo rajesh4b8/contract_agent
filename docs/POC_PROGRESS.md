@@ -1225,7 +1225,7 @@ order. It is purely additive — it adds a label and a `Matter` and writes to no
 idempotent, so it is safe to re-run. A test asserts that no statement it issues contains `DELETE`,
 `REMOVE` or `Redline`. Dry-run against your database: **51 contracts** would be migrated.
 
-**Tests: 359 → 544**, all offline. The failure-case table above is walked row by row in
+**Tests: 359 → 550**, all offline. The failure-case table above is walked row by row in
 `backend/tests/test_matters.py::TestTheFailureCases`.
 
 | file | covers |
@@ -1234,7 +1234,7 @@ idempotent, so it is safe to re-run. A test asserts that no statement it issues 
 | `test_matters_api.py` (25) | the wire — 404 for an unknown *and* another tenant's reference, 409 on a double-clicked confirm, 422 on a derived status, 403 for a VIEWER |
 | `test_review_is_resumable.py` (24) | findings reach the graph, a failed analysis never erases a good review, the read-back shape |
 | `test_upload_paths.py` (23) | the four bugs, pinned by inspecting what the routes actually declare |
-| `test_frontend_navigation.py` (23) | static checks that a review has a URL, the list comes from the server, and a background analysis lands without a refresh |
+| `test_frontend_navigation.py` (29) | static checks that a review has a URL, the list comes from the server, and a background analysis lands without a refresh |
 
 **Also verified against the live stack** (a throwaway tenant, since removed): every statement this
 increment introduces, the full new-contract → confirm → analyse → decide → re-analyse flow, the
@@ -1368,6 +1368,9 @@ claims with real threads and a deliberately failed write.
 - **"The word Matters is confusing, can we replace it with Contracts?"** Left as *matter* for now —
   see the [Decisions log](#decisions-log) for why, and the list page now says what the word means
   instead of assuming it.
+- **"The app is stuck here"** — the matter page on `Loading SER-2026-0001…` indefinitely. The dev
+  backend had stopped answering (see below); the bug this exposed is that the page had no deadline,
+  no error and no way out. Fixed on both counts.
 - **"After the analysis is complete, the page didn't load the findings without hitting refresh."**
   Fixed. The analysis runs on a worker thread and outlives the request that started it, which is why
   leaving the page does not stop it — but the page that came back found the version `RUNNING` and
@@ -1376,6 +1379,38 @@ claims with real threads and a deliberately failed write.
   saying "Analysing" by itself. All three poll only while there is something to watch; an idle page
   makes no requests. It gives up after ten minutes rather than waiting for ever on a version left
   `RUNNING` by a server that restarted, and says so.
+
+### A dev-stack trap worth knowing about
+
+Hit twice during your testing, and it looks exactly like an application bug.
+
+**`fastapi dev`'s reloader sometimes kills its worker and never starts a
+replacement.** Seen after a *bulk* file change — a git checkout or rebase
+rewriting several files at once; single edits reload fine. The reloader process
+survives, so the container still reports `Up`, the port is still open, and every
+request simply hangs. The app itself is fine: importing it inside the container
+succeeds, and the lifespan starts and shuts down cleanly in 1.1s.
+
+```bash
+docker compose restart backend      # the fix
+```
+
+Two things were added so it costs a minute instead of an hour:
+
+- a **healthcheck** on the backend service, so `docker ps` says `unhealthy`
+  rather than `Up`;
+- a **30-second deadline on every frontend request** (`apiFetch`), because
+  `fetch` has none of its own. That is what turned *"the app is stuck here"*
+  — `Loading SER-2026-0001…` for ever, no error, no retry, no way back — into a
+  message and a *Try again* button. The calls that genuinely take minutes, the
+  upload and the analysis, opt out with `timeoutMs: 0`.
+
+And the trigger turned out to be plainer than "bulk changes": **editing a single
+test file restarted the server**, and one of those restarts wedged it. Tests are
+never imported by the server, so `docker-compose.yml` now runs
+`uvicorn --reload --reload-exclude 'backend/tests/*'` instead of `fastapi dev`,
+which has no such flag. Verified: touching a test file no longer reloads;
+touching `backend/api/matters.py` still does.
 
 ### One thing this increment could not finish
 
@@ -1401,7 +1436,7 @@ worked. Everything new type-checks clean and lints clean.
 make test
 ```
 
-544 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
+550 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
 
 Then, with the stack up (`make run`):
 

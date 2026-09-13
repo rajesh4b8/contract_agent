@@ -262,7 +262,18 @@ export const MattersPage: React.FC<MattersPageProps> = ({ onOpenMatter }) => {
 
           {error && !loading && (
             <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-              {error}
+              <p>{error}</p>
+              <Button
+                variant="outline"
+                size="sm"
+                className="mt-3"
+                onClick={() => {
+                  setError(null);
+                  void refresh();
+                }}
+              >
+                Try again
+              </Button>
             </div>
           )}
 

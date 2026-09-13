@@ -197,6 +197,10 @@ export const ContractIntelligence: React.FC<ContractIntelligenceProps> = ({
       const query = model ? `?model=${encodeURIComponent(model)}` : '';
       const response = await apiFetch(`/api/intelligence/contracts/${contractId}/analyze${query}`, {
         method: 'POST',
+        // Three sequential model calls. It takes as long as it takes, and the
+        // version is marked RUNNING throughout, so nothing is lost if the page
+        // is closed mid-way.
+        timeoutMs: 0,
       });
       
       if (!response.ok) {

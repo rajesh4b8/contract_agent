@@ -3,7 +3,7 @@ import { Card } from '../components/shared/ui/card';
 import { Button } from '../components/shared/ui/button';
 import { Badge } from '../components/shared/ui/badge';
 import { Loader } from '../components/shared/ui/loader';
-import { AlertTriangle, ArrowLeft, Clock } from 'lucide-react';
+import { AlertTriangle, ArrowLeft, Clock, RefreshCw } from 'lucide-react';
 import { ContractIntelligence } from '../components/features/intelligence/ContractIntelligence';
 import { ModelPicker } from '../components/features/contracts/ModelPicker';
 import { FileDropZone } from '../components/features/contracts/FileDropZone';
@@ -157,8 +157,16 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack, onOpe
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 py-16 text-slate-500">
-        <Loader /> Loading {matterRef}…
+      <div className="space-y-4 py-16">
+        <div className="flex items-center gap-2 text-slate-500">
+          <Loader /> Loading {matterRef}…
+        </div>
+        {/* There is always a way out. This used to be the whole page, with no
+            button and no timeout, so a backend that stopped answering left the
+            reviewer on a spinner indefinitely. */}
+        <Button variant="ghost" size="sm" onClick={onBack} className="text-slate-500">
+          <ArrowLeft className="h-4 w-4 mr-2" /> Back to matters
+        </Button>
       </div>
     );
   }
@@ -168,9 +176,21 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack, onOpe
       <Card className="border-red-200 bg-red-50">
         <div className="p-6 space-y-3">
           <p className="font-medium text-red-700">{error ?? `No matter ${matterRef}`}</p>
-          <Button variant="outline" onClick={onBack}>
-            <ArrowLeft className="h-4 w-4 mr-2" /> Back to matters
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setLoading(true);
+                setError(null);
+                void refresh();
+              }}
+            >
+              <RefreshCw className="h-4 w-4 mr-2" /> Try again
+            </Button>
+            <Button variant="ghost" onClick={onBack}>
+              <ArrowLeft className="h-4 w-4 mr-2" /> Back to matters
+            </Button>
+          </div>
         </div>
       </Card>
     );

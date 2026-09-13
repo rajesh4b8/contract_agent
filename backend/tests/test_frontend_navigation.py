@@ -175,6 +175,51 @@ class TestTheClientDoesNotAssumeWhatTheServerKnows:
         assert head.count("try {") >= 2, "removeItem is not itself guarded"
 
 
+class TestThePageIsNeverStuckWaiting:
+    """Reported from manual testing: "the app is stuck here" — a matter page
+    showing "Loading SER-2026-0001…" indefinitely, with no error, no retry and
+    no way back, because the dev backend had stopped answering.
+
+    `fetch` has no timeout of its own, so without a deadline any request that
+    never returns is a spinner for ever.
+    """
+
+    def test_requests_have_a_deadline(self):
+        client = source("lib/apiClient.ts")
+
+        assert "AbortController" in client
+        assert "DEFAULT_TIMEOUT_MS" in client
+
+    def test_a_timeout_says_so_rather_than_showing_an_abort_error(self):
+        """"The user aborted a request" is not a useful thing to show anyone."""
+        client = source("lib/apiClient.ts")
+
+        assert "RequestTimeout" in client
+        assert "did not respond within" in client
+
+    def test_the_calls_that_legitimately_take_minutes_are_exempt(self):
+        """An analysis is three sequential model calls; an upload extracts and
+        embeds. Timing those out would break the feature to fix the symptom."""
+        api = source("services/mattersApi.ts")
+        panel = source("components/features/intelligence/ContractIntelligence.tsx")
+
+        assert "timeoutMs: 0" in api, "upload has a deadline it cannot meet"
+        assert "timeoutMs: 0" in panel, "analyse has a deadline it cannot meet"
+
+    def test_the_loading_state_has_a_way_out(self):
+        page = source("pages/MatterPage.tsx")
+
+        loading = page[page.index("if (loading) {"): page.index("if (error || !matter)")]
+        assert "onBack" in loading, "a stuck load traps the reviewer on the page"
+
+    @pytest.mark.parametrize("relative", ["pages/MatterPage.tsx", "pages/MattersPage.tsx"])
+    def test_a_failed_load_offers_a_retry(self, relative):
+        """A restarting backend is transient; making them navigate away is not."""
+        page = source(relative)
+
+        assert "Try again" in page
+
+
 class TestAFailedAnalysisIsNeverShownAsNoFindings:
     @pytest.mark.parametrize("relative", [
         "pages/MatterPage.tsx",

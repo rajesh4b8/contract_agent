@@ -195,7 +195,13 @@ export async function uploadContract(
   form.append('model', model);
   if (matterRef) form.append('matter_ref', matterRef);
 
-  const response = await apiFetch('/api/documents/upload', { method: 'POST', body: form });
+  // No deadline: extraction, chunking and a model call is minutes of work, and
+  // the whole point of the debug panel is that you can watch it happen.
+  const response = await apiFetch('/api/documents/upload', {
+    method: 'POST',
+    body: form,
+    timeoutMs: 0,
+  });
   return readJson<UploadResult>(response, 'Upload failed');
 }
 
