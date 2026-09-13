@@ -105,14 +105,18 @@ def identify_chunks(text: str, profile: Optional[ChunkingProfile] = None,
     structural = strategy.has_section_headers(text)
 
     chunks: List[IdentifiedChunk] = []
-    for order, piece in enumerate(raw):
+    for piece in raw:
         content = (piece.get("content") or "").strip()
         if not content:
             continue
         chunk_type = piece.get("chunk_type", "section")
         heading, _body = split_heading(content)
+        # Numbered after the blank ones are dropped, not before. `order` is the
+        # key the stored membership list is MERGEd on and the key the "join
+        # neighbours in order" retrieval plan walks, so a gap at position 2 is a
+        # trap for anything that checks adjacency.
         chunks.append(IdentifiedChunk(
-            order=order,
+            order=len(chunks),
             hash=chunk_hash(content),
             content=content,
             heading=heading,

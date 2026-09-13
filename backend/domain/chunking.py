@@ -225,6 +225,29 @@ class ChunkingProfile:
         return (self.normaliser_version == NORMALISER_VERSION
                 and self.chunker_version == CHUNKER_VERSION)
 
+    def reused_for(self, extractor: str) -> "ChunkingProfile":
+        """This profile's *boundary* settings, stamped with today's reality.
+
+        A later round reuses the strategy and the sizes — that is the whole
+        point — but it must not inherit the recorded `normaliser_version`,
+        `chunker_version` or `extractor`, because those describe how version 1's
+        hashes were made, and this round's were made by whatever is running now.
+
+        Copying them forward destroys the mismatch `is_current` exists to
+        surface, at exactly the moment it matters: after a version bump, round 2
+        would be hashed by the new rules, stamped with the old ones, share no
+        chunk with round 1, and report zero reuse with nothing to explain why.
+        """
+        return ChunkingProfile(
+            strategy=self.strategy,
+            min_chunk_size=self.min_chunk_size,
+            max_chunk_size=self.max_chunk_size,
+            overlap=self.overlap,
+            extractor=extractor or self.extractor,
+            normaliser_version=NORMALISER_VERSION,
+            chunker_version=CHUNKER_VERSION,
+        )
+
 
 # --------------------------------------------------------------------------
 # Advisory matching

@@ -84,6 +84,15 @@ CONSTRAINTS = (
      "FOR (m:Matter) REQUIRE (m.tenant_id, m.matter_ref) IS UNIQUE"),
     ("contract_source_key_unique",
      "FOR (v:ContractVersion) REQUIRE v.source_key IS UNIQUE"),
+    # Content-addressed chunks. `MERGE (c:Chunk {tenant_id, hash})` is not
+    # atomic without this — two uploads sharing a chunk can each create a node,
+    # so the same text is embedded twice and two versions' membership lists
+    # point at different nodes for identical text. It is also the index that
+    # makes the reuse check a lookup rather than a scan of every chunk in the
+    # database, which is the difference between this increment saving time and
+    # costing it.
+    ("chunk_identity_unique",
+     "FOR (c:Chunk) REQUIRE (c.tenant_id, c.hash) IS UNIQUE"),
 )
 
 

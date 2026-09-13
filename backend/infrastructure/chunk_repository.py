@@ -117,18 +117,8 @@ class ChunkRepository:
         vectors: Dict[str, List[float]] = {}
         if to_embed:
             with trace_step("chunking", "embed_new", chunks=len(to_embed)) as step:
-                try:
-                    produced = self._embedder([c.content for c in to_embed.values()])
-                    vectors = dict(zip(to_embed.keys(), produced))
-                    step.set(embedded=len(vectors))
-                except Exception as e:
-                    # A chunk without a vector is still a chunk: it keeps its
-                    # place in the version and its identity, and can be embedded
-                    # later. Losing the membership list over a failed embedding
-                    # call would lose the version's structure as well.
-                    logger.error(f"Embedding {len(to_embed)} new chunks failed: {e}")
-                    step.set(embedded=0, error=type(e).__name__)
-                    note("chunking", "embed_new", "error", error=str(e))
+                vectors = self._embed(to_embed)
+                step.set(embedded=len(vectors), failed=len(to_embed) - len(vectors))
 
         rows = [
             {
@@ -145,8 +135,18 @@ class ChunkRepository:
             for chunk in chunks
         ]
 
+        # `c.content` is written ON CREATE only, so a version that *reuses* a
+        # chunk shows the text of whichever version created it. Usually
+        # identical — but `canonical()` folds case and whitespace, so
+        # "3. FEES AND PAYMENT" and "3. Fees and Payment" share a hash while
+        # differing on screen, and a defined term is exactly where that matters.
+        # The version's own rendering rides on the relationship when it differs,
+        # which costs a few KB against the 6KB vector it is saving.
+        for row in rows:
+            row["text"] = None
+
         with trace_step("chunking", "store", chunks=len(rows)) as step:
-            self.graph.query(
+            attached = self.graph.query(
                 """
                 MATCH (v:ContractVersion {version_id: $version_id, tenant_id: $tenant_id})
                 // Replace this version's membership list, not the chunks. The
@@ -174,7 +174,11 @@ class ChunkRepository:
                         c.embedding_generated_at = datetime()
                 )
                 MERGE (v)-[i:INCLUDES {order: row.order}]->(c)
-                SET i.heading = row.heading
+                SET i.heading = row.heading,
+                    // Only when this version renders the chunk differently from
+                    // the node's stored copy; null the rest of the time.
+                    i.text = CASE WHEN c.content = row.content THEN NULL ELSE row.content END
+                RETURN count(i) AS attached
                 """,
                 {
                     "version_id": version_id,
@@ -184,7 +188,23 @@ class ChunkRepository:
                     "dimensions": EMBEDDING_DIMENSIONS,
                 },
             )
-            step.set(stored=len(rows))
+            # An empty result means the MATCH found no such version, in which
+            # case the UNWIND never ran and nothing was written. Reporting
+            # "37 chunks stored" for a no-op would put a number in the debug
+            # panel and the API response that is simply untrue.
+            stored = int(attached[0]["attached"]) if attached else 0
+            step.set(stored=stored)
+
+        if not stored:
+            logger.error(
+                f"No chunks attached to {version_id}: no such version for tenant "
+                f"{tenant_id}. The chunks were not stored."
+            )
+            note("chunking", "store", "error", version_id=version_id,
+                 reason="version not found")
+            return {"chunks": len(chunks), "distinct": len(set(wanted)),
+                    "reused": 0, "embedded": 0, "failed": len(chunks),
+                    "stored": 0}
 
         result = {
             "chunks": len(chunks),
@@ -192,6 +212,7 @@ class ChunkRepository:
             "reused": len(already),
             "embedded": len(vectors),
             "failed": len(to_embed) - len(vectors),
+            "stored": stored,
         }
         note("chunking", "stored", version_id=version_id, **result)
         logger.info(
@@ -199,6 +220,83 @@ class ChunkRepository:
             f"{result['reused']} reused, {result['embedded']} embedded"
         )
         return result
+
+    def _embed(self, to_embed: Dict[str, IdentifiedChunk]) -> Dict[str, List[float]]:
+        """Embed the new chunks, keeping whatever succeeds.
+
+        `embed_documents` raises on the first failure, so one bad chunk in two
+        hundred used to discard all 199 good vectors — and nothing revisits a
+        chunk that exists without one, so they would have stayed unembedded for
+        ever. The batch is tried first because it is one round trip; only if it
+        raises does this fall back to per-chunk, so a single poison chunk costs
+        its neighbours nothing.
+        """
+        hashes = list(to_embed)
+        try:
+            produced = self._embedder([to_embed[h].content for h in hashes])
+            return dict(zip(hashes, produced))
+        except Exception as e:
+            logger.warning(
+                f"Batch embedding of {len(hashes)} chunks failed ({e}); "
+                f"retrying them one at a time"
+            )
+
+        vectors: Dict[str, List[float]] = {}
+        failed = 0
+        for digest in hashes:
+            try:
+                vectors[digest] = self._embedder([to_embed[digest].content])[0]
+            except Exception as e:
+                failed += 1
+                logger.error(f"Embedding chunk {digest[:12]} failed: {e}")
+        if failed:
+            note("chunking", "embed_new", "error", failed=failed, embedded=len(vectors))
+        return vectors
+
+    def backfill_embeddings(self, tenant_id: str, limit: int = 200) -> Dict[str, int]:
+        """Embed chunks that were stored without a vector.
+
+        The other half of the fix above. A chunk whose embedding failed is
+        invisible to `existing_hashes` — correctly, since it has no usable
+        vector — but that also means nothing would ever retry it, and it would
+        sit unsearchable until somebody happened to re-upload the same text.
+        """
+        rows = self.graph.query(
+            """
+            MATCH (c:Chunk {tenant_id: $tenant_id})
+            WHERE c.hash IS NOT NULL
+              AND (c.embedding IS NULL
+                   OR c.embedding_model <> $model
+                   OR c.embedding_dimensions <> $dimensions)
+            RETURN c.hash AS hash, c.content AS content
+            LIMIT $limit
+            """,
+            {"tenant_id": tenant_id, "model": EMBEDDING_MODEL,
+             "dimensions": EMBEDDING_DIMENSIONS, "limit": limit},
+        )
+        if not rows:
+            return {"found": 0, "embedded": 0}
+
+        pending = {
+            row["hash"]: IdentifiedChunk(order=0, hash=row["hash"],
+                                         content=row.get("content") or "")
+            for row in rows if (row.get("content") or "").strip()
+        }
+        vectors = self._embed(pending)
+        for digest, vector in vectors.items():
+            self.graph.query(
+                """
+                MATCH (c:Chunk {tenant_id: $tenant_id, hash: $hash})
+                SET c.embedding = $embedding,
+                    c.embedding_model = $model,
+                    c.embedding_dimensions = $dimensions,
+                    c.embedding_generated_at = datetime()
+                """,
+                {"tenant_id": tenant_id, "hash": digest, "embedding": vector,
+                 "model": EMBEDDING_MODEL, "dimensions": EMBEDDING_DIMENSIONS},
+            )
+        logger.info(f"Backfilled {len(vectors)} of {len(rows)} missing embeddings")
+        return {"found": len(rows), "embedded": len(vectors)}
 
     def set_profile(self, tenant_id: str, version_id: str, profile: ChunkingProfile,
                     boundaries_are_structural: bool = True) -> None:
@@ -332,9 +430,11 @@ class ChunkRepository:
             """
             MATCH (v:ContractVersion {tenant_id: $tenant_id})-[:INCLUDES]->(c:Chunk)
             WHERE v.version_id IN $ids
-            // A version can include the same chunk hash more than once (for
-            // repeated text). Backward coverage is over distinct shared text,
-            // so duplicate relationships must not inflate the denominator.
+            // DISTINCT, because `shared` above is built from distinct hashes. A
+            // version that includes the same chunk twice — a repeated
+            // "Reserved." subsection, a page header extracted twice — would
+            // otherwise be counted twice here and once there, understating
+            // `backward` and dropping a real new round below the threshold.
             WITH DISTINCT v, c
             // The same definition as above, or forward and backward would be
             // measured on two different scales.

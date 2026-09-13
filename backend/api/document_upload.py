@@ -28,6 +28,7 @@ from backend.infrastructure.matter_repository import (
     MatterNotFound,
     MatterRepository,
 )
+import asyncio
 import os
 import uuid
 import json
@@ -535,7 +536,37 @@ async def upload_pdf(
                         chunk_repo.profile_for_matter(tenant_id, matter_ref)
                         if matter_ref else None
                     )
-                    profile = stored_profile or ChunkingProfile(extractor=extractor_used)
+                    if stored_profile is None:
+                        profile = ChunkingProfile(extractor=extractor_used)
+                    else:
+                        # The boundary settings are inherited; the version stamps
+                        # and the extractor are this round's own. Copying the old
+                        # ones forward would hide a normaliser bump behind a
+                        # profile that claims to be current.
+                        profile = stored_profile.reused_for(extractor_used)
+                        if not stored_profile.is_current:
+                            note("chunking", "profile_outdated",
+                                 matter_ref=matter_ref,
+                                 stored_chunker=stored_profile.chunker_version,
+                                 stored_normaliser=stored_profile.normaliser_version)
+                            logger.warning(
+                                f"{matter_ref} was chunked under an older ruleset "
+                                f"(chunker v{stored_profile.chunker_version}, normaliser "
+                                f"v{stored_profile.normaliser_version}); this round's "
+                                f"hashes are not comparable with it and reuse will be zero"
+                            )
+                        elif stored_profile.extractor not in ("unknown", extractor_used):
+                            # Different library, different whitespace, different
+                            # hashes for text nobody touched — the one thing that
+                            # explains "why did nothing match this round".
+                            note("chunking", "extractor_changed",
+                                 matter_ref=matter_ref,
+                                 was=stored_profile.extractor, now=extractor_used)
+                            logger.warning(
+                                f"{matter_ref} version 1 was extracted with "
+                                f"{stored_profile.extractor}, this round with "
+                                f"{extractor_used}; chunk reuse may be low"
+                            )
                     with trace_step("chunking", "identify", chars=len(full_text)) as step:
                         chunked = identify_chunks(full_text, profile)
                         step.set(
@@ -734,8 +765,16 @@ async def upload_pdf(
                 # chunk, none per unchanged one.
                 if chunked is not None:
                     try:
-                        chunk_result = chunk_repo.store_version_chunks(
-                            tenant_id, contract_id, chunked
+                        # On a worker thread. `embed_documents` is a plain loop
+                        # of blocking network calls — ~210ms each, ~42s for a
+                        # 200-chunk contract — and running it in-line freezes the
+                        # event loop for that whole window: the debug stream, the
+                        # 500ms workflow poll this very page is making, and every
+                        # other user's request. Exactly the bug 4f86b9b fixed for
+                        # the analysis, and exactly the same fix.
+                        chunk_result = await asyncio.to_thread(
+                            chunk_repo.store_version_chunks,
+                            tenant_id, contract_id, chunked,
                         )
                         chunk_repo.set_profile(
                             tenant_id, contract_id, chunked.profile,

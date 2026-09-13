@@ -66,13 +66,19 @@ def repo(*responses, embedder=None):
     return ChunkRepository(FakeGraph(*responses), embedder=embedder or CountingEmbedder())
 
 
+#: What the store statement returns when it actually attached something. An
+#: empty result means the version did not exist and nothing was written, which
+#: the repository now reports rather than claiming success.
+ATTACHED = [{"attached": 14}]
+
+
 class TestUnchangedTextIsNeverReEmbedded:
     """~210ms per chunk. A 200-chunk contract is ~42s of it."""
 
     def test_a_first_upload_embeds_everything(self):
         embedder = CountingEmbedder()
         document = identify_chunks(CONTRACT)
-        repository = repo([], [], embedder=embedder)
+        repository = repo([], ATTACHED, embedder=embedder)
 
         result = repository.store_version_chunks("acme", "V-1", document)
 
@@ -84,7 +90,7 @@ class TestUnchangedTextIsNeverReEmbedded:
         embedder = CountingEmbedder()
         document = identify_chunks(CONTRACT)
         known = [{"hash": h} for h in document.hashes[:3]]
-        repository = repo(known, [], embedder=embedder)
+        repository = repo(known, ATTACHED, embedder=embedder)
 
         result = repository.store_version_chunks("acme", "V-2", document)
 
@@ -95,7 +101,7 @@ class TestUnchangedTextIsNeverReEmbedded:
     def test_an_unchanged_document_costs_nothing(self):
         embedder = CountingEmbedder()
         document = identify_chunks(CONTRACT)
-        repository = repo([{"hash": h} for h in document.hashes], [], embedder=embedder)
+        repository = repo([{"hash": h} for h in document.hashes], ATTACHED, embedder=embedder)
 
         result = repository.store_version_chunks("acme", "V-2", document)
 
@@ -105,7 +111,7 @@ class TestUnchangedTextIsNeverReEmbedded:
     def test_a_repeated_paragraph_is_embedded_once(self):
         embedder = CountingEmbedder()
         document = identify_chunks(CONTRACT + "\n\n" + CONTRACT.split("\n\n")[1])
-        repository = repo([], [], embedder=embedder)
+        repository = repo([], ATTACHED, embedder=embedder)
 
         repository.store_version_chunks("acme", "V-1", document)
 
@@ -146,7 +152,7 @@ class TestChunksBelongToOneTenant:
         """A global key collapses two customers' identical boilerplate onto one
         node — a tenancy violation, and a GDPR deletion that destroys someone
         else's version."""
-        repository = repo([], [])
+        repository = repo([], ATTACHED)
 
         repository.store_version_chunks("acme", "V-1", identify_chunks(CONTRACT))
 
@@ -154,7 +160,7 @@ class TestChunksBelongToOneTenant:
         assert "MERGE (c:Chunk {tenant_id: $tenant_id, hash: row.hash})" in write
 
     def test_every_statement_is_tenant_scoped(self):
-        repository = repo([], [], [], [])
+        repository = repo([], [], ATTACHED, [])
         repository.existing_hashes("acme", ["a"])
         repository.store_version_chunks("acme", "V-1", identify_chunks(CONTRACT))
 
@@ -164,7 +170,7 @@ class TestChunksBelongToOneTenant:
 
 class TestMembershipIsReplacedNotAccumulated:
     def test_re_storing_a_version_drops_its_previous_list(self):
-        repository = repo([], [])
+        repository = repo([], ATTACHED)
 
         repository.store_version_chunks("acme", "V-1", identify_chunks(CONTRACT))
 
@@ -175,7 +181,7 @@ class TestMembershipIsReplacedNotAccumulated:
     def test_but_the_chunks_themselves_are_left_alone(self):
         """They are shared. Deleting one because this version stopped
         referencing it would delete another version's text."""
-        repository = repo([], [])
+        repository = repo([], ATTACHED)
 
         repository.store_version_chunks("acme", "V-1", identify_chunks(CONTRACT))
 
@@ -184,7 +190,7 @@ class TestMembershipIsReplacedNotAccumulated:
         assert "DELETE c" not in write
 
     def test_the_order_and_heading_ride_on_the_relationship(self):
-        repository = repo([], [])
+        repository = repo([], ATTACHED)
 
         repository.store_version_chunks("acme", "V-1", identify_chunks(CONTRACT))
 
@@ -194,7 +200,7 @@ class TestMembershipIsReplacedNotAccumulated:
 
     def test_a_reused_chunk_is_not_handed_a_new_vector(self):
         document = identify_chunks(CONTRACT)
-        repository = repo([{"hash": h} for h in document.hashes], [])
+        repository = repo([{"hash": h} for h in document.hashes], ATTACHED)
 
         repository.store_version_chunks("acme", "V-2", document)
 
@@ -205,7 +211,7 @@ class TestMembershipIsReplacedNotAccumulated:
 class TestAFailedEmbeddingStillKeepsTheVersionsStructure:
     def test_the_chunks_are_stored_without_vectors(self):
         document = identify_chunks(CONTRACT)
-        repository = repo([], [], embedder=_raising)
+        repository = repo([], ATTACHED, embedder=_raising)
 
         result = repository.store_version_chunks("acme", "V-1", document)
 
@@ -216,7 +222,7 @@ class TestAFailedEmbeddingStillKeepsTheVersionsStructure:
         )
 
     def test_and_it_does_not_raise(self):
-        repository = repo([], [], embedder=_raising)
+        repository = repo([], ATTACHED, embedder=_raising)
 
         repository.store_version_chunks("acme", "V-1", identify_chunks(CONTRACT))
 
@@ -320,6 +326,20 @@ class TestTheAdvisoryMatch:
         assert "RETURN DISTINCT other" in statement, "df is not counting distinct matters"
         assert "HAS_VERSION]-(other:Matter)" in statement
 
+    def test_a_repeated_chunk_is_counted_once_in_the_backward_direction(self):
+        """`shared` is built from distinct hashes, so the candidate's total must
+        be too — otherwise a version containing the same chunk twice understates
+        `backward` and a real new round loses its suggestion."""
+        repository = repo(
+            [{"matter_ref": "M", "title": "", "version_id": "V-1",
+              "shared": [{"hash": "a", "df": 1}]}],
+            [],
+        )
+
+        repository.find_matches("acme", ["a"])
+
+        assert "WITH DISTINCT v, c" in repository.graph.statements[1]
+
     def test_the_backward_direction_uses_the_same_definition(self):
         """Otherwise forward and backward are measured on two different scales."""
         repository = repo(
@@ -346,6 +366,99 @@ class TestTheAdvisoryMatch:
         assert repository.find_matches("acme", ["a", "b", "c", "d"]) == []
 
 
+class TestOneBadChunkDoesNotCostTheOthers:
+    """`embed_documents` raises on the first failure, so a batch was
+    all-or-nothing: one poison chunk in two hundred discarded 199 good vectors,
+    and nothing revisits a chunk that exists without one."""
+
+    def test_a_batch_failure_falls_back_to_one_at_a_time(self):
+        document = identify_chunks(CONTRACT)
+        poison = document.chunks[1].content
+        calls = []
+
+        def flaky(texts):
+            calls.append(list(texts))
+            if len(texts) > 1 or texts[0] == poison:
+                raise RuntimeError("that one is too long")
+            return [[0.5] * EMBEDDING_DIMENSIONS]
+
+        repository = repo([], ATTACHED, embedder=flaky)
+
+        result = repository.store_version_chunks("acme", "V-1", document)
+
+        assert result["embedded"] == len(document.chunks) - 1
+        assert result["failed"] == 1
+        assert len(calls) == 1 + len(document.chunks), "no per-chunk retry happened"
+
+    def test_a_chunk_left_without_a_vector_can_be_picked_up_later(self):
+        repository = repo(
+            [{"hash": "abc", "content": "some text"}],  # what is missing a vector
+            [],                                         # the write
+        )
+
+        result = repository.backfill_embeddings("acme")
+
+        assert result == {"found": 1, "embedded": 1}
+        assert "c.embedding IS NULL" in repository.graph.statements[0]
+
+    def test_the_backfill_also_catches_vectors_from_another_model(self):
+        repository = repo([])
+
+        repository.backfill_embeddings("acme")
+
+        statement = repository.graph.statements[0]
+        assert "c.embedding_model <> $model" in statement
+
+    def test_nothing_to_backfill_is_not_an_embedding_call(self):
+        embedder = CountingEmbedder()
+        repository = repo([], embedder=embedder)
+
+        assert repository.backfill_embeddings("acme") == {"found": 0, "embedded": 0}
+        assert embedder.texts == []
+
+
+class TestAVersionKeepsItsOwnWording:
+    """`c.content` is written ON CREATE only, so a version that reuses a chunk
+    shows whichever version created it. `canonical()` folds case, so
+    "3. FEES AND PAYMENT" and "3. Fees and Payment" share a hash and differ on
+    screen — and a defined term is exactly where that matters."""
+
+    def test_the_relationship_carries_the_text_when_it_differs(self):
+        repository = repo([], ATTACHED)
+
+        repository.store_version_chunks("acme", "V-2", identify_chunks(CONTRACT))
+
+        write = [s for s in repository.graph.statements if "MERGE (c:Chunk" in s][0]
+        assert "i.text = CASE WHEN c.content = row.content THEN NULL ELSE row.content END" in write
+
+    def test_case_only_differences_share_a_hash(self):
+        """Which is why the per-version text is needed at all."""
+        from backend.domain.chunking import chunk_hash
+
+        assert chunk_hash("3. FEES AND PAYMENT. Net 30.") == chunk_hash(
+            "3. Fees and Payment. Net 30.")
+
+
+class TestAStoreThatWroteNothingSaysSo:
+    def test_a_missing_version_is_reported_rather_than_counted(self):
+        """The MATCH finds nothing, the UNWIND never runs, and the old code
+        still returned "37 chunks stored"."""
+        repository = repo([], [])
+
+        result = repository.store_version_chunks("acme", "V-gone", identify_chunks(CONTRACT))
+
+        assert result["stored"] == 0
+        assert result["reused"] == 0
+        assert result["failed"] == result["chunks"]
+
+    def test_a_real_store_reports_what_it_attached(self):
+        repository = repo([], [{"attached": 4}])
+
+        result = repository.store_version_chunks("acme", "V-1", identify_chunks(CONTRACT))
+
+        assert result["stored"] == 4
+
+
 class TestRetentionNeverDeletesHistory:
     def test_only_chunks_no_version_references_are_removed(self):
         repository = repo([{"removed": 0}])
@@ -367,3 +480,43 @@ class TestRetentionNeverDeletesHistory:
         statement = repository.graph.statements[0]
         assert "c.hash IS NOT NULL" in statement
         assert "c.tenant_id IS NOT NULL" in statement
+
+
+class TestChunkSearchSeesBothCorpora:
+    """Removing the old chunking path removed the only writer of
+    `(:Document)-[:HAS_CHUNK]->(:Chunk)`, which is the only shape the chat
+    agent's chunk search read. Without this, chunk search silently stops seeing
+    every new upload — no error, no empty-result signal, the corpus just quietly
+    stops growing.
+    """
+
+    @staticmethod
+    def _source():
+        import inspect
+
+        from backend.shared.utils import enhanced_contract_search_tool
+
+        return inspect.getsource(enhanced_contract_search_tool._search_chunks)
+
+    def test_it_reads_content_addressed_chunks(self):
+        assert "(v:ContractVersion {tenant_id: $tenant_id})-[:INCLUDES]->(c:Chunk)" in self._source()
+
+    def test_it_still_reads_the_corpus_written_before_this_increment(self):
+        """3,508 chunks that nothing else can reach."""
+        assert "(d:Document)-[:HAS_CHUNK]->(c:Chunk)" in self._source()
+
+    def test_the_semantic_query_orders_before_it_aggregates(self):
+        """`ORDER BY chunk_score` after an aggregating RETURN is a SyntaxError,
+        which the surrounding except swallowed — so this path had never once
+        been semantic, silently falling back to substring matching."""
+        source = self._source()
+
+        semantic = source[source.index("semantic_query"): source.index("chunk_embedding = ")]
+        # Exactly one, and it comes before the RETURN that aggregates.
+        assert semantic.count("ORDER BY chunk_score") == 1
+        assert semantic.index("ORDER BY chunk_score") < semantic.index("RETURN {")
+
+    def test_both_branches_are_tenant_scoped(self):
+        source = self._source()
+
+        assert source.count("$tenant_id") >= 4

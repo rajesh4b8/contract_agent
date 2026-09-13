@@ -426,6 +426,17 @@ class TestNothingIsDroppedOrDuplicated:
 
         assert [c.order for c in chunks] == list(range(len(chunks)))
 
+    def test_a_blank_piece_does_not_leave_a_gap_in_the_order(self):
+        """`order` is the key the membership list is MERGEd on and the key the
+        "join neighbours in order" retrieval plan walks, so a hole at position 2
+        is a trap for anything checking adjacency."""
+        with_blanks = CONTRACT.replace(
+            "3. FEES AND PAYMENT.", "\n\n   \n\n3. FEES AND PAYMENT.")
+
+        orders = [c.order for c in identify_chunks(with_blanks).chunks]
+
+        assert orders == list(range(len(orders))), f"gap in the order: {orders}"
+
     def test_an_empty_document_is_no_chunks_rather_than_a_crash(self):
         assert identify_chunks("").chunks == []
         assert identify_chunks("   \n  ").chunks == []
@@ -479,6 +490,28 @@ class TestTheProfilePinsTheChunker:
 
         assert len(small.chunks) > len(large.chunks)
         assert small.hashes != large.hashes
+
+    def test_a_later_round_inherits_the_boundaries_but_not_the_stamps(self):
+        """Copying the version stamps forward destroys the mismatch
+        `is_current` exists to surface, at the moment it matters: after a bump,
+        round 2 is hashed by the new rules, stamped with the old ones, shares no
+        chunk with round 1, and reports zero reuse with nothing to explain it."""
+        old_profile = ChunkingProfile(
+            strategy="section", max_chunk_size=1800, extractor="pypdf",
+            chunker_version=0, normaliser_version=0,
+        )
+
+        reused = old_profile.reused_for("pdfplumber")
+
+        assert reused.max_chunk_size == 1800, "the boundary settings must carry over"
+        assert reused.strategy == "section"
+        assert reused.extractor == "pdfplumber", "this round's extractor, not v1's"
+        assert reused.is_current, "the stamps must describe the rules actually used"
+
+    def test_an_unknown_extractor_does_not_overwrite_a_known_one(self):
+        profile = ChunkingProfile(extractor="pypdf")
+
+        assert profile.reused_for("").extractor == "pypdf"
 
     def test_the_profile_comes_back_with_the_document(self):
         profile = ChunkingProfile(extractor="pdfplumber")

@@ -280,15 +280,37 @@ def _search_chunks(embeddings, tenant_id, summary_search, filters, params):
     if summary_search:
         try:
             # Check for new Chunk nodes with embeddings, including tenant filtering
+            # Both chunk shapes. Content-addressed chunks hang off a version by
+            # INCLUDES and carry their own tenant_id; everything written before
+            # Increment 7 hangs off a (:Document) by HAS_CHUNK. Reading only the
+            # old shape — as this did — means chunk search silently stops seeing
+            # every new upload, with no error and no empty-result signal: the
+            # corpus just quietly stops growing.
             semantic_query = """
-            MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)
-            WHERE c.embedding IS NOT NULL AND d.tenant_id = $tenant_id
-            WITH c, d, vector.similarity.cosine(c.embedding, $chunk_embedding) AS chunk_score
+            CALL () {
+                MATCH (v:ContractVersion {tenant_id: $tenant_id})-[:INCLUDES]->(c:Chunk)
+                WHERE c.embedding IS NOT NULL
+                RETURN c, coalesce(v.source_filename, v.version_id) AS document_id
+            UNION
+                MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)
+                WHERE c.embedding IS NOT NULL AND d.tenant_id = $tenant_id
+                RETURN c, d.id AS document_id
+            }
+            WITH c, document_id,
+                 vector.similarity.cosine(c.embedding, $chunk_embedding) AS chunk_score
             WHERE chunk_score > 0.7
+            // Ordered *before* the aggregation. The sort this used to carry
+            // after the RETURN referenced a variable the aggregation had
+            // already consumed, so every semantic chunk search raised a
+            // SyntaxError, was swallowed by the except below, and fell back to
+            // substring matching — which is why this path had never once
+            // actually been semantic.
+            WITH c, document_id, chunk_score
+            ORDER BY chunk_score DESC
             RETURN {
                 total_count: count(c),
                 chunks: collect({
-                    document_id: d.id,
+                    document_id: document_id,
                     chunk_type: c.chunk_type,
                     content: substring(c.content, 0, 200) + '...',
                     chunk_index: c.chunk_index,
@@ -297,7 +319,6 @@ def _search_chunks(embeddings, tenant_id, summary_search, filters, params):
                     search_type: 'semantic'
                 })[..10]
             } AS result
-            ORDER BY chunk_score DESC
             """
             
             chunk_embedding = embeddings.embed_query(summary_search)
@@ -311,6 +332,22 @@ def _search_chunks(embeddings, tenant_id, summary_search, filters, params):
     
     # Fallback to text search across both new and legacy chunks, enforcing tenant_id
     cypher_statement = """
+    MATCH (v:ContractVersion {tenant_id: $tenant_id})-[:INCLUDES]->(c:Chunk)
+    WHERE c.content CONTAINS $search_text
+    RETURN {
+        total_count: count(c),
+        chunks: collect({
+            document_id: coalesce(v.source_filename, v.version_id),
+            chunk_type: c.chunk_type,
+            content: substring(c.content, 0, 200) + '...',
+            chunk_index: c.chunk_index,
+            quality_score: c.quality_score,
+            search_type: 'text_version'
+        })[..5]
+    } AS result
+
+    UNION
+
     MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)
     WHERE c.content CONTAINS $search_text AND d.tenant_id = $tenant_id
     RETURN {
@@ -347,12 +384,19 @@ def _search_chunks(embeddings, tenant_id, summary_search, filters, params):
     else:
         # If no search text, return recent chunks for current tenant
         cypher_statement = """
-        MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)
-        WHERE d.tenant_id = $tenant_id
+        CALL () {
+            MATCH (v:ContractVersion {tenant_id: $tenant_id})-[:INCLUDES]->(c:Chunk)
+            RETURN c, coalesce(v.source_filename, v.version_id) AS doc_id
+        UNION
+            MATCH (d:Document)-[:HAS_CHUNK]->(c:Chunk)
+            WHERE d.tenant_id = $tenant_id
+            RETURN c, d.id AS doc_id
+        }
+        WITH c, doc_id
         RETURN {
             total_count: count(c),
             chunks: collect({
-                document_id: d.id,
+                document_id: doc_id,
                 chunk_type: c.chunk_type,
                 content: substring(c.content, 0, 200) + '...',
                 chunk_index: c.chunk_index,

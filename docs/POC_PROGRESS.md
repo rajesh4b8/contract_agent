@@ -1693,6 +1693,47 @@ well-structured one — the detector asks the text directly instead. Without hea
 packs greedily, one insertion shifts every boundary after it, and chunk identity is worth nothing;
 that is now logged and flagged on the version rather than pretended away.
 
+### Addressed in review (PR #9)
+
+Copilot did not respond on this PR — the comment trigger that worked on #8 produced nothing here and
+the REST reviewer request registers no reviewer, so the repo's own `/code-review` ran against the
+same diff instead. Ten findings, all ten real.
+
+**Three were serious:**
+
+- **Chunk search silently stopped seeing new uploads.** Removing the old chunking path removed the
+  only writer of `(:Document)-[:HAS_CHUNK]->(:Chunk)` — and that is the only shape
+  `enhanced_contract_search_tool._search_chunks` read, reached from the chat agent. New chunks hang
+  off `INCLUDES`, so from this branch onward chunk search returned zero hits for every new contract,
+  with no error and no empty-result signal. It now reads both shapes.
+- **The embedding loop blocked the event loop.** `store_version_chunks` was called in-line from an
+  `async def`, and `embed_documents` is a plain loop of blocking network calls — ~42s for a
+  200-chunk contract, during which the server answers nothing at all. The same bug
+  [4f86b9b](#debug--a-live-timeline-of-what-the-pipeline-is-doing) fixed for the analysis, and the
+  same fix: `await asyncio.to_thread(...)`.
+- **No uniqueness constraint on `:Chunk(tenant_id, hash)`.** `MERGE` is not atomic without one, so
+  two concurrent uploads sharing a chunk could each create a node — the same text embedded twice,
+  and two versions pointing at different nodes for identical text. It is also the index that makes
+  the reuse check a lookup rather than a scan of all 3,508 legacy chunks plus every new one.
+
+**And seven more:** a reused chunk kept version 1's wording (`c.content` is `ON CREATE` only, and
+`canonical()` folds case — so a defined term could render differently from the PDF it came from);
+the reused profile copied version 1's `normaliser_version` forward, destroying the mismatch
+`is_current` exists to surface at exactly the moment it matters; `extractor_used` was computed and
+then discarded for every round after the first; `backward` was computed per-relationship while
+`shared` was per-distinct-hash, so a repeated chunk could push a real new round below the threshold;
+a store against a missing version was a silent no-op that still reported "37 chunks stored";
+`order` left gaps when a piece stripped to empty; and one failed embedding discarded every other
+vector in the batch, permanently, since nothing revisits a chunk that exists without one.
+
+**One more, found while fixing those.** Semantic chunk search had *never worked*. The query carried
+`ORDER BY chunk_score` after an aggregating `RETURN`, which is a Cypher SyntaxError, and the
+surrounding `except` swallowed it and fell back to substring matching every single time. Fixed:
+`"who indemnifies whom"` now returns 28 semantic hits at 0.86 similarity where it previously
+returned two substring matches.
+
+Tests: **650 → 666.**
+
 ### One thing found while building it
 
 **Retention would have deleted the old search corpus.** The specification's orphan query is
@@ -1734,12 +1775,12 @@ matter, which is exactly where the two definitions agree.
 make test    # the stability tests are the point
 ```
 
-650 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys. The ones that matter:
+666 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys. The ones that matter:
 
 | file | covers |
 |---|---|
-| `test_chunk_identity.py` (64) | canonical form, heading-stripping, **edit is local**, **insertion is local**, golden hashes, reconstruction, the unstructured-document flag |
-| `test_chunk_storage.py` (30) | embedding reuse, model-guarded vectors, tenancy, membership replacement, retention |
+| `test_chunk_identity.py` (67) | canonical form, heading-stripping, **edit is local**, **insertion is local**, golden hashes, reconstruction, the unstructured-document flag |
+| `test_chunk_storage.py` (46) | embedding reuse, model-guarded vectors, tenancy, membership replacement, retention |
 
 With the stack up:
 
