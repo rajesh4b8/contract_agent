@@ -7,6 +7,10 @@
 # an engineer, and guessing at one would produce a number that looks objective
 # and is not.
 #
+# `late-breaches` is the one that makes coverage measurable: its breaches sit
+# past the truncation window the analyser used to impose, so it is the only
+# fixture that can fail when the system silently ignores most of a document.
+#
 # `clean` is the one that matters most. Anything can score well on a document
 # stuffed with breaches; only a compliant contract shows whether the system
 # invents violations that are not there.
@@ -37,6 +41,22 @@ contracts:
       The discriminating case. Liability, indemnity, IP and confidentiality are
       all drafted to the playbook, so anything raised against them is a false
       positive.
+
+  - file: late-breaches.pdf
+    description: >-
+      The same two breaches as `partial` — Net 60 payment, and immediate
+      termination with no payment for work in progress — but placed after
+      forty-six clauses of ordinary compliant boilerplate, so the first one sits
+      at character 16,139 of a 17,097-character document.
+    expected_rules: [PAY-001, TRM-001]
+    notes: >-
+      The fixture that makes Increment 8 measurable. `ClauseDetectorTool` used to
+      send `contract_text[:12000]`, so both breaches were past the end of what
+      the model ever saw and a correct-looking review reported zero violations.
+      Every other fixture here is under 1,400 characters and fits inside that
+      window, which is why `make eval` scored 1.00 across the board and could not
+      have failed on this. Recall on this fixture is 0.00 with truncation and
+      1.00 without; that difference is the increment.
 
   - file: clean.pdf
     description: >-

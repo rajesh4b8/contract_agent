@@ -1,6 +1,7 @@
 from langgraph.graph import StateGraph, END
 from langchain_core.messages import HumanMessage, AIMessage
 from backend.agents.intelligence_state import IntelligenceState
+from typing import Any
 from backend.agents.intelligence_tools import (
     ClauseDetectorTool, PolicyCheckerTool, 
     RiskCalculatorTool, RedlineGeneratorTool
@@ -61,7 +62,18 @@ def _stage_warnings(state: dict) -> list:
         ("risk_calculation_failed", "The risk score could not be calculated"),
         ("redline_generation_failed", "Redlines could not be drafted"),
     )
-    return [f"{label}: {state[key]}" for key, label in stages if state.get(key)]
+    warnings = [f"{label}: {state[key]}" for key, label in stages if state.get(key)]
+
+    # Not a stage that failed but a stage that only half ran. A long contract is
+    # analysed in windows, and some of them can fail while the rest succeed —
+    # which reads exactly like a complete review of a shorter contract unless
+    # something says otherwise.
+    if state.get("clause_extraction_incomplete"):
+        warnings.append(
+            "Part of this contract could not be analysed: some sections failed and "
+            "the findings below do not cover the whole document. Re-run the analysis."
+        )
+    return warnings
 
 
 class IntelligenceOrchestrator:
@@ -136,14 +148,26 @@ class IntelligenceOrchestrator:
         )
         
         try:
-            tool = ClauseDetectorTool(llm=self.llm)
+            # The version's own chunking, so the windows are built from the same
+            # boundaries the upload stored. Chunking it differently here would
+            # make every finding's chunk attribution point at boundaries that
+            # exist nowhere else.
+            tool = ClauseDetectorTool(
+                llm=self.llm, chunking_profile=state.get("chunking_profile")
+            )
             clauses_json = tool._run(state["contract_text"])
             clauses_list = json.loads(clauses_json)
-            
+
+            # Some windows failed. The findings that did arrive are real and
+            # worth keeping, but a review of part of a contract must not be
+            # rendered or persisted as a review of all of it.
+            incomplete = any(c.get("coverage_incomplete") for c in clauses_list)
+
             workflow_tracker.complete_agent(execution, f"Extracted {len(clauses_list)} clauses")
-            
+
             return {**state, 
                 "extracted_clauses": clauses_list,
+                "clause_extraction_incomplete": incomplete,
                 "current_step": "clause_extraction"
             }
         except Exception as e:
@@ -496,7 +520,8 @@ class IntelligenceOrchestrator:
     
     def analyze_contract(self, contract_text: str, use_planning: bool = True,
                          tenant_id: str = "default-tenant",
-                         contract_type: str = "general") -> dict:
+                         contract_type: str = "general",
+                         chunking_profile: Any = None) -> dict:
         """Run analysis with optional autonomous planning"""
         note(
             "analysis",
@@ -527,13 +552,15 @@ class IntelligenceOrchestrator:
                             future = executor.submit(
                                 context.run,
                                 asyncio.run,
-                                self._analyze_with_planning(contract_text, tenant_id, contract_type),
+                                self._analyze_with_planning(contract_text, tenant_id, contract_type,
+                                                            chunking_profile),
                             )
                             return future.result()
                     except RuntimeError:
                         # No event loop running, safe to use asyncio.run
                         return asyncio.run(
-                            self._analyze_with_planning(contract_text, tenant_id, contract_type)
+                            self._analyze_with_planning(contract_text, tenant_id, contract_type,
+                                                            chunking_profile)
                         )
                 except Exception as planning_error:
                     # Retrying the whole analysis against a model that just
@@ -548,9 +575,11 @@ class IntelligenceOrchestrator:
                         error_type=type(planning_error).__name__,
                         error=str(planning_error),
                     )
-                    return self._analyze_traditional(contract_text, tenant_id, contract_type)
+                    return self._analyze_traditional(contract_text, tenant_id, contract_type,
+                                                     chunking_profile)
             else:
-                return self._analyze_traditional(contract_text, tenant_id, contract_type)
+                return self._analyze_traditional(contract_text, tenant_id, contract_type,
+                                                     chunking_profile)
             
         except Exception as e:
             # An empty analysis is a legitimate answer to "this contract has no
@@ -568,7 +597,8 @@ class IntelligenceOrchestrator:
     
     async def _analyze_with_planning(self, contract_text: str,
                                      tenant_id: str = "default-tenant",
-                                     contract_type: str = "general") -> dict:
+                                     contract_type: str = "general",
+                                     chunking_profile: Any = None) -> dict:
         """Analyze contract using autonomous planning agent"""
         logger.info("🧠 STEP 1: Starting Planning Agent Analysis")
         
@@ -596,7 +626,8 @@ class IntelligenceOrchestrator:
             # Step 2: Execute the planned workflow
             logger.info("🧠 STEP 4: Starting plan execution")
             results = await self.execution_engine.execute_plan(
-                execution_plan, contract_text, tenant_id, contract_type
+                execution_plan, contract_text, tenant_id, contract_type,
+                chunking_profile,
             )
             logger.info(f"🧠 STEP 5: Plan execution completed: {results.get('processing_complete')}")
             
@@ -622,7 +653,8 @@ class IntelligenceOrchestrator:
     
     def _analyze_traditional(self, contract_text: str,
                              tenant_id: str = "default-tenant",
-                             contract_type: str = "general") -> dict:
+                             contract_type: str = "general",
+                             chunking_profile: Any = None) -> dict:
         """Traditional workflow analysis (fallback)"""
         # Start workflow tracking
         workflow_tracker.start_workflow()
@@ -633,6 +665,7 @@ class IntelligenceOrchestrator:
             "tenant_id": tenant_id,
             "contract_type": contract_type,
             "model_id": self.model_id,
+            "chunking_profile": chunking_profile,
             "extracted_clauses": [],
             "policy_violations": [],
             "risk_data": {},

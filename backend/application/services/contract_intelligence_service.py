@@ -28,7 +28,8 @@ class ContractIntelligenceService:
     def analyze_contract_intelligence(self, contract_text: str, model: str = "gemini-2.5-flash",
                                       use_planning: bool = True,
                                       tenant_id: str = "default-tenant",
-                                      contract_type: str = "general") -> ContractIntelligence:
+                                      contract_type: str = "general",
+                                      chunking_profile=None) -> ContractIntelligence:
         """Perform complete contract intelligence analysis using multi-agent system"""
         
         start_time = time.time()
@@ -44,7 +45,8 @@ class ContractIntelligenceService:
                 orchestrator = ContractIntelligenceAgentFactory.create_orchestrator(llm, model)
                 # Run multi-agent analysis with optional planning
                 analysis_result = orchestrator.analyze_contract(
-                    contract_text, use_planning, tenant_id, contract_type
+                    contract_text, use_planning, tenant_id, contract_type,
+                    chunking_profile,
                 )
             except ImportError as ie:
                 logger.error(f"Import error in orchestrator: {ie}")
@@ -135,11 +137,24 @@ class ContractIntelligenceService:
             #
             # `to_thread` copies the context, so the correlation id still
             # reaches the analysis and its debug events.
+            # The version's own chunking, read back from the graph. Analysis has
+            # to reproduce the boundaries the upload stored, or the windows it
+            # builds describe a division of the document that exists nowhere
+            # else — and every finding's chunk attribution with them.
+            profile = None
+            try:
+                from backend.infrastructure.chunk_repository import ChunkRepository
+
+                profile = ChunkRepository().profile_for_version(tenant_id, contract_id)
+            except Exception as e:
+                logger.warning(f"Could not read the chunking profile for {contract_id}: {e}")
+
             intelligence = await asyncio.to_thread(
                 self.analyze_contract_intelligence,
                 contract_text, model, use_planning,
                 tenant_id,
                 contract_data.get("contract_type") or "general",
+                profile,
             )
 
             # Store intelligence results back to database
@@ -374,6 +389,10 @@ class ContractIntelligenceService:
                 "violated_policy": clause.violated_policy,
                 "suggested_redline": clause.suggested_redline,
                 "human_review_required": bool(clause.human_review_required),
+                # The chunk this finding came from. Increment 9 re-analyses the
+                # windows whose chunks changed, and reads that from here.
+                "source_chunk": clause.source_chunk,
+                "source_window": clause.source_window,
             }
             for index, clause in enumerate(intelligence.clauses or [])
         ]
@@ -434,6 +453,8 @@ class ContractIntelligenceService:
                         violated_policy: f.violated_policy,
                         suggested_redline: f.suggested_redline,
                         human_review_required: f.human_review_required,
+                        source_chunk: f.source_chunk,
+                        source_window: f.source_window,
                         created_at: datetime()
                     })
                 }
@@ -542,7 +563,9 @@ class ContractIntelligenceService:
                    f.violated_policy AS violated_policy,
                    f.suggested_redline AS suggested_redline,
                    f.human_review_required AS human_review_required,
-                   f.location AS location
+                   f.location AS location,
+                   f.source_chunk AS source_chunk,
+                   f.source_window AS source_window
             ORDER BY f.position
             """,
             {"contract_id": contract_id, "tenant_id": tenant_id},
@@ -810,6 +833,8 @@ class ContractIntelligenceService:
                 violated_policy=clause_data.get("violated_policy"),
                 suggested_redline=clause_data.get("suggested_redline"),
                 human_review_required=clause_data.get("human_review_required", False),
+                source_chunk=clause_data.get("source_chunk"),
+                source_window=clause_data.get("source_window"),
             ))
         
         # Convert violations

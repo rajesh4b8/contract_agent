@@ -194,6 +194,12 @@ class StepExecutor:
         """Execute clause extraction with enhanced planning context"""
         contract_text = context.get("contract_text", "")
         tool = self.tools[StepType.EXTRACT_CLAUSES]
+        # The version's own chunking, when the caller knows it. Without it this
+        # path would re-chunk with a default profile and build windows from
+        # boundaries the stored membership does not have — so the planning path
+        # and the traditional path would attribute findings to different chunks
+        # for the same document.
+        tool.chunking_profile = context.get("chunking_profile")
         result_json = tool._run(contract_text)
         return json.loads(result_json)
     
@@ -408,7 +414,8 @@ class PlanExecutionEngine:
     
     async def execute_plan(self, plan: ExecutionPlan, contract_text: str,
                            tenant_id: str = "default-tenant",
-                           contract_type: str = "general") -> Dict[str, Any]:
+                           contract_type: str = "general",
+                           chunking_profile: Any = None) -> Dict[str, Any]:
         """Execute the complete analysis plan"""
         logger.info(f"🚀 EXEC STEP 1: Starting plan execution {plan.plan_id} with {len(plan.steps)} steps")
         logger.info(f"🚀 EXEC STEP 2: Contract text length: {len(contract_text)} characters")
@@ -425,6 +432,9 @@ class PlanExecutionEngine:
         # Initialize execution context
         self.execution_context = {
             "contract_text": contract_text,
+            # The version's own chunking, so this path windows the document the
+            # same way the traditional one does and the stored membership did.
+            "chunking_profile": chunking_profile,
             # Which playbook the policy step checks against.
             "tenant_id": tenant_id,
             "contract_type": contract_type,
