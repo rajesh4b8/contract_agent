@@ -1,15 +1,15 @@
 # POC Progress Tracker
 
-**Resume point: Increment 8 — `specified, not started`.**
-Increments 0–7 are accepted. Increment 8's specification is complete; start there.
+**Resume point: Increment 8 — `awaiting your test`.**
+Increments 0–7 are accepted. Increment 8 is built; test it before 9 starts.
 
 Still awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
 (out-of-increment bug fix, from your report of an unexplained "processing error") and
 **[Debug — a live timeline of what the pipeline is doing](#debug--a-live-timeline-of-what-the-pipeline-is-doing)**
 (out-of-increment, from your report that uploads take a long time with nothing on screen to say why).
 
-**Increments 8 and 9 remain specified and ready to build.** In order: analysing the whole contract
-rather than its first 12,000 characters (8), and the cross-version change report (9).
+**Increment 8 is built and waiting on you.** 9 remains specified: the cross-version change
+report.
 
 Two sections are worth knowing about before starting anything:
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) (settled — what this
@@ -43,8 +43,8 @@ produced it; this file is what you and I actually work from.
 | 5 | One measurable outcome | accepted |
 | 6 | Multiple contracts, each resumable | accepted |
 | 7 | Content-addressed chunks | accepted |
-| 8 | Analyse the whole contract | **specified — not started** |
-| 9 | Incremental re-analysis and the change report | specified — not started |
+| 8 | Analyse the whole contract | **awaiting your test** |
+| 9 | Incremental re-analysis and the change report | **specified — not started** |
 
 ---
 
@@ -1824,7 +1824,7 @@ _(write here)_
 
 ## Increment 8 — Analyse the whole contract
 
-**Status: `specified — not started`.**
+**Status: `awaiting your test`.** Built 2026-09-14.
 
 **Goal:** `ClauseDetectorTool` truncates at 12,000 characters (`intelligence_tools.py:95`). On the
 real contracts in `data/`, that means the system silently ignores most of the document and reports
@@ -1860,11 +1860,102 @@ that "1.00 says the fixtures are not yet hard enough" — this is what it was sa
 - **Longer eval fixtures, with breaches placed late.** Without these the evaluation still cannot
   fail on this, and an increment whose metric cannot fail is not measured.
 
-### Expect the scores to drop
+### What changed
 
-Analysing previously invisible text means more findings and more chances to be wrong. That is the
-metric becoming honest, not a regression. Run `make eval` before and after so the two are
-distinguishable — the same discipline as Increment 5.
+**Windows instead of truncation.** `pack_windows()` fills windows with consecutive whole chunks up
+to 12,000 characters — the same size as the single window it replaces, so what changes is *coverage*,
+not per-call behaviour. Measured:
+
+| contract | chars | chunks | windows | coverage |
+|---|---|---|---|---|
+| `Shell_Pacific_Corp_MESA.pdf` | 313,620 | 285 | **30** | 100% |
+| `Salesforce_MSA.pdf` | 70,757 | 37 | **6** | 100% |
+| `SampleContract-Shuttle.pdf` | 32,885 | 37 | **3** | 99% |
+
+30 calls for the Shell MESA against the ~26 the specification predicted, and against 285 if each
+chunk were its own call. Run four at a time, so those 30 are about eight rounds rather than thirty.
+
+**Chunk-aligned, and that is load-bearing.** A window is a tuple of chunk hashes, never a character
+range, so every finding maps back to specific chunks — which is what Increment 9's incremental
+re-analysis needs. It reuses Increment 7's chunks rather than inventing a second structure beside
+them. A chunk larger than the budget gets a window to itself rather than being split.
+
+**Grounding is per window.** Checking a finding against the whole contract would let a span invented
+for window 3 pass because similar words happen to appear in window 17.
+
+**Merged on clause type plus canonical evidence span.** Windows meet at chunk boundaries and a long
+clause can be reported from both sides of one. The earlier window wins, so a clause is attributed to
+where it starts.
+
+**One failed window no longer discards the other 29** — but *every* window failing still raises,
+because "the model was unavailable" and "this contract has no notable clauses" are different reports
+and conflating them is how the original hardcoded stub went unnoticed.
+
+**Policy checking is batched too**, 25 clauses per call, with the clause numbering kept global
+across batches. Without the offset every batch after the first would cite breaches against clauses
+0..n of the whole contract — the wrong text against the wrong rule, which is worse than missing the
+breach. An overlong prompt is truncated by the provider rather than refused, so the last clauses
+would otherwise go unchecked while the report called them compliant.
+
+### The measurement
+
+`evaluation/contracts/late-breaches.pdf` is new: the same two breaches as `partial`, placed behind
+forty-six clauses of compliant boilerplate so the first sits at character **16,139** of a 17,097
+character document. Every other fixture is under 1,400 characters and fits inside the old window,
+which is exactly why `make eval` reported 1.00 across the board and **could not have failed on
+this** — the thing Increment 5's "1.00 says the fixtures are not yet hard enough" was pointing at.
+
+Run both ways against the same code, on `gemini-flash-lite`:
+
+```
+                      with truncation          with windows
+  breaching.pdf       F1 1.00                  F1 1.00
+  partial.pdf         F1 1.00                  F1 1.00
+  late-breaches.pdf   F1 0.00  (both missed)   F1 1.00
+  clean.pdf           F1 1.00                  F1 1.00
+  --------------------------------------------------------
+  overall             R 0.80  F1 0.89          R 1.00  F1 1.00
+```
+
+The three old fixtures score identically either way. That is the point: they are structurally
+incapable of seeing this, and one fixture that can fail is worth more than three that cannot.
+
+**And on a real contract.** The Salesforce MSA, analysed end to end: **7 of its 9 clause findings
+come from past character 12,000** — text the system had never once looked at. Upload 14s, analysis
+10.5s across 6 windows.
+
+### Honest limits
+
+- **The predicted score drop did not appear**, because it cannot on these fixtures: the text
+  `late-breaches` adds is compliant boilerplate by construction, so there is nothing new to get
+  wrong. On a real long contract more coverage does mean more chances to be wrong, and nothing here
+  measures that — it would need a labelled real contract, which needs a lawyer.
+- **`Shell_Pacific_Corp_MESA.pdf` was not analysed end to end.** 30 windows plus batched policy
+  checking is a real number of model calls; the packing is measured, the full run is not.
+- **PDF extraction quality is now more visible.** The Salesforce MSA extracts with a line break
+  between almost every word, so evidence spans read oddly. `canonical()` absorbs it for hashing and
+  grounding, but the spans are stored as extracted. Not new, just newly apparent now that seven
+  eighths more of the document is being read.
+
+### How to test
+
+```bash
+make test
+```
+
+697 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
+
+```bash
+make eval          # needs the stack up
+```
+
+Expect `late-breaches.pdf` at F1 1.00. To see what it is worth, change
+`windows = pack_windows(...)` in `intelligence_tools.py` to `pack_windows(...)[:1]`, restart the
+backend and run it again: that fixture drops to 0.00 and the other three do not move.
+
+With the stack up, upload `data/Salesforce_MSA.pdf` and analyse it. The debug panel should show
+several extraction calls rather than one, and the clause findings should quote text from deep in the
+document rather than only its first few pages.
 
 ### Your feedback
 

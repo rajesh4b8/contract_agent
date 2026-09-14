@@ -311,3 +311,77 @@ def rarity_weight(document_frequency: int) -> float:
     if df == 1:
         return 1.0
     return 1.0 / math.log(1 + df)
+
+
+# --------------------------------------------------------------------------
+# Analysis windows
+# --------------------------------------------------------------------------
+
+#: Characters of contract text sent to the model in one extraction call.
+#: Deliberately the same size as the single window this replaces, so what
+#: changes is *coverage*, not per-call behaviour — the model sees the same
+#: amount of text at a time, it just now sees all of it.
+WINDOW_BUDGET_CHARS = 12_000
+
+
+@dataclass(frozen=True)
+class AnalysisWindow:
+    """A run of consecutive whole chunks, sent to the model in one call.
+
+    **Whole chunks, never split.** That is not a tidiness preference: because a
+    window is a set of chunk identities, every finding maps back to the specific
+    chunks it came from, which is what makes Increment 9's incremental
+    re-analysis possible — re-analyse the windows whose chunks changed, keep the
+    rest. Splitting a chunk across two windows would break that mapping and
+    invent a second structure alongside the `INCLUDES` membership list.
+    """
+
+    index: int
+    chunk_hashes: tuple
+    text: str
+    first_order: int
+    last_order: int
+
+    @property
+    def size(self) -> int:
+        return len(self.text)
+
+
+def pack_windows(chunks: List[Any], budget: int = WINDOW_BUDGET_CHARS,
+                 separator: str = "\n\n") -> List[AnalysisWindow]:
+    """Pack consecutive chunks into windows no larger than `budget`.
+
+    The alternative — one call per chunk — is unaffordable: the Shell MESA is
+    about 200 chunks, so 200 model calls for one review. Packing turns 313,000
+    characters into roughly 26.
+
+    A single chunk larger than the budget gets a window of its own rather than
+    being split, because splitting it would cost the chunk-to-finding mapping
+    for the sake of a limit the model will usually tolerate anyway.
+    """
+    windows: List[AnalysisWindow] = []
+    current: List[Any] = []
+    current_size = 0
+
+    def flush() -> None:
+        if not current:
+            return
+        windows.append(AnalysisWindow(
+            index=len(windows),
+            chunk_hashes=tuple(c.hash for c in current),
+            text=separator.join(c.content for c in current),
+            first_order=current[0].order,
+            last_order=current[-1].order,
+        ))
+
+    for chunk in chunks:
+        addition = len(chunk.content) + (len(separator) if current else 0)
+        if current and current_size + addition > budget:
+            flush()
+            current, current_size = [], 0
+            addition = len(chunk.content)
+        current.append(chunk)
+        current_size += addition
+
+    flush()
+    return windows
