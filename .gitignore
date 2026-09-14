@@ -23,7 +23,11 @@ dist/
 build/
 
 AI-Powered-Smart-Contract-Review-Guide.pdf
-sample-contracts/
+# Real and scratch contracts stay out of the repo. The chunk-reuse folder is the
+# exception: those are synthetic fixtures written to exercise Increment 7's
+# scenarios, and they are no use to anyone if they do not survive a clone.
+sample-contracts/*
+!sample-contracts/chunk-reuse/
 
 # Claude Code local session state (plans, memory, settings)
 .claude/

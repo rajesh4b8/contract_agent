@@ -13,20 +13,22 @@ from backend.infrastructure.content_validator import ContentValidationService
 from backend.infrastructure.error_tracker import ErrorTracker, ErrorCategory, ErrorSeverity, error_tracking_context
 from backend.shared.errors import classify_llm_error, describe_llm_error, raise_if_provider_error
 from backend.shared.debug import note, trace_step
-from backend.agents.chunking_agent import ChunkingAgent
+from backend.domain.chunking import ChunkingProfile
 from backend.domain.matter import (
     counterparty_from_parties,
     parse_status,
     source_sha256,
     suggest_title,
 )
-from backend.infrastructure.chunking.storage_service import ChunkStorageService
+from backend.infrastructure.chunk_repository import ChunkRepository
+from backend.infrastructure.chunking.identity import identify_chunks
 from backend.infrastructure.matter_repository import (
     DuplicateSource,
     MatterClosed,
     MatterNotFound,
     MatterRepository,
 )
+import asyncio
 import os
 import uuid
 import json
@@ -106,6 +108,38 @@ async def debug_contract_types(tenant_id: str = Depends(get_current_tenant)):
     except Exception as e:
         logger.error(f"Debug contract types failed: {e}")
         return {"error": str(e)}
+
+def _suggested_matters(chunk_repo, tenant_id: str, chunked, contract_id: str) -> list:
+    """Matters that share enough text with this document to be worth offering.
+
+    Never a decision, and deliberately not a single number: `forward` is how
+    much of the new document the candidate explains, `backward` how much of the
+    candidate it covers. An SOW quoting its MSA's boilerplate scores high on the
+    first and low on the second, and one number would have called it a match.
+    """
+    try:
+        with trace_step("chunking", "match", chunks=len(chunked.chunks)) as step:
+            candidates = chunk_repo.find_matches(
+                tenant_id, chunked.hashes, exclude_version=contract_id
+            )
+            step.set(candidates=len(candidates))
+    except Exception as e:
+        # A missing suggestion costs the user a click. Failing the upload over
+        # it would cost them the document.
+        logger.warning(f"Could not look for similar matters: {e}")
+        return []
+
+    return [
+        {
+            "matter_ref": c.matter_ref,
+            "title": c.title,
+            "score": round(c.score, 3),
+            "forward": round(c.forward, 3),
+            "backward": round(c.backward, 3),
+        }
+        for c in candidates
+    ]
+
 
 def _duplicate_response(filename: str, model: str, twin: dict) -> dict:
     """The answer when these exact bytes are already a version.
@@ -369,6 +403,7 @@ async def upload_pdf(
                 from backend.infrastructure.contract_repository import Neo4jContractRepository
                 repo = Neo4jContractRepository()
                 matters = MatterRepository()
+                chunk_repo = ChunkRepository()
                 logger.info("Repository initialized successfully")
             except Exception as repo_error:
                 logger.error(f"Repository initialization failed: {repo_error}")
@@ -413,8 +448,11 @@ async def upload_pdf(
                 # Worth knowing when reading the timeline: the PDF is extracted a
                 # second time inside the processing agent's `extract_text` node.
                 with trace_step("upload", "pdf_extract") as _step:
-                    full_text = text_extractor.extract_with_fallback(temp_path)
-                    _step.set(chars=len(full_text))
+                    # Which extractor won is part of the chunking profile: two
+                    # libraries produce different whitespace for the same file,
+                    # and therefore different chunk hashes for the same text.
+                    full_text, extractor_used = text_extractor.extract_with_source(temp_path)
+                    _step.set(chars=len(full_text), extractor=extractor_used)
                 logger.info(f"Text extraction completed. Length: {len(full_text)} characters")
 
                 # The one automatic case in this increment: byte-identical
@@ -481,90 +519,72 @@ async def upload_pdf(
                 else:
                     logger.info(f"Content validation passed: {len(full_text)} characters")
                 
-                # Step 5.5: Enhanced Intelligent Chunking with Embeddings
-                logger.info("Step 5.5: Enhanced intelligent chunking with embeddings")
-                # This block dominates an upload's wall clock: chunk embedding makes
-                # one network call per chunk. The per-batch `chunking.embed` progress
-                # events come from the embedding optimizer underneath it, so the
-                # panel shows movement instead of a minute of silence.
+                # Step 5.5: chunk the document and give every piece an identity.
+                #
+                # Only the *computation* happens here — it is pure CPU and needs
+                # nothing from the database. Storage and embedding wait until the
+                # version exists, because chunks belong to a version, and a
+                # version exists only once extraction has succeeded.
+                #
+                # The profile comes from version 1 of the matter when there is
+                # one. Re-running strategy selection on every round means a
+                # one-word edit can flip a document from section to paragraph
+                # chunking, and then no chunk survives — for no reason a reader
+                # could ever see.
                 try:
-                    # Initialize embedding service
-                    from backend.shared.utils.gemini_embedding_service import GeminiEmbeddingService
-                    embedding_service = GeminiEmbeddingService()
-
-                    chunking_agent = ChunkingAgent(embedding_service)
-                    contract_id = file.filename.replace('.pdf', '')
-
-                    # Try async enhanced chunking first
-                    try:
-                        with trace_step("upload", "chunking", chars=len(full_text)) as step:
-                            chunking_result = await chunking_agent.process_document(
-                                document_id=contract_id,
-                                content=full_text,
-                                metadata={
-                                    "filename": file.filename,
-                                    "document_type": "contract",
-                                    "file_size": len(full_text)
-                                }
+                    stored_profile = (
+                        chunk_repo.profile_for_matter(tenant_id, matter_ref)
+                        if matter_ref else None
+                    )
+                    if stored_profile is None:
+                        profile = ChunkingProfile(extractor=extractor_used)
+                    else:
+                        # The boundary settings are inherited; the version stamps
+                        # and the extractor are this round's own. Copying the old
+                        # ones forward would hide a normaliser bump behind a
+                        # profile that claims to be current.
+                        profile = stored_profile.reused_for(extractor_used)
+                        if not stored_profile.is_current:
+                            note("chunking", "profile_outdated",
+                                 matter_ref=matter_ref,
+                                 stored_chunker=stored_profile.chunker_version,
+                                 stored_normaliser=stored_profile.normaliser_version)
+                            logger.warning(
+                                f"{matter_ref} was chunked under an older ruleset "
+                                f"(chunker v{stored_profile.chunker_version}, normaliser "
+                                f"v{stored_profile.normaliser_version}); this round's "
+                                f"hashes are not comparable with it and reuse will be zero"
                             )
-
-                            if not chunking_result["success"]:
-                                logger.warning("Enhanced chunking failed, falling back to sync method")
-                                raise Exception("Enhanced chunking failed")
-
-                            _plan = chunking_result.get('plan') or {}
-                            _strategy = _plan.get('strategy_type') if isinstance(_plan, dict) else getattr(_plan, 'strategy_type', None)
-                            _quality = chunking_result['quality_assessment']['overall_quality']
-                            step.set(
-                                chunks=chunking_result['chunk_count'],
-                                strategy=str(_strategy),
-                                quality=round(_quality, 2),
+                        elif stored_profile.extractor not in ("unknown", extractor_used):
+                            # Different library, different whitespace, different
+                            # hashes for text nobody touched — the one thing that
+                            # explains "why did nothing match this round".
+                            note("chunking", "extractor_changed",
+                                 matter_ref=matter_ref,
+                                 was=stored_profile.extractor, now=extractor_used)
+                            logger.warning(
+                                f"{matter_ref} version 1 was extracted with "
+                                f"{stored_profile.extractor}, this round with "
+                                f"{extractor_used}; chunk reuse may be low"
                             )
-                            logger.info(f"Enhanced chunking completed: {chunking_result['chunk_count']} chunks, "
-                                      f"strategy: {_strategy}, "
-                                      f"quality: {_quality:.2f}")
-
-                            # Log document analysis insights
-                            doc_analysis = chunking_result.get('document_analysis', {})
-                            if doc_analysis.get('is_legal_document'):
-                                logger.info(f"Legal document detected - sections: {doc_analysis.get('section_count', 0)}, "
-                                          f"clauses: {doc_analysis.get('clause_count', 0)}")
-
-                    except Exception as async_error:
-                        logger.warning(f"Async chunking failed: {async_error}, trying sync method")
-                        note("upload", "chunking_fallback", reason=str(async_error))
-
-                        # Fallback to synchronous chunking
-                        with trace_step("upload", "chunking_sync", chars=len(full_text)) as step:
-                            chunking_result = chunking_agent.process_document_sync(
-                                content=full_text,
-                                metadata={
-                                    "filename": file.filename,
-                                    "document_type": "contract"
-                                }
-                            )
-
-                            # Store chunks using existing schema for backward compatibility
-                            storage_service = ChunkStorageService()
-                            chunk_ids = storage_service.store_chunks(
-                                contract_id=contract_id,
-                                chunks=chunking_result["chunks"]
-                            )
-                            step.set(
-                                chunks=len(chunk_ids),
-                                strategy=str(chunking_result['strategy_used']),
-                                quality=round(chunking_result['quality_score'], 2),
-                            )
-
-                            logger.info(f"Sync chunking completed: {len(chunk_ids)} chunks, "
-                                      f"strategy: {chunking_result['strategy_used']}, "
-                                      f"quality: {chunking_result['quality_score']:.2f}")
-
+                    with trace_step("chunking", "identify", chars=len(full_text)) as step:
+                        chunked = identify_chunks(full_text, profile)
+                        step.set(
+                            chunks=len(chunked.chunks),
+                            reused_profile=bool(stored_profile),
+                            structural=chunked.boundaries_are_structural,
+                        )
+                    if not chunked.boundaries_are_structural:
+                        # Said out loud. Without section headings the chunker
+                        # packs greedily, so one insertion shifts every boundary
+                        # after it and chunk identity is worth nothing.
+                        note("chunking", "unstructured", filename=file.filename,
+                             chunks=len(chunked.chunks))
                 except Exception as chunking_error:
-                    logger.warning(f"All chunking methods failed, continuing without chunking: {chunking_error}")
+                    logger.warning(f"Chunking failed, continuing without it: {chunking_error}")
                     note("upload", "chunking_skipped", reason=str(chunking_error))
-                    # System continues normally without chunking - no breaking changes
-                
+                    chunked = None
+
             except Exception as extract_error:
                 logger.error(f"Text extraction failed: {extract_error}")
                 raise
@@ -739,6 +759,49 @@ async def upload_pdf(
                                    f"as a version, so it cannot be filed: {record_error}",
                     }
 
+                # The version exists now, so its chunks can be attached — and
+                # only the ones this tenant has never seen are embedded. That is
+                # the whole of Increment 7's saving: one network call per new
+                # chunk, none per unchanged one.
+                if chunked is not None:
+                    try:
+                        # On a worker thread. `embed_documents` is a plain loop
+                        # of blocking network calls — ~210ms each, ~42s for a
+                        # 200-chunk contract — and running it in-line freezes the
+                        # event loop for that whole window: the debug stream, the
+                        # 500ms workflow poll this very page is making, and every
+                        # other user's request. Exactly the bug 4f86b9b fixed for
+                        # the analysis, and exactly the same fix.
+                        chunk_result = await asyncio.to_thread(
+                            chunk_repo.store_version_chunks,
+                            tenant_id, contract_id, chunked,
+                        )
+                        chunk_repo.set_profile(
+                            tenant_id, contract_id, chunked.profile,
+                            chunked.boundaries_are_structural,
+                        )
+                        response["chunks"] = chunk_result
+
+                        # A chunk whose embedding failed is invisible to the
+                        # reuse check — correctly, it has no usable vector — and
+                        # therefore invisible to semantic search for ever, since
+                        # nothing else revisits it and re-uploading the same file
+                        # exits at the duplicate check long before this point.
+                        # Bounded, so the retry rides along with work the tenant
+                        # is already paying for rather than needing a scheduler.
+                        backfilled = await asyncio.to_thread(
+                            chunk_repo.backfill_embeddings, tenant_id, 25
+                        )
+                        if backfilled["embedded"]:
+                            response["chunks"]["backfilled"] = backfilled["embedded"]
+                    except Exception as chunk_error:
+                        # The contract is stored and analysable without chunks;
+                        # search and the version diff degrade, and say so.
+                        logger.error(f"Could not store chunks for {contract_id}: "
+                                     f"{chunk_error}")
+                        note("chunking", "store", "error", contract_id=contract_id,
+                             error=str(chunk_error))
+
                 if matter_ref:
                     try:
                         filed = matters.attach_version(tenant_id, matter_ref, contract_id)
@@ -780,6 +843,16 @@ async def upload_pdf(
                     response["proposal"] = await _filing_proposal(
                         repo, contract_id, tenant_id, file.filename
                     )
+                    # Advisory only. A new SOW for a different vendor off the
+                    # same template is indistinguishable from a new round, and
+                    # only the user knows which it is — so this sits beside the
+                    # choice they were going to make anyway and never pre-empts
+                    # it. The exact-source case is decided automatically, far
+                    # earlier; this is the inexact one, which is a judgement.
+                    if chunked is not None:
+                        response["suggested_matters"] = _suggested_matters(
+                            chunk_repo, tenant_id, chunked, contract_id
+                        )
 
             note("upload", "completed", contract_id=contract_id, status=result["status"],
                  matter_ref=response.get("matter_ref"))

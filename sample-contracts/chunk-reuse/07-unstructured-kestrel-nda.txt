@@ -1,0 +1,19 @@
+MUTUAL NON-DISCLOSURE UNDERTAKING
+
+Kestrel Biometrics Limited and Orrin Devices GmbH are considering a possible commercial collaboration and each expects to disclose information to the other that it regards as confidential. Each party undertakes to the other that it will treat all such information with the same degree of care it applies to its own confidential material, and in no event with less than reasonable care.
+
+Confidential information means any information disclosed by one party to the other, whether orally, in writing, in machine-readable form or by demonstration, that is identified as confidential at the time of disclosure or that a reasonable recipient would understand to be confidential given its nature and the circumstances of disclosure. It includes technical specifications, manufacturing tolerances, supplier terms, pricing models, unpublished patent applications, customer lists and the fact and content of the discussions between the parties.
+
+The receiving party will use the disclosing party's confidential information solely to evaluate and, if the parties so agree, to pursue the collaboration, and for no other purpose whatever. It will not reproduce that information except as reasonably necessary for that purpose, and it will not disclose it to anyone other than those of its officers, employees and professional advisers who need to know it for that purpose and who are themselves bound by obligations of confidence no less onerous than these.
+
+Nothing in this undertaking applies to information that the receiving party can show was already lawfully in its possession without restriction before disclosure, that is or becomes public otherwise than through a breach of this undertaking, that is lawfully received from a third party free of any obligation of confidence, or that the receiving party independently develops without reference to the disclosed information.
+
+If the receiving party is required by law, by a court of competent jurisdiction or by a regulatory authority to disclose any confidential information, it may do so, but it will where lawful give the disclosing party prompt notice so that the disclosing party may seek a protective order, and it will disclose only so much of the information as it is legally obliged to disclose.
+
+Each party will, on written request from the other, return or destroy all confidential information in its possession together with all copies, extracts and derivative materials, save that a party may retain one copy for the purpose of complying with any applicable legal or regulatory retention requirement, and save for copies held in routine backup systems that are not readily accessible.
+
+These obligations take effect on the date of first disclosure and continue for five years from that date, except in relation to anything that constitutes a trade secret, in respect of which the obligations continue for as long as the information remains a trade secret.
+
+Nothing in this undertaking obliges either party to disclose anything, to enter into any further agreement, or to refrain from pursuing any opportunity independently. No licence under any patent, copyright, trade mark or other intellectual property right is granted or implied by any disclosure made under it.
+
+This undertaking is governed by the laws of England and Wales and the parties submit to the exclusive jurisdiction of the courts of England and Wales.

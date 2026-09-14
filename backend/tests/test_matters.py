@@ -753,12 +753,14 @@ class TestTheDuplicateGuaranteeIsEnforcedByTheDatabase:
 
     def test_a_database_that_refuses_a_constraint_does_not_stop_startup(self):
         """Existing rows may violate one. Running without it beats not running."""
-        repository = repo(RuntimeError("existing data violates it"), [], [])
+        repository = repo(RuntimeError("existing data violates it"), [], [], [])
 
         created = repository.ensure_constraints()
 
         assert "matter_counter_unique" not in created
-        assert len(created) == 2, "one bad constraint must not block the others"
+        assert len(created) == len(CONSTRAINTS) - 1, (
+            "one bad constraint must not block the others"
+        )
 
     def test_a_new_upload_claims_the_key(self):
         repository = repo([{"version_id": "V-1"}])
