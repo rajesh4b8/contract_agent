@@ -1,14 +1,14 @@
 # POC Progress Tracker
 
-**Resume point: Increment 7 — `awaiting your test`.**
-Increments 0–6 are accepted. Increment 7 is built; test it before 8 starts.
+**Resume point: Increment 8 — `specified, not started`.**
+Increments 0–7 are accepted. Increment 8's specification is complete; start there.
 
 Still awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
 (out-of-increment bug fix, from your report of an unexplained "processing error") and
 **[Debug — a live timeline of what the pipeline is doing](#debug--a-live-timeline-of-what-the-pipeline-is-doing)**
 (out-of-increment, from your report that uploads take a long time with nothing on screen to say why).
 
-**Increment 7 is built and waiting on you.** 8 and 9 remain specified: analysing the whole contract
+**Increments 8 and 9 remain specified and ready to build.** In order: analysing the whole contract
 rather than its first 12,000 characters (8), and the cross-version change report (9).
 
 Two sections are worth knowing about before starting anything:
@@ -42,8 +42,8 @@ produced it; this file is what you and I actually work from.
 | 4 | Human-in-the-loop approve / edit / reject | accepted |
 | 5 | One measurable outcome | accepted |
 | 6 | Multiple contracts, each resumable | accepted |
-| 7 | Content-addressed chunks | **awaiting your test** |
-| 8 | Analyse the whole contract | specified — not started |
+| 7 | Content-addressed chunks | accepted |
+| 8 | Analyse the whole contract | **specified — not started** |
 | 9 | Incremental re-analysis and the change report | specified — not started |
 
 ---
@@ -1480,7 +1480,7 @@ _(write here)_
 
 ## Increment 7 — Content-addressed chunks
 
-**Status: `awaiting your test`.** Built 2026-09-13.
+**Status: `accepted`** (2026-09-13, after two rounds of review — ten findings then five).
 
 **Goal:** give every chunk an identity derived from its content, so unchanged text is never
 re-embedded and two versions of a contract can be compared at all. Chunk embedding is one network
