@@ -1924,6 +1924,37 @@ incapable of seeing this, and one fixture that can fail is worth more than three
 come from past character 12,000** — text the system had never once looked at. Upload 14s, analysis
 10.5s across 6 windows.
 
+### Addressed in review (Copilot, PR #10)
+
+Five findings, all five real, and four of them were the same mistake: claiming a property in prose
+that the code did not actually provide.
+
+- **The analysis re-chunked with a default profile** instead of the version's own. A matter whose
+  first round was chunked with different sizes has stored chunks a default cannot reproduce — so the
+  windows, and every finding's chunk attribution, described a division of the document that existed
+  nowhere else. The profile is now read from the version and threaded through both the traditional
+  and the planning path.
+- **Findings carried no chunk identity at all.** `AnalysisWindow` knew its chunk hashes and
+  `_extract_window` threw them away, so the "findings map back to specific chunks" claim above was
+  prose with nothing behind it, and Increment 9 would have had to match text — ambiguous exactly
+  where it matters, on wording that repeats. Each finding now carries `source_chunk` and
+  `source_window`, through the domain entity, the API and onto the graph. Verified end to end:
+  **6/6 findings point at a chunk the version actually includes.**
+- **Deduplication collapsed two legitimate occurrences into one.** Keyed on clause type and text
+  alone, the same notice provision appearing in two schedules became one finding — and because the
+  policy layer is index-based precisely so duplicate text can be told apart, dropping one could take
+  a real violation with it. The key now includes the chunk: duplicate *reports* collapse, duplicate
+  *occurrences* do not.
+- **Partial coverage existed only in a log line.** A review covering 29 of 30 windows was rendered
+  and persisted as complete — the exact failure mode this project keeps returning to. It is a
+  warning now, beside the others.
+- **`ThreadPoolExecutor` does not propagate `contextvars`**, so thirty concurrent model calls logged
+  and emitted debug events with no correlation id, and two reviews running at once would interleave
+  with nothing to tell them apart. Each call runs under a copy of the request's context, the same way
+  the analysis worker already does.
+
+Tests: **697 → 703.**
+
 ### Honest limits
 
 - **The predicted score drop did not appear**, because it cannot on these fixtures: the text
@@ -1943,7 +1974,7 @@ come from past character 12,000** — text the system had never once looked at. 
 make test
 ```
 
-697 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
+703 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
 
 ```bash
 make eval          # needs the stack up
