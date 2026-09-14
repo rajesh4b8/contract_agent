@@ -316,6 +316,25 @@ class ChunkRepository:
             },
         )
 
+    def profile_for_version(self, tenant_id: str, version_id: str) -> Optional[ChunkingProfile]:
+        """The profile this exact version was chunked with.
+
+        Analysis reads this rather than chunking afresh with a default: a matter
+        whose first round was chunked with different sizes, or by a different
+        extractor, has stored chunks a default profile cannot reproduce.
+        """
+        rows = self.graph.query(
+            """
+            MATCH (v:ContractVersion {version_id: $version_id, tenant_id: $tenant_id})
+            WHERE v.chunking_profile IS NOT NULL
+            RETURN v.chunking_profile AS profile
+            """,
+            {"version_id": version_id, "tenant_id": tenant_id},
+        )
+        if not rows or not rows[0].get("profile"):
+            return None
+        return ChunkingProfile.from_dict(_unflatten(rows[0]["profile"]))
+
     def profile_for_matter(self, tenant_id: str, matter_ref: str) -> Optional[ChunkingProfile]:
         """The profile version 1 was chunked with, if this matter has one.
 

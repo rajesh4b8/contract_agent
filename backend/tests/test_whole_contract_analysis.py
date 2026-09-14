@@ -166,50 +166,62 @@ class TestWindowsAreWholeChunks:
 
 
 class TestFindingsAreMergedAcrossWindows:
-    #: Present in every section, so every window can legitimately report it.
-    EVERYWHERE = "in terms agreed between them."
+    """Duplicate *reports* collapse; duplicate *occurrences* do not.
 
-    def test_the_same_clause_reported_twice_appears_once(self):
-        """Windows meet at chunk boundaries and a long clause can be reported
-        from both sides of one."""
-        llm = RecordingLLM(clauses_for=lambda p: [clause(self.EVERYWHERE)])
+    Identity is the clause type, the canonical evidence span, and the chunk the
+    span sits in. Keying on text alone silently dropped the second of two
+    legitimately repeated provisions — and because the policy layer is
+    index-based precisely so duplicate text can be told apart, dropping one
+    could take a real violation with it.
+    """
 
-        result = json.loads(ClauseDetectorTool(llm=llm)._run(contract(sections=40)))
+    def test_the_same_occurrence_reported_twice_appears_once(self):
+        finding = _finding("Payment Terms", "Net thirty (30) days.")
 
-        assert len(llm.prompts) > 1, "the fixture did not produce multiple windows"
-        assert len(result) == 1, f"{len(result)} copies of one clause"
+        merged = ClauseDetectorTool._merge_findings(
+            [[finding], [finding]],
+            [[(0, "chunk-a")], [(1, "chunk-a")]],   # the same chunk
+        )
 
-    def test_whitespace_does_not_make_a_second_finding(self):
+        assert len(merged) == 1
+
+    def test_the_same_wording_in_two_places_is_two_findings(self):
+        """A contract can legitimately carry the same notice provision in two
+        schedules, and a reviewer has to see both."""
+        finding = _finding("Payment Terms", "Net thirty (30) days.")
+
+        merged = ClauseDetectorTool._merge_findings(
+            [[finding], [finding]],
+            [[(0, "chunk-a")], [(1, "chunk-b")]],   # different chunks
+        )
+
+        assert len(merged) == 2
+
+    def test_whitespace_and_case_do_not_make_a_second_finding(self):
         """The same normalisation chunk identity uses."""
-        spans = iter([self.EVERYWHERE, "in  terms" + chr(10) + "agreed   between them."])
-        llm = RecordingLLM(clauses_for=lambda p: [clause(next(spans, self.EVERYWHERE))])
-
-        result = json.loads(ClauseDetectorTool(llm=llm)._run(contract(sections=40)))
-
-        assert len(result) == 1
-
-    def test_case_does_not_make_a_second_finding(self):
-        merged = ClauseDetectorTool._merge_findings([
-            [_finding("Payment Terms", "Net thirty (30) days.")],
-            [_finding("payment terms", "NET THIRTY (30) DAYS.")],
-        ])
+        merged = ClauseDetectorTool._merge_findings(
+            [[_finding("Payment Terms", "Net thirty (30) days.")],
+             [_finding("payment terms", "NET  THIRTY (30)" + chr(10) + "DAYS.")]],
+            [[(0, "chunk-a")], [(1, "chunk-a")]],
+        )
 
         assert len(merged) == 1
 
     def test_genuinely_different_clauses_both_survive(self):
-        merged = ClauseDetectorTool._merge_findings([
-            [_finding("Payment Terms", "Payment is due in thirty (30) days.")],
-            [_finding("Liability", "Liability is capped at the fees paid.")],
-        ])
+        merged = ClauseDetectorTool._merge_findings(
+            [[_finding("Payment Terms", "Payment is due in thirty (30) days.")],
+             [_finding("Liability", "Liability is capped at the fees paid.")]],
+            [[(0, "chunk-a")], [(1, "chunk-b")]],
+        )
 
         assert len(merged) == 2
 
     def test_the_same_text_under_two_clause_types_is_two_findings(self):
         span = "Each party shall indemnify the other and keep information secret."
-        merged = ClauseDetectorTool._merge_findings([
-            [_finding("Indemnification", span)],
-            [_finding("Confidentiality", span)],
-        ])
+        merged = ClauseDetectorTool._merge_findings(
+            [[_finding("Indemnification", span)], [_finding("Confidentiality", span)]],
+            [[(0, "chunk-a")], [(1, "chunk-a")]],
+        )
 
         assert len(merged) == 2
 
@@ -218,9 +230,11 @@ class TestFindingsAreMergedAcrossWindows:
         first = _finding("Payment Terms", "Net thirty (30) days.", location="Section 2")
         later = _finding("Payment Terms", "Net thirty (30) days.", location="Section 9")
 
-        merged = ClauseDetectorTool._merge_findings([[first], [later]])
+        merged = ClauseDetectorTool._merge_findings(
+            [[first], [later]], [[(0, "chunk-a")], [(1, "chunk-a")]])
 
-        assert merged[0].location == "Section 2"
+        assert merged[0][0].location == "Section 2"
+        assert merged[0][1] == (0, "chunk-a")
 
 
 def _finding(clause_type, span, location=""):
@@ -228,6 +242,107 @@ def _finding(clause_type, span, location=""):
 
     return ClauseFinding(clause_type=clause_type, evidence_span=span,
                          risk_level="HIGH", confidence=0.9, location=location)
+
+
+class TestAFindingRemembersWhereItCameFrom:
+    """Increment 9 re-analyses only the windows whose chunks changed. Without
+    the chunk on each finding, selecting the affected ones means matching text —
+    ambiguous exactly where it matters, on wording that repeats."""
+
+    def test_every_finding_carries_its_chunk_and_window(self):
+        text = contract(sections=40)
+        span = "1. OBLIGATION 1."
+        llm = RecordingLLM(clauses_for=lambda p: [clause(span)] if span in p else [])
+
+        result = json.loads(ClauseDetectorTool(llm=llm)._run(text))
+
+        assert result
+        assert result[0]["source_chunk"], "no chunk identity on the finding"
+        assert result[0]["source_window"] == 0
+
+    def test_the_chunk_is_one_the_document_actually_has(self):
+        text = contract(sections=40)
+        span = "1. OBLIGATION 1."
+        llm = RecordingLLM(clauses_for=lambda p: [clause(span)] if span in p else [])
+
+        result = json.loads(ClauseDetectorTool(llm=llm)._run(text))
+
+        hashes = {c.hash for c in identify_chunks(text).chunks}
+        assert result[0]["source_chunk"] in hashes
+
+
+class TestTheVersionsOwnChunkingIsUsed:
+    """A matter whose first round was chunked with different sizes has stored
+    chunks a fresh default profile cannot reproduce — and then every finding's
+    chunk attribution points at boundaries that exist nowhere but here."""
+
+    #: One section long enough that `max_chunk_size` decides where it splits,
+    #: which is the only thing the profile actually changes.
+    LONG_SECTION = "1. OBLIGATIONS.\n\n" + "\n\n".join(
+        f"Paragraph {n} of the obligations, stated at some length so that the "
+        f"section as a whole comfortably exceeds the smaller chunk size." 
+        for n in range(40)
+    )
+
+    def test_the_profile_reaches_the_chunker(self):
+        from backend.domain.chunking import ChunkingProfile
+
+        small = identify_chunks(self.LONG_SECTION, ChunkingProfile(max_chunk_size=600))
+        large = identify_chunks(self.LONG_SECTION, ChunkingProfile(max_chunk_size=9000))
+        assert small.hashes != large.hashes, "the fixture does not exercise the profile"
+
+        llm = RecordingLLM(clauses_for=lambda p: [])
+        ClauseDetectorTool(
+            llm=llm, chunking_profile=ChunkingProfile(max_chunk_size=600),
+        )._run(self.LONG_SECTION)
+
+        # The prompts are the windows, and the windows are built from the
+        # profile's chunks.
+        assert len(llm.prompts) == len(
+            pack_windows(small.chunks)), "a different profile's chunks were used"
+
+    def test_findings_land_on_chunks_the_profile_produces(self):
+        from backend.domain.chunking import ChunkingProfile
+
+        profile = ChunkingProfile(max_chunk_size=600)
+        text = self.LONG_SECTION
+        span = "Paragraph 0 of the obligations"
+        llm = RecordingLLM(clauses_for=lambda p: [clause(span)] if span in p else [])
+
+        result = json.loads(
+            ClauseDetectorTool(llm=llm, chunking_profile=profile)._run(text))
+
+        hashes = {c.hash for c in identify_chunks(text, profile).chunks}
+        assert result[0]["source_chunk"] in hashes
+
+
+class TestPartialCoverageIsVisibleNotJustLogged:
+    """A review covering 29 of 30 windows must not be persisted and rendered as
+    a complete one — the failure existing only in a log line is exactly how a
+    degraded run gets read as a clean contract."""
+
+    def test_findings_are_marked_when_a_window_failed(self):
+        text = contract(sections=40)
+        span = "1. OBLIGATION 1."
+        llm = RecordingLLM(
+            clauses_for=lambda p: [clause(span)] if span in p else [],
+            fail_on=lambda p: "OBLIGATION 39." in p,
+        )
+
+        result = json.loads(ClauseDetectorTool(llm=llm)._run(text))
+
+        assert result
+        assert all(c.get("coverage_incomplete") for c in result)
+
+    def test_a_complete_run_is_not_marked(self):
+        text = contract(sections=40)
+        span = "1. OBLIGATION 1."
+        llm = RecordingLLM(clauses_for=lambda p: [clause(span)] if span in p else [])
+
+        result = json.loads(ClauseDetectorTool(llm=llm)._run(text))
+
+        assert result
+        assert not any(c.get("coverage_incomplete") for c in result)
 
 
 class TestGroundingIsPerWindow:

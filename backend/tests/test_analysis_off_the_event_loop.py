@@ -106,10 +106,11 @@ async def test_the_analysis_arguments_survive_the_hop(service):
     """`to_thread` passes positionally, so the order has to be right."""
     got = {}
 
-    def analyse(text, model, use_planning, tenant_id, contract_type):
+    def analyse(text, model, use_planning, tenant_id, contract_type, chunking_profile):
         got.update(
             text=text, model=model, use_planning=use_planning,
             tenant_id=tenant_id, contract_type=contract_type,
+            chunking_profile=chunking_profile,
         )
         return _intelligence()
 
@@ -122,4 +123,8 @@ async def test_the_analysis_arguments_survive_the_hop(service):
         "use_planning": False,
         "tenant_id": "acme",
         "contract_type": "MSA",
+        # The version's recorded chunking. None here because the stub graph has
+        # no profile stored; what matters is that it rides across in this slot,
+        # because `to_thread` passes positionally.
+        "chunking_profile": None,
     }

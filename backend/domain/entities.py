@@ -62,6 +62,12 @@ class ContractClause:
     violated_policy: Optional[str] = None    # playbook rule id (Increment 2)
     suggested_redline: Optional[str] = None  # proposed language (Increment 3)
     human_review_required: bool = False
+    # Which chunk of which analysis window this finding came from (Increment 8).
+    # Carried so Increment 9 can re-analyse only the windows whose chunks
+    # changed; selecting them by matching text is ambiguous exactly where it
+    # matters, on wording that repeats.
+    source_chunk: Optional[str] = None
+    source_window: Optional[int] = None
 
 @dataclass
 class PolicyViolation:
