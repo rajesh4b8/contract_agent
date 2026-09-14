@@ -450,6 +450,28 @@ class TestAnUnstructuredDocumentSaysSo:
     def test_a_sectioned_contract_has_structural_boundaries(self):
         assert identify_chunks(CONTRACT).boundaries_are_structural
 
+    def test_a_bare_all_caps_title_is_not_a_section(self):
+        """"CONFIDENTIALITY AGREEMENT" matches the same pattern a genuine
+        ALL-CAPS heading does, so a single hit let a document with no sections
+        at all claim anchored boundaries — and then claim stable chunk identity
+        it does not have."""
+        prose = " ".join(
+            "The parties acknowledge that this arrangement is mutually beneficial."
+            for _ in range(60)
+        )
+
+        for title in ("CONFIDENTIALITY AGREEMENT", "MUTUAL UNDERTAKING OF CONFIDENCE"):
+            document = identify_chunks(f"{title}\n\n{prose}")
+            assert not document.boundaries_are_structural, title
+
+    def test_one_section_anchor_is_not_enough(self):
+        from backend.infrastructure.chunking.section_strategy import SectionStrategy
+
+        assert SectionStrategy.MIN_SECTION_ANCHORS >= 2
+
+    def test_a_genuinely_sectioned_contract_still_counts(self):
+        assert identify_chunks(CONTRACT).boundaries_are_structural
+
     def test_prose_with_no_headings_is_flagged(self):
         prose = " ".join(
             "The parties acknowledge that this arrangement is mutually beneficial "

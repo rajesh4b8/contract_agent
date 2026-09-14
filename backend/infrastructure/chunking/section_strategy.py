@@ -43,8 +43,14 @@ class SectionStrategy(ChunkingStrategy):
             r'^\([0-9]+\)\s+',  # (1), (2), (3) subsections
         ]
     
+    #: Two, because one is not evidence of structure. An ALL-CAPS document
+    #: title — "CONFIDENTIALITY AGREEMENT" — matches the same pattern a genuine
+    #: ALL-CAPS heading does, so a single hit lets a document with no sections
+    #: at all claim anchored boundaries. A real sectioned contract has many.
+    MIN_SECTION_ANCHORS = 2
+
     def has_section_headers(self, text: str) -> bool:
-        """Whether any line actually looks like a section heading.
+        """Whether the document is genuinely divided into sections.
 
         Not the same question as "did chunking produce sections".
         `_identify_sections` always returns at least one section for non-empty
@@ -53,11 +59,18 @@ class SectionStrategy(ChunkingStrategy):
         on the difference: with real headings, boundaries are anchored to the
         document's own structure and an insertion is local; without them, text
         is packed greedily and one insertion shifts every boundary after it.
+
+        The first non-blank line is skipped, because that is the title, and a
+        title is not a section.
         """
-        for line in (text or "").split("\n"):
-            stripped = line.strip()
-            if stripped and any(re.match(p, stripped) for p in self.section_patterns):
-                return True
+        lines = [line.strip() for line in (text or "").split("\n")]
+        body = [line for line in lines if line]
+        anchors = 0
+        for line in body[1:]:           # [1:] — the first line is the title
+            if any(re.match(p, line) for p in self.section_patterns):
+                anchors += 1
+                if anchors >= self.MIN_SECTION_ANCHORS:
+                    return True
         return False
 
     def chunk_text(self, text: str, metadata: Dict[str, Any] = None) -> List[Dict[str, Any]]:

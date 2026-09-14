@@ -1732,7 +1732,29 @@ surrounding `except` swallowed it and fell back to substring matching every sing
 `"who indemnifies whom"` now returns 28 semantic hits at 0.86 similarity where it previously
 returned two substring matches.
 
-Tests: **650 → 666.**
+**Second round (Copilot, PR #9).** Five more, all five real:
+
+- **Search read the chunk but not the relationship.** `c.chunk_index` is never written for
+  content-addressed chunks, so it came back null every time, and `c.content` is whichever version
+  created the node — which made the per-version wording fixed above unreachable by the only thing
+  that would display it. The queries now project `i.order` and `coalesce(i.text, c.content)`.
+- **`backfill_embeddings` had no caller.** Added in the first round and then never wired up, so a
+  chunk whose embedding failed stayed unsearchable for ever: re-uploading the same file exits at the
+  duplicate check long before chunk storage. A bounded backfill now rides along with each upload.
+- **A single ALL-CAPS line marked a whole document structural.** A document *title* matches the same
+  pattern a genuine ALL-CAPS heading does, so an unsectioned contract could claim stable chunk
+  identity it does not have. Two anchors are required now, and the first line is skipped because it
+  is the title. (Copilot's example — fixture 07 — was the one case that already worked, by accident:
+  the hyphen in "NON-DISCLOSURE" defeats the pattern. The diagnosis was right anyway; a title
+  without a hyphen did trip it.)
+- **A missing document reported a missing matter.** `attach_version` raises the same error for three
+  situations; saying "no matter MSA-2026-0042" while that matter is on the reviewer's screen sends
+  them looking in the wrong place entirely.
+- **"% of the text is shared" overstated the evidence.** The score is the weaker of two
+  rarity-weighted *chunk-coverage* ratios — chunk length is not counted and common clauses are
+  deliberately discounted — so it is labelled a match score, with both directions on hover.
+
+Tests: **650 → 672.**
 
 ### One thing found while building it
 

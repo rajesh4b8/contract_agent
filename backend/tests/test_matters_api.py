@@ -321,11 +321,34 @@ class TestTakingUpASuggestion:
 
         matters.attach_version.side_effect = MatterNotFound("x")
         matters.matter_for_version.return_value = None
+        matters.get_matter.return_value = None
 
         response = client.post("/api/matters/MSA-2026-9999/versions", headers=HEADERS,
                                json={"contract_id": "UPLOADED_AAA"})
 
         assert response.status_code == 404
+        assert "No matter" in response.json()["detail"]
+
+    def test_a_missing_document_does_not_claim_the_matter_is_missing(self, client, matters):
+        """`attach_version` raises the same error for three situations.
+
+        Telling a reviewer "no matter MSA-2026-0042" while that matter is on
+        their screen, when it is the *document* that is not there, sends them
+        looking in entirely the wrong place.
+        """
+        from backend.infrastructure.matter_repository import MatterNotFound
+
+        matters.attach_version.side_effect = MatterNotFound("x")
+        matters.matter_for_version.return_value = None
+        matters.get_matter.return_value = A_MATTER
+
+        response = client.post("/api/matters/MSA-2026-0042/versions", headers=HEADERS,
+                               json={"contract_id": "UPLOADED_NOPE"})
+
+        assert response.status_code == 404
+        detail = response.json()["detail"]
+        assert "UPLOADED_NOPE" in detail
+        assert "No matter" not in detail
 
     def test_junk_in_the_reference_never_reaches_a_query(self, client, matters):
         response = client.post("/api/matters/..%2F..%2Fetc/versions", headers=HEADERS,

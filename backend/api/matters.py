@@ -249,12 +249,22 @@ async def attach_version(
             detail=f"{matter_ref} is closed. Reopen it before adding a new round.",
         )
     except MatterNotFound:
+        # `attach_version` raises this for three different situations, and they
+        # are not the same answer. Telling a reviewer "no matter MSA-2026-0042"
+        # when the matter is plainly on their screen and it is the *document*
+        # that is missing sends them looking in the wrong place entirely.
         existing = repository.matter_for_version(tenant_id, request.contract_id)
         if existing:
             raise HTTPException(
                 status_code=409,
                 detail=f"{request.contract_id} is already version {existing['n']} "
                        f"of {existing['matter_ref']}",
+            )
+        if repository.get_matter(tenant_id, matter_ref) is not None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No uploaded document {request.contract_id} to file "
+                       f"into {matter_ref}",
             )
         raise HTTPException(status_code=404, detail=f"No matter {matter_ref}")
 

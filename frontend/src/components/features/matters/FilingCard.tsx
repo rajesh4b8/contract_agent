@@ -65,8 +65,17 @@ export const FilingCard: React.FC<FilingCardProps> = ({
             <div key={s.matter_ref} className="flex flex-wrap items-center gap-2 text-sm">
               <span className="font-mono font-semibold text-amber-900">{s.matter_ref}</span>
               <span className="text-amber-800">{s.title}</span>
-              <span className="text-amber-700">
-                — {Math.round(s.score * 100)}% of the text is shared
+              {/* Not "% of the text". The score is the weaker of two
+                  chunk-coverage ratios, and shared chunks are weighted down the
+                  more contracts they appear in — so a common clause counts for
+                  almost nothing and chunk length is not counted at all. Calling
+                  it a text percentage would overstate what the evidence is. */}
+              <span
+                className="text-amber-700"
+                title={`${Math.round(s.forward * 100)}% of this upload appears in the matter; `
+                  + `${Math.round(s.backward * 100)}% of the matter appears in this upload`}
+              >
+                — match score {Math.round(s.score * 100)}%
               </span>
               {onFileInto && (
                 <Button

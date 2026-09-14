@@ -781,6 +781,19 @@ async def upload_pdf(
                             chunked.boundaries_are_structural,
                         )
                         response["chunks"] = chunk_result
+
+                        # A chunk whose embedding failed is invisible to the
+                        # reuse check — correctly, it has no usable vector — and
+                        # therefore invisible to semantic search for ever, since
+                        # nothing else revisits it and re-uploading the same file
+                        # exits at the duplicate check long before this point.
+                        # Bounded, so the retry rides along with work the tenant
+                        # is already paying for rather than needing a scheduler.
+                        backfilled = await asyncio.to_thread(
+                            chunk_repo.backfill_embeddings, tenant_id, 25
+                        )
+                        if backfilled["embedded"]:
+                            response["chunks"]["backfilled"] = backfilled["embedded"]
                     except Exception as chunk_error:
                         # The contract is stored and analysable without chunks;
                         # search and the version diff degrade, and say so.

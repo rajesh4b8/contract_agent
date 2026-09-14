@@ -409,6 +409,18 @@ class TestOneBadChunkDoesNotCostTheOthers:
         statement = repository.graph.statements[0]
         assert "c.embedding_model <> $model" in statement
 
+    def test_the_backfill_actually_has_a_caller(self):
+        """It was added in the last review round and then never wired up, so a
+        chunk whose embedding failed stayed unsearchable for ever — re-uploading
+        the same file exits at the duplicate check long before chunk storage."""
+        import inspect
+
+        from backend.api import document_upload
+
+        assert "backfill_embeddings" in inspect.getsource(document_upload), (
+            "the recovery path has no production caller"
+        )
+
     def test_nothing_to_backfill_is_not_an_embedding_call(self):
         embedder = CountingEmbedder()
         repository = repo([], embedder=embedder)
@@ -499,7 +511,17 @@ class TestChunkSearchSeesBothCorpora:
         return inspect.getsource(enhanced_contract_search_tool._search_chunks)
 
     def test_it_reads_content_addressed_chunks(self):
-        assert "(v:ContractVersion {tenant_id: $tenant_id})-[:INCLUDES]->(c:Chunk)" in self._source()
+        assert "(v:ContractVersion {tenant_id: $tenant_id})-[i:INCLUDES]->(c:Chunk)" in self._source()
+
+    def test_it_projects_the_relationship_not_just_the_node(self):
+        """A content-addressed chunk is shared between versions, so its position
+        and this version's own wording live on the edge. `c.chunk_index` is
+        never written for these at all, and `c.content` is whichever version
+        happened to create the node."""
+        source = self._source()
+
+        assert "coalesce(i.text, c.content)" in source, "reused chunks show v1's wording"
+        assert "i.order AS chunk_index" in source or "chunk_index: i.order" in source
 
     def test_it_still_reads_the_corpus_written_before_this_increment(self):
         """3,508 chunks that nothing else can reach."""
