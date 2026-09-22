@@ -10,6 +10,7 @@ import json
 import pytest
 
 from backend.agents.intelligence_tools import ClauseDetectorTool
+from backend.agents.intelligence_tools import parse_clause_result
 from backend.shared.models.clause_finding import ClauseFinding, RiskLevel
 
 ACME = """MASTER SERVICES AGREEMENT between Acme Corp and Northwind Ltd.
@@ -60,7 +61,7 @@ def test_extracted_spans_come_from_the_contract():
     ]}
     tool = ClauseDetectorTool(llm=FakeLLM(payload))
 
-    clauses = json.loads(tool._run(ACME))
+    clauses = parse_clause_result(tool._run(ACME))[0]
 
     assert len(clauses) == 2
     for clause in clauses:
@@ -79,8 +80,8 @@ def test_different_contracts_produce_different_clauses():
         _finding("Termination", "The City may terminate immediately for convenience."),
     ]}))
 
-    acme = json.loads(acme_tool._run(ACME))
-    shuttle = json.loads(shuttle_tool._run(SHUTTLE))
+    acme = parse_clause_result(acme_tool._run(ACME))[0]
+    shuttle = parse_clause_result(shuttle_tool._run(SHUTTLE))[0]
 
     assert acme != shuttle
     assert acme[0]["evidence_span"] not in SHUTTLE
@@ -95,7 +96,7 @@ def test_ungrounded_clauses_are_dropped():
     ]}
     tool = ClauseDetectorTool(llm=FakeLLM(payload))
 
-    clauses = json.loads(tool._run(ACME))
+    clauses = parse_clause_result(tool._run(ACME))[0]
 
     assert [c["clause_type"] for c in clauses] == ["Payment Terms"]
 
@@ -133,7 +134,7 @@ def test_a_contract_with_no_notable_clauses_returns_empty():
     """The other side of that coin: genuinely finding nothing is not an error."""
     tool = ClauseDetectorTool(llm=FakeLLM({"clauses": []}))
 
-    assert json.loads(tool._run(ACME)) == []
+    assert parse_clause_result(tool._run(ACME))[0] == []
 
 
 def test_wire_format_keeps_the_keys_existing_consumers_read():

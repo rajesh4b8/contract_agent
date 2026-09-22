@@ -6,8 +6,13 @@ from datetime import datetime
 import time
 from functools import wraps
 from backend.agents.planning.planning_agent import ExecutionPlan, ExecutionStep, StepType
+import math
+
+from backend.domain.chunking import pack_windows
+from backend.infrastructure.chunking.identity import identify_chunks
 from backend.agents.intelligence_tools import (
-    ClauseDetectorTool, PolicyCheckerTool, 
+    CLAUSE_EXTRACTION_CONCURRENCY, POLICY_CHECK_BATCH,
+    ClauseDetectorTool, PolicyCheckerTool, parse_clause_result, 
     RiskCalculatorTool, RedlineGeneratorTool
 )
 from backend.agents.agent_workflow_tracker import workflow_tracker
@@ -35,6 +40,17 @@ class ExecutionResult:
     # so the engine can decide to stop and the API can answer with its status.
     provider_failure: Optional[LLMErrorInfo] = None
 
+#: Allowed per round of concurrent model calls. Generous: a cold provider
+#: connection on a long window has been measured past 30s on its own, and a
+#: budget that is merely typical turns an ordinary slow call into a reported
+#: step failure.
+SECONDS_PER_MODEL_ROUND = 90
+
+#: However long the document, a step that has run this long is stuck rather than
+#: working, and the reviewer is better served by an error than by more waiting.
+MAX_STEP_BUDGET_SECONDS = 900
+
+
 class StepExecutor:
     """Execute individual analysis steps"""
     
@@ -53,24 +69,31 @@ class StepExecutor:
     async def execute_step(self, step: ExecutionStep, context: Dict[str, Any]) -> ExecutionResult:
         """Execute a single analysis step with timeout and retry"""
         start_time = datetime.now()
-        
-        # Implement timeout
+
+        # The step's budget, scaled to how much work this contract actually is.
+        # The flat 30s was sized for a single truncated model call. Extraction is
+        # now one call per window — four at a time — so a 30-window contract
+        # needs about eight rounds, and the flat budget would time it out every
+        # single time while reporting it as a step failure rather than what it
+        # is. Observed on a two-window document on a cold provider connection.
+        budget = self._step_budget(step, context)
+
         try:
             async with atrace_step(
                 "analysis",
                 step.step_type.value,
                 step_id=step.step_id,
-                timeout_s=step.timeout_seconds,
+                timeout_s=budget,
                 model=self.model_id,
             ) as traced:
                 result = await asyncio.wait_for(
                     self._execute_step_with_retry(step, context),
-                    timeout=step.timeout_seconds
+                    timeout=budget,
                 )
                 traced.set(success=result.success, error=result.error_message)
                 return result
         except asyncio.TimeoutError:
-            # The step's own 30s budget, not the provider's. Naming it separately
+            # The step's own budget, not the provider's. Naming it separately
             # matters: a timeout here and a provider refusal look identical from
             # the UI but need completely different fixes.
             note(
@@ -79,16 +102,41 @@ class StepExecutor:
                 "error",
                 step_id=step.step_id,
                 error_type="StepTimeout",
-                error=f"exceeded the step's own {step.timeout_seconds}s budget",
+                error=f"exceeded the step's own {budget}s budget",
             )
             return ExecutionResult(
                 step_id=step.step_id,
                 success=False,
                 output_data=None,
-                execution_time_ms=step.timeout_seconds * 1000,
+                execution_time_ms=budget * 1000,
                 confidence_score=0.0,
-                error_message=f"Step timed out after {step.timeout_seconds} seconds"
+                error_message=f"Step timed out after {budget} seconds"
             )
+
+    def _step_budget(self, step: ExecutionStep, context: Dict[str, Any]) -> int:
+        """How long this step may take, given the size of this contract.
+
+        The planned budget is the floor. Extraction and policy checking both now
+        scale with the document — one model call per window, one per batch of
+        clauses — so a budget fixed when both were a single call is not a
+        timeout, it is a guaranteed failure on anything long.
+        """
+        budget = step.timeout_seconds
+
+        if step.step_type is StepType.EXTRACT_CLAUSES:
+            windows = max(1, len(pack_windows(
+                identify_chunks(context.get("contract_text", ""),
+                                context.get("chunking_profile")).chunks
+            )))
+            rounds = math.ceil(windows / max(1, CLAUSE_EXTRACTION_CONCURRENCY))
+            budget = max(budget, rounds * SECONDS_PER_MODEL_ROUND)
+        elif step.step_type is StepType.CHECK_POLICIES:
+            batches = math.ceil(
+                max(1, len(context.get("extracted_clauses", []))) / POLICY_CHECK_BATCH
+            )
+            budget = max(budget, batches * SECONDS_PER_MODEL_ROUND)
+
+        return min(budget, MAX_STEP_BUDGET_SECONDS)
     
     async def _execute_step_with_retry(self, step: ExecutionStep, context: Dict[str, Any]) -> ExecutionResult:
         """Execute step with retry mechanism"""
@@ -200,8 +248,13 @@ class StepExecutor:
         # and the traditional path would attribute findings to different chunks
         # for the same document.
         tool.chunking_profile = context.get("chunking_profile")
-        result_json = tool._run(contract_text)
-        return json.loads(result_json)
+        clauses, coverage = parse_clause_result(tool._run(contract_text))
+        # The planning path's warnings come only from failed *steps*, so a run
+        # where some windows failed but the step succeeded was reported complete
+        # with nothing to say otherwise. Recorded here and read back into the
+        # plan's result.
+        self.execution_context["clause_extraction_coverage"] = coverage
+        return clauses
     
     async def _execute_policy_check(self, step: ExecutionStep, context: Dict[str, Any]) -> List[Dict]:
         """Check clauses against the tenant's playbook.
@@ -528,6 +581,7 @@ class PlanExecutionEngine:
         """Format results in the expected contract intelligence format"""
         return {
             "clauses": self.execution_context.get("extracted_clauses", []),
+            "coverage": self.execution_context.get("clause_extraction_coverage"),
             "violations": self.execution_context.get("policy_violations", []),
             "risk_assessment": self.execution_context.get("risk_data", {}),
             "redlines": self.execution_context.get("redline_suggestions", []),
@@ -540,6 +594,12 @@ class PlanExecutionEngine:
             # "nothing needed changing" — the stored redlines are replaced on
             # the strength of this flag.
             "redlines_generated": not self._step_failed(StepType.GENERATE_REDLINES),
+            # And extraction is the step whose empty output must not be mistaken
+            # for "this contract has no notable clauses". Without this the
+            # planned path reported an empty review as COMPLETE and persisted it
+            # over whatever was there before — observed live, with extraction
+            # timed out and the version still saved as a finished analysis.
+            "clauses_extracted": not self._step_failed(StepType.EXTRACT_CLAUSES),
             "processing_complete": not self.step_failures,
             "planned_execution": True
         }
@@ -553,15 +613,30 @@ class PlanExecutionEngine:
         Plan step ids are "step_2a"; what a reviewer needs to know is that the
         policy check did not run, and why.
         """
-        return [
+        warnings = [
             f"{_STEP_FAILURE_LABELS.get(step.step_type, step.description)}: {result.error_message}"
             for step, result in self.step_failures
         ]
+
+        # A step that *succeeded* can still have covered only part of the
+        # contract: a long document is analysed in windows and some can fail
+        # while the rest return findings. That is not a failed step, so it never
+        # appeared here — and the review was reported complete.
+        coverage = self.execution_context.get("clause_extraction_coverage") or {}
+        if coverage and not coverage.get("complete", True):
+            warnings.append(
+                f"Part of this contract could not be analysed: "
+                f"{coverage.get('failed')} of {coverage.get('windows')} sections failed, "
+                f"so the findings below do not cover the whole document. "
+                f"Re-run the analysis."
+            )
+        return warnings
     
     def _format_error_results(self, error_message: str) -> Dict[str, Any]:
         """Format error results"""
         return {
             "clauses": [],
+            "clauses_extracted": False,
             "violations": [],
             "risk_assessment": {"overall_risk_score": 0, "risk_level": "UNKNOWN"},
             "redlines": [],

@@ -1955,6 +1955,44 @@ that the code did not actually provide.
 
 Tests: **697 → 703.**
 
+### Second review round (Copilot, PR #10)
+
+Ten more — five inline, five suppressed, and I had missed the whole second review until asked to
+check. All ten real, and they cluster into four things:
+
+- **Coverage was a flag on each finding**, so a run where one window failed and every other returned
+  nothing produced an empty list with no marker anywhere — indistinguishable from a clean contract,
+  which is the single worst thing this pipeline can report. The tool now returns
+  `{clauses, coverage}`, and both the traditional and the planned path consume it. `parse_clause_result`
+  tolerates the old bare list so an unconverted caller still works.
+- **A failed extraction could overwrite a good review.** The generic `RuntimeError` was caught by the
+  orchestrator, turned into an empty clause list, and persisted — with `clauses_extracted` still
+  True. It is a `ClauseExtractionFailed` now, and both paths mark the result unextractable so
+  `_store_intelligence_results` leaves the previous review alone. Verified against a live database:
+  a failed run writes nothing and the stored review stays HIGH with its clause intact.
+- **Warnings were never persisted.** `get_stored_analysis` rebuilt them from `analysis_error` alone,
+  so a partial-coverage review was saved COMPLETE and reopened with nothing to say so — Increment 6's
+  promise, broken by Increment 8's new warning. They are stored with the review and come back with it.
+- **`source_chunk` was a content hash, not an occurrence.** `ChunkRepository` stores repeated
+  identical text as **one** `(:Chunk)` with several `INCLUDES {order}` relationships, so two copies
+  of a paragraph share a hash — and deduplicating on it still collapsed them, the very thing keying
+  on the chunk was meant to stop. Provenance is `(hash, order)` now, end to end. A span that
+  straddles a boundary is attributed to the chunk it *starts* in by longest matching prefix, rather
+  than to the window's first chunk, which could point at unrelated text.
+
+Plus two smaller ones: the profile lookup ran synchronously inside the async handler and blocked the
+event loop — the same bug `to_thread` exists to prevent, in a new place — and a *failed* profile read
+was swallowed and silently fell back to default boundaries, which is different from a version that
+legitimately has no profile. The two are now distinguished, and a read failure adds a warning saying
+the chunk attribution may not match earlier rounds.
+
+**And one the live run found that no review did.** The planning executor's per-step timeout is a flat
+30 seconds, sized for a single truncated model call. Extraction is now one call per window, so a
+30-window contract would have timed out every single time — and been reported as a step failure
+rather than as what it is. The budget scales with the document now, and is still capped.
+
+Tests: **703 → 722.**
+
 ### Honest limits
 
 - **The predicted score drop did not appear**, because it cannot on these fixtures: the text
@@ -1974,7 +2012,7 @@ Tests: **697 → 703.**
 make test
 ```
 
-703 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
+722 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys.
 
 ```bash
 make eval          # needs the stack up

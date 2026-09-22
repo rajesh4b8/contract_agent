@@ -67,6 +67,10 @@ class ContractClause:
     # changed; selecting them by matching text is ambiguous exactly where it
     # matters, on wording that repeats.
     source_chunk: Optional[str] = None
+    # Its position in the version's membership list. The hash alone is not an
+    # occurrence: repeated identical text is one (:Chunk) with several
+    # INCLUDES {order} relationships, so two copies share a hash.
+    source_chunk_order: Optional[int] = None
     source_window: Optional[int] = None
 
 @dataclass

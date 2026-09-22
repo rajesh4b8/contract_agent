@@ -30,6 +30,9 @@ class IntelligenceState(TypedDict):
     # Set when some analysis windows failed and others succeeded. A review of
     # part of a contract must not be rendered as a review of all of it.
     clause_extraction_incomplete: bool
+    clause_extraction_coverage: dict
+    # Set when extraction produced nothing because it could not run at all.
+    clause_extraction_failed: str
     
     # CUAD mitigation results (Phase 1 extension)
     cuad_deviations: List[dict]

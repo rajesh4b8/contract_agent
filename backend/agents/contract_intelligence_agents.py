@@ -3,7 +3,7 @@ from langchain_core.messages import HumanMessage, AIMessage
 from backend.agents.intelligence_state import IntelligenceState
 from typing import Any
 from backend.agents.intelligence_tools import (
-    ClauseDetectorTool, PolicyCheckerTool, 
+    ClauseDetectorTool, ClauseExtractionFailed, PolicyCheckerTool, parse_clause_result, 
     RiskCalculatorTool, RedlineGeneratorTool
 )
 from backend.agents.agent_workflow_tracker import workflow_tracker
@@ -69,9 +69,12 @@ def _stage_warnings(state: dict) -> list:
     # which reads exactly like a complete review of a shorter contract unless
     # something says otherwise.
     if state.get("clause_extraction_incomplete"):
+        coverage = state.get("clause_extraction_coverage") or {}
         warnings.append(
-            "Part of this contract could not be analysed: some sections failed and "
-            "the findings below do not cover the whole document. Re-run the analysis."
+            f"Part of this contract could not be analysed: "
+            f"{coverage.get('failed', 'some')} of {coverage.get('windows', 'its')} sections "
+            f"failed, so the findings below do not cover the whole document. "
+            f"Re-run the analysis."
         )
     return warnings
 
@@ -156,19 +159,33 @@ class IntelligenceOrchestrator:
                 llm=self.llm, chunking_profile=state.get("chunking_profile")
             )
             clauses_json = tool._run(state["contract_text"])
-            clauses_list = json.loads(clauses_json)
+            clauses_list, coverage = parse_clause_result(clauses_json)
 
-            # Some windows failed. The findings that did arrive are real and
-            # worth keeping, but a review of part of a contract must not be
-            # rendered or persisted as a review of all of it.
-            incomplete = any(c.get("coverage_incomplete") for c in clauses_list)
+            # Coverage comes back beside the findings rather than stamped on
+            # them. Reading it off the findings meant a run where one window
+            # failed and the rest returned nothing looked exactly like a clean
+            # contract — no findings and no marker, because there was nothing
+            # left to stamp.
+            incomplete = not coverage.get("complete", True)
 
             workflow_tracker.complete_agent(execution, f"Extracted {len(clauses_list)} clauses")
 
             return {**state, 
                 "extracted_clauses": clauses_list,
                 "clause_extraction_incomplete": incomplete,
+                "clause_extraction_coverage": coverage,
                 "current_step": "clause_extraction"
+            }
+        except ClauseExtractionFailed as e:
+            # Not a contract with no clauses: an analysis that did not happen.
+            # Flagged distinctly so `_convert_to_domain_entities` marks the
+            # result unextractable and storage leaves the previous review alone
+            # rather than overwriting it with nothing.
+            workflow_tracker.error_agent(execution, f"Clause extraction failed: {e}")
+            return {**state,
+                "extracted_clauses": [],
+                "clause_extraction_failed": str(e),
+                "processing_result": {"status": "error", "error": f"Clause extraction failed: {e}"}
             }
         except Exception as e:
             # Everything downstream reads the clauses, so when the model itself
@@ -179,6 +196,7 @@ class IntelligenceOrchestrator:
             workflow_tracker.error_agent(execution, f"Clause extraction failed: {e}")
             return {**state,
                 "extracted_clauses": [],
+                "clause_extraction_failed": str(e),
                 "processing_result": {"status": "error", "error": f"Clause extraction failed: {e}"}
             }
     
@@ -688,6 +706,11 @@ class IntelligenceOrchestrator:
         # Return structured results with CUAD data and validation
         return {
             "clauses": final_state["extracted_clauses"],
+            # False when extraction never ran. An empty list then means "we do
+            # not know", and persistence must not replace a stored review on the
+            # strength of it.
+            "clauses_extracted": not final_state.get("clause_extraction_failed"),
+            "coverage": final_state.get("clause_extraction_coverage"),
             "violations": final_state["policy_violations"],
             "risk_assessment": final_state["risk_data"],
             "redlines": final_state["redline_suggestions"],

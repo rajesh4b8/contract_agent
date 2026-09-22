@@ -20,7 +20,9 @@ from backend.agents.intelligence_tools import (
     CLAUSE_EXTRACTION_CONCURRENCY,
     POLICY_CHECK_BATCH,
     ClauseDetectorTool,
+    ClauseExtractionFailed,
     PolicyCheckerTool,
+    parse_clause_result,
 )
 from backend.domain.chunking import WINDOW_BUDGET_CHARS, pack_windows
 from backend.infrastructure.chunking.identity import identify_chunks
@@ -116,7 +118,7 @@ class TestTheWholeDocumentReachesTheModel:
     def test_an_empty_contract_calls_nothing(self):
         llm = RecordingLLM()
 
-        assert json.loads(ClauseDetectorTool(llm=llm)._run("   ")) == []
+        assert parse_clause_result(ClauseDetectorTool(llm=llm)._run("   "))[0] == []
         assert llm.prompts == []
 
 
@@ -180,29 +182,34 @@ class TestFindingsAreMergedAcrossWindows:
 
         merged = ClauseDetectorTool._merge_findings(
             [[finding], [finding]],
-            [[(0, "chunk-a")], [(1, "chunk-a")]],   # the same chunk
+            [[(0, "chunk-a", 0)], [(1, "chunk-a", 0)]],   # the same chunk
         )
 
         assert len(merged) == 1
 
     def test_the_same_wording_in_two_places_is_two_findings(self):
         """A contract can legitimately carry the same notice provision in two
-        schedules, and a reviewer has to see both."""
+        schedules, and a reviewer has to see both.
+
+        Identical text is **one** `(:Chunk)` node with two `INCLUDES {order}`
+        relationships, so the two occurrences share a hash and are told apart
+        only by position — which is why the order is part of the key.
+        """
         finding = _finding("Payment Terms", "Net thirty (30) days.")
 
         merged = ClauseDetectorTool._merge_findings(
             [[finding], [finding]],
-            [[(0, "chunk-a")], [(1, "chunk-b")]],   # different chunks
+            [[(0, "chunk-a", 4)], [(1, "chunk-a", 19)]],   # same hash, two places
         )
 
-        assert len(merged) == 2
+        assert len(merged) == 2, "two occurrences of one paragraph collapsed into one"
 
     def test_whitespace_and_case_do_not_make_a_second_finding(self):
         """The same normalisation chunk identity uses."""
         merged = ClauseDetectorTool._merge_findings(
             [[_finding("Payment Terms", "Net thirty (30) days.")],
              [_finding("payment terms", "NET  THIRTY (30)" + chr(10) + "DAYS.")]],
-            [[(0, "chunk-a")], [(1, "chunk-a")]],
+            [[(0, "chunk-a", 0)], [(1, "chunk-a", 0)]],
         )
 
         assert len(merged) == 1
@@ -211,7 +218,7 @@ class TestFindingsAreMergedAcrossWindows:
         merged = ClauseDetectorTool._merge_findings(
             [[_finding("Payment Terms", "Payment is due in thirty (30) days.")],
              [_finding("Liability", "Liability is capped at the fees paid.")]],
-            [[(0, "chunk-a")], [(1, "chunk-b")]],
+            [[(0, "chunk-a", 0)], [(1, "chunk-b", 1)]],
         )
 
         assert len(merged) == 2
@@ -220,7 +227,7 @@ class TestFindingsAreMergedAcrossWindows:
         span = "Each party shall indemnify the other and keep information secret."
         merged = ClauseDetectorTool._merge_findings(
             [[_finding("Indemnification", span)], [_finding("Confidentiality", span)]],
-            [[(0, "chunk-a")], [(1, "chunk-a")]],
+            [[(0, "chunk-a", 0)], [(1, "chunk-a", 0)]],
         )
 
         assert len(merged) == 2
@@ -231,10 +238,10 @@ class TestFindingsAreMergedAcrossWindows:
         later = _finding("Payment Terms", "Net thirty (30) days.", location="Section 9")
 
         merged = ClauseDetectorTool._merge_findings(
-            [[first], [later]], [[(0, "chunk-a")], [(1, "chunk-a")]])
+            [[first], [later]], [[(0, "chunk-a", 0)], [(1, "chunk-a", 0)]])
 
         assert merged[0][0].location == "Section 2"
-        assert merged[0][1] == (0, "chunk-a")
+        assert merged[0][1] == (0, "chunk-a", 0)
 
 
 def _finding(clause_type, span, location=""):
@@ -254,7 +261,7 @@ class TestAFindingRemembersWhereItCameFrom:
         span = "1. OBLIGATION 1."
         llm = RecordingLLM(clauses_for=lambda p: [clause(span)] if span in p else [])
 
-        result = json.loads(ClauseDetectorTool(llm=llm)._run(text))
+        result = parse_clause_result(ClauseDetectorTool(llm=llm)._run(text))[0]
 
         assert result
         assert result[0]["source_chunk"], "no chunk identity on the finding"
@@ -265,7 +272,7 @@ class TestAFindingRemembersWhereItCameFrom:
         span = "1. OBLIGATION 1."
         llm = RecordingLLM(clauses_for=lambda p: [clause(span)] if span in p else [])
 
-        result = json.loads(ClauseDetectorTool(llm=llm)._run(text))
+        result = parse_clause_result(ClauseDetectorTool(llm=llm)._run(text))[0]
 
         hashes = {c.hash for c in identify_chunks(text).chunks}
         assert result[0]["source_chunk"] in hashes
@@ -309,8 +316,8 @@ class TestTheVersionsOwnChunkingIsUsed:
         span = "Paragraph 0 of the obligations"
         llm = RecordingLLM(clauses_for=lambda p: [clause(span)] if span in p else [])
 
-        result = json.loads(
-            ClauseDetectorTool(llm=llm, chunking_profile=profile)._run(text))
+        result = parse_clause_result(
+            ClauseDetectorTool(llm=llm, chunking_profile=profile)._run(text))[0]
 
         hashes = {c.hash for c in identify_chunks(text, profile).chunks}
         assert result[0]["source_chunk"] in hashes
@@ -321,7 +328,7 @@ class TestPartialCoverageIsVisibleNotJustLogged:
     a complete one — the failure existing only in a log line is exactly how a
     degraded run gets read as a clean contract."""
 
-    def test_findings_are_marked_when_a_window_failed(self):
+    def test_coverage_is_reported_beside_the_findings(self):
         text = contract(sections=40)
         span = "1. OBLIGATION 1."
         llm = RecordingLLM(
@@ -329,20 +336,39 @@ class TestPartialCoverageIsVisibleNotJustLogged:
             fail_on=lambda p: "OBLIGATION 39." in p,
         )
 
-        result = json.loads(ClauseDetectorTool(llm=llm)._run(text))
+        _clauses, coverage = parse_clause_result(ClauseDetectorTool(llm=llm)._run(text))
 
-        assert result
-        assert all(c.get("coverage_incomplete") for c in result)
+        assert coverage["complete"] is False
+        assert coverage["failed"] == 1
 
-    def test_a_complete_run_is_not_marked(self):
+    def test_a_failed_window_is_visible_even_with_no_findings_at_all(self):
+        """The case that made marking each finding useless: one window fails,
+        every other returns nothing, and an empty list with no marker anywhere
+        is indistinguishable from a clean contract."""
+        text = contract(sections=40)
+        llm = RecordingLLM(clauses_for=lambda p: [],
+                           fail_on=lambda p: "OBLIGATION 39." in p)
+
+        clauses, coverage = parse_clause_result(ClauseDetectorTool(llm=llm)._run(text))
+
+        assert clauses == []
+        assert coverage["complete"] is False
+
+    def test_a_complete_run_says_so(self):
         text = contract(sections=40)
         span = "1. OBLIGATION 1."
         llm = RecordingLLM(clauses_for=lambda p: [clause(span)] if span in p else [])
 
-        result = json.loads(ClauseDetectorTool(llm=llm)._run(text))
+        _clauses, coverage = parse_clause_result(ClauseDetectorTool(llm=llm)._run(text))
 
-        assert result
-        assert not any(c.get("coverage_incomplete") for c in result)
+        assert coverage["complete"] is True
+        assert coverage["failed"] == 0
+
+    def test_an_older_caller_reading_a_bare_list_still_works(self):
+        clauses, coverage = parse_clause_result(json.dumps([{"clause_type": "X"}]))
+
+        assert len(clauses) == 1
+        assert coverage["complete"] is True
 
 
 class TestGroundingIsPerWindow:
@@ -352,7 +378,7 @@ class TestGroundingIsPerWindow:
         llm = RecordingLLM(
             clauses_for=lambda p: [clause("This sentence is in no window at all.")])
 
-        result = json.loads(ClauseDetectorTool(llm=llm)._run(contract(sections=40)))
+        result = parse_clause_result(ClauseDetectorTool(llm=llm)._run(contract(sections=40)))[0]
 
         assert result == []
 
@@ -361,7 +387,7 @@ class TestGroundingIsPerWindow:
         real = "1. OBLIGATION 1."
         llm = RecordingLLM(clauses_for=lambda p: [clause(real)] if real in p else [])
 
-        result = json.loads(ClauseDetectorTool(llm=llm)._run(text))
+        result = parse_clause_result(ClauseDetectorTool(llm=llm)._run(text))[0]
 
         assert len(result) == 1
 
@@ -375,7 +401,7 @@ class TestOneBadWindowDoesNotDiscardTheRest:
             fail_on=lambda p: "OBLIGATION 39." in p,
         )
 
-        result = json.loads(ClauseDetectorTool(llm=llm)._run(text))
+        result = parse_clause_result(ClauseDetectorTool(llm=llm)._run(text))[0]
 
         assert len(result) == 1, "one failed window discarded the others"
 
@@ -385,7 +411,7 @@ class TestOneBadWindowDoesNotDiscardTheRest:
         hardcoded stub went unnoticed."""
         llm = RecordingLLM(fail_on=lambda p: True)
 
-        with pytest.raises(RuntimeError, match="all"):
+        with pytest.raises(ClauseExtractionFailed, match="all"):
             ClauseDetectorTool(llm=llm)._run(contract(sections=40))
 
 
@@ -452,3 +478,249 @@ class TestPolicyCheckingIsBatchedToo:
         PolicyCheckerTool(llm=llm, rules=[self._rule()])._run(json.dumps(self._clauses(3)))
 
         assert len(llm.prompts) == 1
+
+
+# ==========================================================================
+# Second review round: coverage, provenance and failure propagation
+# ==========================================================================
+
+class TestAnExtractionThatNeverRanIsNotAnEmptyReview:
+    """The generic `RuntimeError` was caught by the orchestrator, turned into an
+    empty clause list, and then persisted over a perfectly good previous review.
+    "The model was unavailable" and "this contract has no notable clauses" have
+    to stay distinguishable all the way to storage."""
+
+    def test_every_window_failing_raises_its_own_type(self):
+        llm = RecordingLLM(fail_on=lambda p: True)
+
+        with pytest.raises(ClauseExtractionFailed):
+            ClauseDetectorTool(llm=llm)._run(contract(sections=40))
+
+    def test_the_orchestrator_marks_the_result_unextractable(self):
+        from backend.agents.contract_intelligence_agents import IntelligenceOrchestrator
+
+        orchestrator = IntelligenceOrchestrator.__new__(IntelligenceOrchestrator)
+        orchestrator.llm = RecordingLLM(fail_on=lambda p: True)
+        orchestrator.model_id = "stub"
+
+        state = orchestrator._extract_clauses({
+            "contract_text": contract(sections=40), "chunking_profile": None,
+        })
+
+        assert state["extracted_clauses"] == []
+        assert state.get("clause_extraction_failed"), (
+            "an unrunnable extraction looks like a clean contract to storage"
+        )
+
+    def test_and_storage_then_leaves_the_previous_review_alone(self):
+        """The Increment 6 guarantee, restated where Increment 8 could break it."""
+        from unittest.mock import MagicMock
+
+        from backend.application.services.contract_intelligence_service import (
+            ContractIntelligenceService,
+        )
+
+        service = ContractIntelligenceService.__new__(ContractIntelligenceService)
+        service.repository = MagicMock()
+        service.repository.graph.query.return_value = []
+        service.matters = MagicMock()
+
+        intelligence = service._convert_to_domain_entities({
+            "clauses": [], "violations": [], "redlines": [],
+            "risk_assessment": {}, "clauses_extracted": False,
+        })
+
+        assert intelligence.clauses_extracted is False
+        assert service._store_intelligence_results("C-1", "t", intelligence) is False
+        assert service.repository.graph.query.call_count == 0
+
+
+class TestCoverageSurvivesBothWorkflowsAndStorage:
+    def test_the_traditional_path_reads_the_coverage_channel(self):
+        import inspect
+
+        from backend.agents import contract_intelligence_agents
+
+        source = inspect.getsource(contract_intelligence_agents._extract_clauses
+                                   if hasattr(contract_intelligence_agents, "_extract_clauses")
+                                   else contract_intelligence_agents.IntelligenceOrchestrator
+                                   ._extract_clauses)
+        assert "parse_clause_result" in source
+        assert 'coverage.get("complete"' in source
+
+    def test_the_planning_path_reports_it_too(self):
+        """Its warnings came only from failed *steps*, and a partial window run
+        is a step that succeeded."""
+        import inspect
+
+        from backend.agents.planning import execution_engine
+
+        source = inspect.getsource(execution_engine)
+        assert "clause_extraction_coverage" in source
+        assert "could not be analysed" in source
+
+    def test_the_warning_is_persisted_with_the_review(self):
+        """It lived only in the HTTP response, and the read-back rebuilt
+        warnings from `analysis_error` alone — so a partial review was saved
+        COMPLETE and reopened with nothing to say so."""
+        import inspect
+
+        from backend.application.services import contract_intelligence_service
+
+        source = inspect.getsource(contract_intelligence_service)
+        assert '"analysis_warnings": list(intelligence.warnings or [])' in source
+        assert "c.analysis_warnings" in source
+
+
+class TestProvenanceIdentifiesAnOccurrence:
+    """`ChunkRepository` stores repeated identical text as **one** `(:Chunk)`
+    with several `INCLUDES {order}` relationships, so the hash alone cannot tell
+    two copies of a paragraph apart."""
+
+    def test_a_finding_carries_the_membership_order(self):
+        text = contract(sections=40)
+        span = "1. OBLIGATION 1."
+        llm = RecordingLLM(clauses_for=lambda p: [clause(span)] if span in p else [])
+
+        result = parse_clause_result(ClauseDetectorTool(llm=llm)._run(text))[0]
+
+        assert result[0]["source_chunk_order"] == 0
+
+    def test_a_span_crossing_a_boundary_lands_where_it_starts(self):
+        """Blindly taking the window's first chunk pointed at unrelated text,
+        and Increment 9 would then miss the window when the real source chunk
+        changed."""
+        chunked = identify_chunks(contract(sections=40))
+        windows = pack_windows(chunked.chunks)
+        window = windows[0]
+
+        tail = window.text[-60:]
+        straddling = _finding("Payment Terms", tail + " and text that is not in it.")
+
+        _hash, order = ClauseDetectorTool._source_chunk(chunked, window, straddling)
+
+        assert order == window.last_order, (
+            f"attributed to chunk {order}, not the one the span starts in "
+            f"({window.last_order})"
+        )
+
+    def test_an_empty_span_still_gets_a_defensible_chunk(self):
+        chunked = identify_chunks(contract(sections=40))
+        window = pack_windows(chunked.chunks)[0]
+
+        chunk_hash, order = ClauseDetectorTool._source_chunk(
+            chunked, window, _finding("Payment Terms", ""))
+
+        assert order == window.first_order
+        assert chunk_hash
+
+
+class TestTheStepBudgetScalesWithTheDocument:
+    """The flat 30s was sized for a single truncated model call. Extraction is
+    now one call per window, four at a time, so a 30-window contract needs about
+    eight rounds — and the flat budget would time it out every time while
+    reporting it as a step failure rather than what it is. Caught on a live run,
+    not by a test, which is why there is one now."""
+
+    def _step(self, step_type):
+        from backend.agents.planning.planning_agent import ExecutionStep
+
+        return ExecutionStep(
+            step_id="s1", step_type=step_type, description="d",
+            dependencies=[], timeout_seconds=30,
+        )
+
+    def _executor(self):
+        from backend.agents.planning.execution_engine import StepExecutor
+
+        return StepExecutor(llm=None, model_id="stub")
+
+    def test_a_short_contract_keeps_the_planned_budget(self):
+        from backend.agents.planning.planning_agent import StepType
+
+        budget = self._executor()._step_budget(
+            self._step(StepType.EXTRACT_CLAUSES),
+            {"contract_text": contract(sections=2)},
+        )
+
+        assert budget >= 30
+
+    def test_a_long_contract_gets_more(self):
+        from backend.agents.planning.planning_agent import StepType
+
+        short = self._executor()._step_budget(
+            self._step(StepType.EXTRACT_CLAUSES),
+            {"contract_text": contract(sections=2)})
+        long = self._executor()._step_budget(
+            self._step(StepType.EXTRACT_CLAUSES),
+            {"contract_text": contract(sections=200)})
+
+        assert long > short, "a twenty-window contract gets a one-call budget"
+
+    def test_policy_checking_scales_with_the_clause_count(self):
+        from backend.agents.planning.planning_agent import StepType
+
+        few = self._executor()._step_budget(
+            self._step(StepType.CHECK_POLICIES), {"extracted_clauses": [{}] * 3})
+        many = self._executor()._step_budget(
+            self._step(StepType.CHECK_POLICIES),
+            {"extracted_clauses": [{}] * (POLICY_CHECK_BATCH * 6)})
+
+        assert many > few
+
+    def test_it_is_still_bounded(self):
+        """However long the document, a step running this long is stuck rather
+        than working."""
+        from backend.agents.planning.execution_engine import MAX_STEP_BUDGET_SECONDS
+        from backend.agents.planning.planning_agent import StepType
+
+        budget = self._executor()._step_budget(
+            self._step(StepType.EXTRACT_CLAUSES),
+            {"contract_text": contract(sections=4000)})
+
+        assert budget <= MAX_STEP_BUDGET_SECONDS
+
+    def test_an_unrelated_step_is_untouched(self):
+        from backend.agents.planning.planning_agent import StepType
+
+        budget = self._executor()._step_budget(
+            self._step(StepType.ASSESS_RISK), {"contract_text": contract(sections=200)})
+
+        assert budget == 30
+
+
+class TestThePlannedPathAlsoRefusesToPersistNothing:
+    """The traditional orchestrator was fixed first; the planned path — which is
+    the default — still reported an empty review as COMPLETE and persisted it
+    over whatever was there before. Observed live, with extraction timed out and
+    the version saved as a finished analysis."""
+
+    def _engine(self):
+        from backend.agents.planning.execution_engine import PlanExecutionEngine
+
+        engine = PlanExecutionEngine(llm=None, model_id="stub")
+        engine.execution_context = {}
+        engine.step_failures = []
+        return engine
+
+    def test_a_failed_extraction_step_marks_the_result_unextractable(self):
+        from backend.agents.planning.execution_engine import ExecutionResult
+        from backend.agents.planning.planning_agent import ExecutionStep, StepType
+
+        engine = self._engine()
+        step = ExecutionStep(step_id="s1", step_type=StepType.EXTRACT_CLAUSES,
+                             description="d", dependencies=[])
+        engine.step_failures = [(step, ExecutionResult(
+            step_id="s1", success=False, output_data=None,
+            execution_time_ms=0, confidence_score=0.0,
+            error_message="Step timed out after 90 seconds"))]
+
+        result = engine._format_final_results()
+
+        assert result["clauses_extracted"] is False
+
+    def test_a_clean_run_is_extractable(self):
+        assert self._engine()._format_final_results()["clauses_extracted"] is True
+
+    def test_a_hard_failure_is_too(self):
+        assert self._engine()._format_error_results("boom")["clauses_extracted"] is False

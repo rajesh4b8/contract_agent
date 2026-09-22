@@ -94,6 +94,33 @@ CLAUSE_EXTRACTION_CONCURRENCY = 4
 POLICY_CHECK_BATCH = 25
 
 
+class ClauseExtractionFailed(RuntimeError):
+    """No window could be analysed.
+
+    A distinct type because the difference matters downstream: a generic error
+    was caught by the orchestrator, turned into an empty clause list, and then
+    persisted over a perfectly good previous review. "The model was unavailable"
+    and "this contract has no notable clauses" have to stay distinguishable all
+    the way to storage.
+    """
+
+
+def parse_clause_result(result_json: str) -> tuple:
+    """Read the tool's output as `(clauses, coverage)`.
+
+    Tolerates the bare list older callers expect, so a caller that has not been
+    updated still gets its clauses rather than a KeyError — and is reported as
+    complete coverage, which is what a bare list has always meant.
+    """
+    parsed = json.loads(result_json)
+    if isinstance(parsed, list):
+        return parsed, {"windows": 1, "failed": 0, "complete": True}
+    return (
+        parsed.get("clauses", []),
+        parsed.get("coverage") or {"windows": 1, "failed": 0, "complete": True},
+    )
+
+
 class ClauseDetectorTool(BaseTool):
     name: str = "clause_detector"
     description: str = "Detect and extract key contract clauses"
@@ -167,7 +194,7 @@ class ClauseDetectorTool(BaseTool):
                     found = future.result()
                     results[window.index] = found
                     provenance[window.index] = [
-                        (window.index, self._source_chunk(chunked, window, clause))
+                        (window.index, *self._source_chunk(chunked, window, clause))
                         for clause in found
                     ]
                 except Exception as e:
@@ -181,7 +208,7 @@ class ClauseDetectorTool(BaseTool):
                     failures.append(str(e))
 
         if failures and len(failures) == len(windows):
-            raise RuntimeError(
+            raise ClauseExtractionFailed(
                 f"Clause extraction failed on all {len(windows)} window(s): {failures[0]}"
             )
         if failures:
@@ -198,43 +225,75 @@ class ClauseDetectorTool(BaseTool):
         )
 
         wire = []
-        for clause, (window_index, chunk_hash) in merged:
+        for clause, (window_index, chunk_hash, chunk_order) in merged:
             payload = clause.to_wire()
             # Carried so Increment 9 can re-analyse only the windows whose
             # chunks changed. Without it, selecting affected findings means
             # matching text — which is ambiguous exactly where it matters, on
             # clauses whose wording repeats.
             payload["source_chunk"] = chunk_hash
+            # The chunk's position in the version's membership list. The hash
+            # alone is not an occurrence: the repository stores repeated
+            # identical text as **one** `(:Chunk)` with several `INCLUDES {order}`
+            # relationships, so two copies of the same paragraph share a hash and
+            # are told apart only by where they sit.
+            payload["source_chunk_order"] = chunk_order
             payload["source_window"] = window_index
             wire.append(payload)
 
-        if failures:
-            # Recorded on every finding rather than only in a log line: a review
-            # covering 29 of 30 windows must not be persisted and rendered as a
-            # complete one. `_stage_warnings` surfaces this to the reviewer.
-            for payload in wire:
-                payload["coverage_incomplete"] = True
-
-        return json.dumps(wire)
+        # Coverage travels beside the findings, not on them. Marking each
+        # finding meant that a run where one window failed and every other
+        # returned nothing produced an empty list with no marker anywhere —
+        # indistinguishable from a clean contract, which is the single worst
+        # thing this pipeline can report.
+        return json.dumps({
+            "clauses": wire,
+            "coverage": {
+                "windows": len(windows),
+                "failed": len(failures),
+                "complete": not failures,
+            },
+        })
 
     @staticmethod
-    def _source_chunk(chunked, window, clause) -> str:
-        """Which chunk of the window a finding's evidence sits in.
+    def _source_chunk(chunked, window, clause) -> tuple:
+        """Where in the version a finding's evidence sits: `(hash, order)`.
 
-        Its identity for deduplication, and its address for Increment 9. Falls
-        back to the window's first chunk when the span straddles a boundary
-        inside the window, which is still the right window and a defensible
-        chunk.
+        **The hash alone is not an occurrence.** `ChunkRepository` stores
+        repeated identical text as one `(:Chunk)` with several
+        `INCLUDES {order}` relationships, so two copies of the same paragraph
+        share a hash and are distinguished only by position. Deduplicating on
+        the hash would therefore still collapse them — the very thing keying on
+        the chunk was meant to stop.
+
+        A span that straddles a boundary inside the window belongs to the chunk
+        it *starts* in, found by longest matching prefix. Blindly taking the
+        window's first chunk pointed at unrelated text, and Increment 9 would
+        then miss the window when the real source chunk changed.
         """
+        in_window = [c for c in chunked.chunks if c.order in
+                     range(window.first_order, window.last_order + 1)]
+        fallback = (in_window[0].hash, in_window[0].order) if in_window else ("", None)
+
         span = canonical(getattr(clause, "evidence_span", "") or "")
         if not span:
-            return window.chunk_hashes[0] if window.chunk_hashes else ""
-        by_hash = {c.hash: c for c in chunked.chunks}
-        for chunk_hash in window.chunk_hashes:
-            chunk = by_hash.get(chunk_hash)
-            if chunk and span in canonical(chunk.content):
-                return chunk_hash
-        return window.chunk_hashes[0] if window.chunk_hashes else ""
+            return fallback
+
+        for chunk in in_window:
+            if span in canonical(chunk.content):
+                return chunk.hash, chunk.order
+
+        # Straddles a boundary: attribute it to where it begins.
+        best, best_len = fallback, 0
+        for chunk in in_window:
+            body = canonical(chunk.content)
+            # The longest prefix of the span that this chunk ends with.
+            limit = min(len(span), len(body))
+            for size in range(limit, max(0, best_len), -1):
+                if body.endswith(span[:size]):
+                    best, best_len = (chunk.hash, chunk.order), size
+                    break
+        return best
 
     def _extract_window(self, window) -> List[Any]:
         """One model call over one window, grounded against that window's text."""
@@ -288,7 +347,8 @@ CONTRACT EXTRACT:
         """Flatten the windows' findings, dropping duplicate *reports*.
 
         Identity is the clause type, a hash of the canonical evidence span, and
-        **the chunk the span sits in**. The chunk is what makes this a report of
+        **the chunk occurrence the span sits in** — its hash *and* its position
+        in the membership list. The occurrence is what makes this a report of
         one occurrence rather than of one wording: a contract can legitimately
         contain the same notice or payment provision twice, in two schedules,
         and those are two clauses a reviewer has to see. Keying on the text
@@ -310,7 +370,10 @@ CONTRACT EXTRACT:
                 key = (
                     (getattr(clause, "clause_type", "") or "").strip().casefold(),
                     hashlib.sha256(span.encode("utf-8")).hexdigest(),
-                    source[1],          # the chunk it was found in
+                    # The occurrence, not the text: (hash, order). Repeated
+                    # identical paragraphs share a hash and differ only in where
+                    # they sit, so the order is what keeps them two findings.
+                    source[1], source[2],
                 )
                 if key in seen:
                     continue
