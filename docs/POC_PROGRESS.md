@@ -1,15 +1,15 @@
 # POC Progress Tracker
 
-**Resume point: Increment 8 — `awaiting your test`.**
-Increments 0–7 are accepted. Increment 8 is built; test it before 9 starts.
+**Resume point: Increment 9 — `specified, not started`.**
+Increments 0–8 are accepted. Increment 9's specification is complete; it is the last one planned.
 
 Still awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
 (out-of-increment bug fix, from your report of an unexplained "processing error") and
 **[Debug — a live timeline of what the pipeline is doing](#debug--a-live-timeline-of-what-the-pipeline-is-doing)**
 (out-of-increment, from your report that uploads take a long time with nothing on screen to say why).
 
-**Increment 8 is built and waiting on you.** 9 remains specified: the cross-version change
-report.
+**Increment 9 remains specified and ready to build** — the cross-version change report, and the
+last increment in this plan.
 
 Two sections are worth knowing about before starting anything:
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) (settled — what this
@@ -43,7 +43,7 @@ produced it; this file is what you and I actually work from.
 | 5 | One measurable outcome | accepted |
 | 6 | Multiple contracts, each resumable | accepted |
 | 7 | Content-addressed chunks | accepted |
-| 8 | Analyse the whole contract | **awaiting your test** |
+| 8 | Analyse the whole contract | accepted |
 | 9 | Incremental re-analysis and the change report | **specified — not started** |
 
 ---
@@ -1824,7 +1824,7 @@ _(write here)_
 
 ## Increment 8 — Analyse the whole contract
 
-**Status: `awaiting your test`.** Built 2026-09-14.
+**Status: `accepted`** (2026-09-22, after two rounds of review — five findings then ten).
 
 **Goal:** `ClauseDetectorTool` truncates at 12,000 characters (`intelligence_tools.py:95`). On the
 real contracts in `data/`, that means the system silently ignores most of the document and reports
