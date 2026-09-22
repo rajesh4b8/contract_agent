@@ -266,6 +266,80 @@ export async function getStoredAnalysis(contractId: string): Promise<StoredAnaly
   return readJson(response, 'Could not load the stored analysis');
 }
 
+export type ChangeKind = 'UNCHANGED' | 'MODIFIED' | 'ADDED' | 'REMOVED' | 'MOVED';
+
+export interface ChangeFinding {
+  clause_type: string | null;
+  risk_level: string | null;
+  violated_policy: string | null;
+  evidence_span: string | null;
+}
+
+export interface Change {
+  kind: ChangeKind;
+  heading: string;
+  from_order: number | null;
+  to_order: number | null;
+  from_text: string;
+  to_text: string;
+  /** Only on MODIFIED: how alike the two texts are, 0–1. */
+  similarity: number | null;
+  /** A move is reported but needs no re-reading — the words are identical. */
+  needs_review: boolean;
+  findings: ChangeFinding[];
+  previous_findings: ChangeFinding[];
+}
+
+export interface ChangeReport {
+  matter_ref: string;
+  from_version: number | null;
+  to_version: number | null;
+  /** False when the two rounds were chunked under different rules, or when
+   *  there is only one round. `reason` says which. */
+  comparable: boolean;
+  reason: string;
+  summary: Partial<Record<Lowercase<ChangeKind>, number>>;
+  changes: Change[];
+  unchanged: number;
+}
+
+/**
+ * What changed between two rounds.
+ *
+ * Omit the versions for the last two, which is the question being asked nine
+ * times out of ten.
+ */
+export async function getChanges(
+  matterRef: string,
+  from?: number,
+  to?: number,
+): Promise<ChangeReport> {
+  const params = new URLSearchParams();
+  if (from != null) params.set('from', String(from));
+  if (to != null) params.set('to', String(to));
+  const query = params.toString();
+  const response = await apiFetch(
+    `/api/matters/${encodeURIComponent(matterRef)}/changes${query ? `?${query}` : ''}`,
+  );
+  return readJson<ChangeReport>(response, `Could not compare rounds of ${matterRef}`);
+}
+
+export const CHANGE_LABELS: Record<ChangeKind, string> = {
+  UNCHANGED: 'Unchanged',
+  MODIFIED: 'Reworded',
+  ADDED: 'Added',
+  REMOVED: 'Removed',
+  MOVED: 'Moved',
+};
+
+export const CHANGE_STYLES: Record<ChangeKind, string> = {
+  UNCHANGED: 'bg-slate-100 text-slate-600',
+  MODIFIED: 'bg-amber-100 text-amber-800',
+  ADDED: 'bg-green-100 text-green-700',
+  REMOVED: 'bg-red-100 text-red-700',
+  MOVED: 'bg-blue-100 text-blue-700',
+};
+
 export const STATUS_LABELS: Record<MatterStatus, string> = {
   DRAFT: 'Draft',
   IN_REVIEW: 'In review',

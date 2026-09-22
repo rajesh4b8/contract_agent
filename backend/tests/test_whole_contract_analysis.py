@@ -724,3 +724,111 @@ class TestThePlannedPathAlsoRefusesToPersistNothing:
 
     def test_a_hard_failure_is_too(self):
         assert self._engine()._format_error_results("boom")["clauses_extracted"] is False
+
+
+class TestOnlyChangedWindowsAreReAnalysed:
+    """Increment 9's payoff, and the reason 7 and 8 were built the way they
+    were: chunk identity makes "unchanged" decidable, per-finding provenance
+    makes the carried findings addressable.
+
+    Skipping is not only cheaper. Re-running a model over identical text risks a
+    slightly different answer, which on a change report reads as an edit the
+    counterparty never made.
+    """
+
+    def _carried(self, chunked, count=2):
+        return [
+            {"clause_type": "Payment Terms", "evidence_span": c.content[:40],
+             "risk_level": "LOW", "source_chunk": c.hash, "source_window": 0}
+            for c in chunked.chunks[:count]
+        ]
+
+    def test_an_unchanged_window_is_not_sent_to_the_model(self):
+        text = contract(sections=40)
+        chunked = identify_chunks(text)
+        windows = pack_windows(chunked.chunks)
+        first = set(windows[0].chunk_hashes)
+        llm = RecordingLLM()
+
+        ClauseDetectorTool(llm=llm, unchanged_hashes=first, carried_findings=[])._run(text)
+
+        assert len(llm.prompts) == len(windows) - 1
+
+    def test_a_partly_changed_window_is_still_analysed(self):
+        """One changed chunk makes the whole window worth re-reading."""
+        text = contract(sections=40)
+        windows = pack_windows(identify_chunks(text).chunks)
+        all_but_one = set(windows[0].chunk_hashes[:-1])
+        llm = RecordingLLM()
+
+        ClauseDetectorTool(llm=llm, unchanged_hashes=all_but_one,
+                           carried_findings=[])._run(text)
+
+        assert len(llm.prompts) == len(windows)
+
+    def test_the_skipped_windows_findings_are_carried_forward(self):
+        """Otherwise the result would describe only the part that moved."""
+        text = contract(sections=40)
+        chunked = identify_chunks(text)
+        windows = pack_windows(chunked.chunks)
+        carried = self._carried(chunked)
+        llm = RecordingLLM()
+
+        clauses, _coverage = parse_clause_result(ClauseDetectorTool(
+            llm=llm, unchanged_hashes=set(windows[0].chunk_hashes),
+            carried_findings=carried,
+        )._run(text))
+
+        assert [c["evidence_span"] for c in clauses] == [c["evidence_span"] for c in carried]
+
+    def test_nothing_changed_at_all_costs_no_model_call(self):
+        text = contract(sections=40)
+        chunked = identify_chunks(text)
+        carried = self._carried(chunked)
+        llm = RecordingLLM()
+
+        clauses, coverage = parse_clause_result(ClauseDetectorTool(
+            llm=llm, unchanged_hashes=set(chunked.hashes), carried_findings=carried,
+        )._run(text))
+
+        assert llm.prompts == []
+        assert clauses == carried
+        assert coverage["complete"] is True
+
+    def test_a_first_round_analyses_everything(self):
+        text = contract(sections=40)
+        windows = pack_windows(identify_chunks(text).chunks)
+        llm = RecordingLLM()
+
+        ClauseDetectorTool(llm=llm)._run(text)
+
+        assert len(llm.prompts) == len(windows)
+
+    def test_a_carried_finding_for_a_chunk_that_did_change_is_dropped(self):
+        """It described text that is no longer there."""
+        text = contract(sections=40)
+        chunked = identify_chunks(text)
+        windows = pack_windows(chunked.chunks)
+        stale = [{"clause_type": "X", "evidence_span": "gone",
+                  "source_chunk": "a-hash-this-version-does-not-have"}]
+        llm = RecordingLLM()
+
+        clauses, _ = parse_clause_result(ClauseDetectorTool(
+            llm=llm, unchanged_hashes=set(windows[0].chunk_hashes),
+            carried_findings=stale,
+        )._run(text))
+
+        assert all(c.get("evidence_span") != "gone" for c in clauses)
+
+    def test_the_coverage_reports_what_was_skipped(self):
+        text = contract(sections=40)
+        windows = pack_windows(identify_chunks(text).chunks)
+        llm = RecordingLLM()
+
+        _clauses, coverage = parse_clause_result(ClauseDetectorTool(
+            llm=llm, unchanged_hashes=set(windows[0].chunk_hashes),
+            carried_findings=[],
+        )._run(text))
+
+        assert coverage["skipped"] == 1
+        assert coverage["analysed"] == len(windows) - 1

@@ -106,11 +106,12 @@ async def test_the_analysis_arguments_survive_the_hop(service):
     """`to_thread` passes positionally, so the order has to be right."""
     got = {}
 
-    def analyse(text, model, use_planning, tenant_id, contract_type, chunking_profile):
+    def analyse(text, model, use_planning, tenant_id, contract_type, chunking_profile,
+                reusable):
         got.update(
             text=text, model=model, use_planning=use_planning,
             tenant_id=tenant_id, contract_type=contract_type,
-            chunking_profile=chunking_profile,
+            chunking_profile=chunking_profile, reusable=reusable,
         )
         return _intelligence()
 
@@ -127,4 +128,6 @@ async def test_the_analysis_arguments_survive_the_hop(service):
         # no profile stored; what matters is that it rides across in this slot,
         # because `to_thread` passes positionally.
         "chunking_profile": None,
+        # Likewise the previous round's reusable findings — None with no matter.
+        "reusable": None,
     }

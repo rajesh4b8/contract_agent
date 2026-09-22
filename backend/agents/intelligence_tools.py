@@ -9,6 +9,7 @@ from backend.shared.models.clause_finding import (
     PolicyAssessment,
     RedlineSet,
 )
+from backend.shared.debug import note
 from backend.shared.utils.message_content import content_to_text, strip_code_fence
 import concurrent.futures
 import contextvars
@@ -134,6 +135,17 @@ class ClauseDetectorTool(BaseTool):
     #: quietly wrong.
     chunking_profile: Any = None
 
+    #: Chunk hashes whose findings are already known and correct, from the
+    #: previous round. A window built entirely from these is skipped: its text
+    #: has not changed, so re-analysing it would spend a model call to be told
+    #: the same thing — and risk being told something slightly different, which
+    #: would look like a change the counterparty did not make.
+    unchanged_hashes: Any = None
+
+    #: Findings carried forward for those windows, so the result is still a
+    #: review of the whole contract rather than of its changed parts.
+    carried_findings: Any = None
+
     def _run(self, contract_text: str) -> str:
         """Extract clauses from the contract, returning a JSON array.
 
@@ -161,10 +173,21 @@ class ClauseDetectorTool(BaseTool):
             logger.info("No text to extract clauses from")
             return json.dumps([])
 
+        # Windows whose every chunk is unchanged since the previous round.
+        unchanged = set(self.unchanged_hashes or ())
+        to_analyse = [
+            w for w in windows
+            if not unchanged or not set(w.chunk_hashes).issubset(unchanged)
+        ]
+        skipped = len(windows) - len(to_analyse)
+
         logger.info(
             f"Extracting clauses from {len(contract_text):,} characters "
             f"in {len(windows)} window(s)"
+            + (f"; {skipped} unchanged since the last round and skipped" if skipped else "")
         )
+        if skipped:
+            note("analysis", "windows_skipped", skipped=skipped, total=len(windows))
 
         # Concurrently, but bounded. Serially, the Shell MESA's 30 windows would
         # be 30 sequential model calls; unbounded, they would be 30 at once and
@@ -172,8 +195,17 @@ class ClauseDetectorTool(BaseTool):
         results: List[List[Any]] = [[] for _ in windows]
         # (window index, chunk hash) per finding, parallel to `results`.
         provenance: List[List[tuple]] = [[] for _ in windows]
+
+        if not to_analyse:
+            # Nothing changed at all. Every finding is carried forward, and the
+            # coverage is complete because the whole document is accounted for.
+            return json.dumps({
+                "clauses": list(self.carried_findings or []),
+                "coverage": {"windows": len(windows), "failed": 0, "complete": True,
+                             "skipped": skipped},
+            })
         failures: List[str] = []
-        workers = min(CLAUSE_EXTRACTION_CONCURRENCY, len(windows))
+        workers = min(CLAUSE_EXTRACTION_CONCURRENCY, len(to_analyse))
 
         # Each call runs under a copy of this request's context. A
         # ThreadPoolExecutor does not propagate contextvars, and the correlation
@@ -186,7 +218,7 @@ class ClauseDetectorTool(BaseTool):
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {
                 pool.submit(context.copy().run, self._extract_window, window): window
-                for window in windows
+                for window in to_analyse
             }
             for future in concurrent.futures.as_completed(futures):
                 window = futures[future]
@@ -207,14 +239,14 @@ class ClauseDetectorTool(BaseTool):
                                  f"{window.index + 1}/{len(windows)}: {e}")
                     failures.append(str(e))
 
-        if failures and len(failures) == len(windows):
+        if failures and len(failures) == len(to_analyse):
             raise ClauseExtractionFailed(
-                f"Clause extraction failed on all {len(windows)} window(s): {failures[0]}"
+                f"Clause extraction failed on all {len(to_analyse)} window(s): {failures[0]}"
             )
         if failures:
             logger.warning(
-                f"{len(failures)} of {len(windows)} windows failed; the review covers "
-                f"{len(windows) - len(failures)} of them"
+                f"{len(failures)} of {len(to_analyse)} analysed windows failed; the "
+                f"review covers {len(to_analyse) - len(failures)} of them"
             )
 
         # In window order, so clause_index is stable and reads front-to-back.
@@ -246,10 +278,19 @@ class ClauseDetectorTool(BaseTool):
         # returned nothing produced an empty list with no marker anywhere —
         # indistinguishable from a clean contract, which is the single worst
         # thing this pipeline can report.
+        # Findings for the windows that were skipped, so the result describes
+        # the whole contract rather than only the part that moved.
+        carried = [
+            finding for finding in (self.carried_findings or [])
+            if finding.get("source_chunk") in unchanged
+        ]
+
         return json.dumps({
-            "clauses": wire,
+            "clauses": carried + wire,
             "coverage": {
                 "windows": len(windows),
+                "analysed": len(to_analyse),
+                "skipped": skipped,
                 "failed": len(failures),
                 "complete": not failures,
             },

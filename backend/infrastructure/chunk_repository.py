@@ -23,6 +23,7 @@ the version that used it — that is the history this system exists to keep.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from backend.domain.chunking import (
@@ -31,7 +32,18 @@ from backend.domain.chunking import (
     MATCH_THRESHOLD,
     rarity_weight,
 )
+from backend.domain.version_diff import cosine
 from backend.infrastructure.chunking.identity import ChunkedDocument, IdentifiedChunk
+
+
+@dataclass(frozen=True)
+class MemberChunk:
+    """One entry of a version's `INCLUDES` list, as the diff reads it."""
+
+    hash: str
+    order: int
+    heading: str = ""
+    text: str = ""
 from backend.shared.debug import note, trace_step
 from backend.shared.utils.contract_search_tool import graph as default_graph
 from backend.shared.utils.logger import get_logger
@@ -469,6 +481,70 @@ class ChunkRepository:
             row["version_id"]: sum(rarity_weight(df) for df in row["dfs"])
             for row in rows
         }
+
+    # -- version comparison -----------------------------------------------
+
+    def version_membership(self, tenant_id: str, version_id: str) -> List[Any]:
+        """A version's chunks in reading order, as the diff needs them.
+
+        The `INCLUDES` list itself — the same structure Increment 7 stores and
+        Increment 8 windows over — rather than a re-derivation of it. Comparing
+        two rounds is only meaningful over what was actually recorded.
+        """
+        rows = self.graph.query(
+            """
+            MATCH (v:ContractVersion {version_id: $version_id, tenant_id: $tenant_id})
+                  -[i:INCLUDES]->(c:Chunk)
+            RETURN c.hash AS hash, i.order AS order, i.heading AS heading,
+                   coalesce(i.text, c.content) AS text
+            ORDER BY i.order
+            """,
+            {"version_id": version_id, "tenant_id": tenant_id},
+        )
+        return [
+            MemberChunk(
+                hash=row["hash"],
+                order=int(row["order"] or 0),
+                heading=row.get("heading") or "",
+                text=row.get("text") or "",
+            )
+            for row in rows if row.get("hash")
+        ]
+
+    def similarity_lookup(self, tenant_id: str, hashes: Sequence[str]) -> Callable:
+        """A `similarity(old_hash, new_hash)` over the stored embeddings.
+
+        Fetched once, up front, rather than a query per comparison: a `replace`
+        block on a long contract can hold dozens of pairs, and one round trip
+        each would make the diff slower than the analysis it exists to avoid.
+
+        Returns None for any chunk without a usable vector, which the diff reads
+        as "not measured" and reports as a removal plus an addition — showing
+        the reviewer both texts rather than claiming a link nothing checked.
+        """
+        wanted = [h for h in dict.fromkeys(hashes) if h]
+        vectors: Dict[str, List[float]] = {}
+        if wanted:
+            rows = self.graph.query(
+                """
+                MATCH (c:Chunk {tenant_id: $tenant_id})
+                WHERE c.hash IN $hashes
+                  AND c.embedding IS NOT NULL
+                  AND c.embedding_model = $model
+                  AND c.embedding_dimensions = $dimensions
+                RETURN c.hash AS hash, c.embedding AS embedding
+                """,
+                {
+                    "tenant_id": tenant_id, "hashes": wanted,
+                    "model": EMBEDDING_MODEL, "dimensions": EMBEDDING_DIMENSIONS,
+                },
+            )
+            vectors = {row["hash"]: row["embedding"] for row in rows if row.get("embedding")}
+
+        def similarity(old_hash: str, new_hash: str) -> Optional[float]:
+            return cosine(vectors.get(old_hash), vectors.get(new_hash))
+
+        return similarity
 
     # -- retention --------------------------------------------------------
 
