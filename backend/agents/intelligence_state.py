@@ -9,6 +9,11 @@ class IntelligenceState(TypedDict):
     tenant_id: str        # which playbook applies
     contract_type: str    # narrows which rules apply
     model_id: str         # public model id, so a failure can name the model
+    # How the version was chunked at upload. Analysis must reproduce those
+    # boundaries exactly, or the windows it builds — and therefore every
+    # finding's chunk attribution — describe a division of the document that
+    # exists nowhere else.
+    chunking_profile: Any
     
     # Processing results (structured data, not strings)
     extracted_clauses: List[dict]
@@ -22,6 +27,12 @@ class IntelligenceState(TypedDict):
     # reported.
     policy_check_failed: str
     risk_calculation_failed: str
+    # Set when some analysis windows failed and others succeeded. A review of
+    # part of a contract must not be rendered as a review of all of it.
+    clause_extraction_incomplete: bool
+    clause_extraction_coverage: dict
+    # Set when extraction produced nothing because it could not run at all.
+    clause_extraction_failed: str
     
     # CUAD mitigation results (Phase 1 extension)
     cuad_deviations: List[dict]

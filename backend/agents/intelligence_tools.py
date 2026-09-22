@@ -2,6 +2,7 @@ from langchain_core.tools import BaseTool
 from langchain_core.output_parsers import PydanticOutputParser
 from pydantic import BaseModel, Field
 from typing import Type, Dict, Any, List
+from backend.domain.chunking import WINDOW_BUDGET_CHARS, canonical, pack_windows
 from backend.domain.entities import ContractClause, PolicyViolation, RiskAssessment, RedlineRecommendation
 from backend.shared.models.clause_finding import (
     ClauseExtraction,
@@ -9,6 +10,9 @@ from backend.shared.models.clause_finding import (
     RedlineSet,
 )
 from backend.shared.utils.message_content import content_to_text, strip_code_fence
+import concurrent.futures
+import contextvars
+import hashlib
 import json
 import logging
 
@@ -69,7 +73,52 @@ CLAUSE_TYPES_OF_INTEREST = [
 ]
 
 # Characters of contract text sent to the model in one pass.
-CLAUSE_EXTRACTION_WINDOW = 12000
+#
+# This used to be the *whole* budget: `contract_text[:12000]` and the rest of the
+# document was silently discarded. On the real contracts in `data/` that meant
+# 96% of the Shell MESA, 83% of the Salesforce MSA and 64% of the sample shuttle
+# contract were never looked at — and the result was reported as a completed
+# review. It is now the size of one window, and every window is analysed.
+CLAUSE_EXTRACTION_WINDOW = WINDOW_BUDGET_CHARS
+
+#: Windows analysed at once. The provider SDKs retry 429s with their own
+#: backoff, so the ceiling here is about not provoking them in the first place:
+#: four concurrent calls turns the Shell MESA's 30 windows into about eight
+#: rounds rather than thirty.
+CLAUSE_EXTRACTION_CONCURRENCY = 4
+
+#: Clauses per policy-checking call. Analysing the whole contract means a long
+#: one now yields dozens rather than a handful, and an overlong prompt is
+#: truncated by the provider rather than refused — so the last clauses would go
+#: unchecked while the report called them compliant.
+POLICY_CHECK_BATCH = 25
+
+
+class ClauseExtractionFailed(RuntimeError):
+    """No window could be analysed.
+
+    A distinct type because the difference matters downstream: a generic error
+    was caught by the orchestrator, turned into an empty clause list, and then
+    persisted over a perfectly good previous review. "The model was unavailable"
+    and "this contract has no notable clauses" have to stay distinguishable all
+    the way to storage.
+    """
+
+
+def parse_clause_result(result_json: str) -> tuple:
+    """Read the tool's output as `(clauses, coverage)`.
+
+    Tolerates the bare list older callers expect, so a caller that has not been
+    updated still gets its clauses rather than a KeyError — and is reported as
+    complete coverage, which is what a bare list has always meant.
+    """
+    parsed = json.loads(result_json)
+    if isinstance(parsed, list):
+        return parsed, {"windows": 1, "failed": 0, "complete": True}
+    return (
+        parsed.get("clauses", []),
+        parsed.get("coverage") or {"windows": 1, "failed": 0, "complete": True},
+    )
 
 
 class ClauseDetectorTool(BaseTool):
@@ -77,6 +126,13 @@ class ClauseDetectorTool(BaseTool):
     description: str = "Detect and extract key contract clauses"
     args_schema: Type[BaseModel] = ClauseDetectorInput
     llm: Any = None
+
+    #: The version's recorded chunking, when the caller knows it. Analysis must
+    #: chunk the contract exactly as the upload did, or the windows are built
+    #: from different boundaries than the stored `INCLUDES` membership and the
+    #: finding-to-chunk mapping — the thing that makes Increment 9 possible — is
+    #: quietly wrong.
+    chunking_profile: Any = None
 
     def _run(self, contract_text: str) -> str:
         """Extract clauses from the contract, returning a JSON array.
@@ -92,53 +148,238 @@ class ClauseDetectorTool(BaseTool):
             # produce an identical risk report.
             raise ValueError("ClauseDetectorTool requires an llm to extract clauses")
 
-        text = contract_text[:CLAUSE_EXTRACTION_WINDOW]
+        from backend.infrastructure.chunking.identity import identify_chunks
+
+        # The version's own profile, not a fresh default. A matter whose first
+        # round was chunked with different sizes — or by a different extractor —
+        # has stored chunks this would otherwise fail to reproduce, and every
+        # finding's chunk attribution would point at boundaries that exist
+        # nowhere but here.
+        chunked = identify_chunks(contract_text, self.chunking_profile)
+        windows = pack_windows(chunked.chunks)
+        if not windows:
+            logger.info("No text to extract clauses from")
+            return json.dumps([])
+
+        logger.info(
+            f"Extracting clauses from {len(contract_text):,} characters "
+            f"in {len(windows)} window(s)"
+        )
+
+        # Concurrently, but bounded. Serially, the Shell MESA's 30 windows would
+        # be 30 sequential model calls; unbounded, they would be 30 at once and
+        # the provider would start refusing them.
+        results: List[List[Any]] = [[] for _ in windows]
+        # (window index, chunk hash) per finding, parallel to `results`.
+        provenance: List[List[tuple]] = [[] for _ in windows]
+        failures: List[str] = []
+        workers = min(CLAUSE_EXTRACTION_CONCURRENCY, len(windows))
+
+        # Each call runs under a copy of this request's context. A
+        # ThreadPoolExecutor does not propagate contextvars, and the correlation
+        # id lives in one — so without this the debug events and log lines from
+        # thirty concurrent model calls arrive unattributed, and two reviews
+        # running at once interleave with no way to tell them apart. The same
+        # copy the analysis worker already makes for itself.
+        context = contextvars.copy_context()
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {
+                pool.submit(context.copy().run, self._extract_window, window): window
+                for window in windows
+            }
+            for future in concurrent.futures.as_completed(futures):
+                window = futures[future]
+                try:
+                    found = future.result()
+                    results[window.index] = found
+                    provenance[window.index] = [
+                        (window.index, *self._source_chunk(chunked, window, clause))
+                        for clause in found
+                    ]
+                except Exception as e:
+                    # One window failing must not discard the other 29. The
+                    # failure is recorded and re-raised only if *every* window
+                    # failed, because "the model was unavailable" and "this
+                    # contract has no notable clauses" are different reports and
+                    # conflating them is how the original stub went unnoticed.
+                    logger.error(f"Clause extraction failed on window "
+                                 f"{window.index + 1}/{len(windows)}: {e}")
+                    failures.append(str(e))
+
+        if failures and len(failures) == len(windows):
+            raise ClauseExtractionFailed(
+                f"Clause extraction failed on all {len(windows)} window(s): {failures[0]}"
+            )
+        if failures:
+            logger.warning(
+                f"{len(failures)} of {len(windows)} windows failed; the review covers "
+                f"{len(windows) - len(failures)} of them"
+            )
+
+        # In window order, so clause_index is stable and reads front-to-back.
+        merged = self._merge_findings(results, provenance)
+        logger.info(
+            f"Extracted {len(merged)} clauses from {len(contract_text):,} characters "
+            f"across {len(windows)} window(s)"
+        )
+
+        wire = []
+        for clause, (window_index, chunk_hash, chunk_order) in merged:
+            payload = clause.to_wire()
+            # Carried so Increment 9 can re-analyse only the windows whose
+            # chunks changed. Without it, selecting affected findings means
+            # matching text — which is ambiguous exactly where it matters, on
+            # clauses whose wording repeats.
+            payload["source_chunk"] = chunk_hash
+            # The chunk's position in the version's membership list. The hash
+            # alone is not an occurrence: the repository stores repeated
+            # identical text as **one** `(:Chunk)` with several `INCLUDES {order}`
+            # relationships, so two copies of the same paragraph share a hash and
+            # are told apart only by where they sit.
+            payload["source_chunk_order"] = chunk_order
+            payload["source_window"] = window_index
+            wire.append(payload)
+
+        # Coverage travels beside the findings, not on them. Marking each
+        # finding meant that a run where one window failed and every other
+        # returned nothing produced an empty list with no marker anywhere —
+        # indistinguishable from a clean contract, which is the single worst
+        # thing this pipeline can report.
+        return json.dumps({
+            "clauses": wire,
+            "coverage": {
+                "windows": len(windows),
+                "failed": len(failures),
+                "complete": not failures,
+            },
+        })
+
+    @staticmethod
+    def _source_chunk(chunked, window, clause) -> tuple:
+        """Where in the version a finding's evidence sits: `(hash, order)`.
+
+        **The hash alone is not an occurrence.** `ChunkRepository` stores
+        repeated identical text as one `(:Chunk)` with several
+        `INCLUDES {order}` relationships, so two copies of the same paragraph
+        share a hash and are distinguished only by position. Deduplicating on
+        the hash would therefore still collapse them — the very thing keying on
+        the chunk was meant to stop.
+
+        A span that straddles a boundary inside the window belongs to the chunk
+        it *starts* in, found by longest matching prefix. Blindly taking the
+        window's first chunk pointed at unrelated text, and Increment 9 would
+        then miss the window when the real source chunk changed.
+        """
+        in_window = [c for c in chunked.chunks if c.order in
+                     range(window.first_order, window.last_order + 1)]
+        fallback = (in_window[0].hash, in_window[0].order) if in_window else ("", None)
+
+        span = canonical(getattr(clause, "evidence_span", "") or "")
+        if not span:
+            return fallback
+
+        for chunk in in_window:
+            if span in canonical(chunk.content):
+                return chunk.hash, chunk.order
+
+        # Straddles a boundary: attribute it to where it begins.
+        best, best_len = fallback, 0
+        for chunk in in_window:
+            body = canonical(chunk.content)
+            # The longest prefix of the span that this chunk ends with.
+            limit = min(len(span), len(body))
+            for size in range(limit, max(0, best_len), -1):
+                if body.endswith(span[:size]):
+                    best, best_len = (chunk.hash, chunk.order), size
+                    break
+        return best
+
+    def _extract_window(self, window) -> List[Any]:
+        """One model call over one window, grounded against that window's text."""
         parser = PydanticOutputParser(pydantic_object=ClauseExtraction)
 
         prompt = f"""You are a contract analyst. Extract the clauses that matter for
-legal review from the contract below.
+legal review from the contract extract below.
 
 Focus on these clause types: {", ".join(CLAUSE_TYPES_OF_INTEREST)}.
 Include a clause only if it is genuinely present. It is correct to return fewer
-clauses, or none, rather than invent one.
+clauses, or none, rather than invent one. This is one part of a longer contract,
+so it is entirely normal for a part to contain none of these clause types.
 
 For each clause set `evidence_span` to the clause text copied EXACTLY from the
-contract — same words, same order. Do not paraphrase or summarise. Judge
+extract — same words, same order. Do not paraphrase or summarise. Judge
 `risk_level` from the perspective of the party receiving this contract: unusual,
 one-sided or open-ended terms are higher risk. Set `human_review_required` when
 the clause is HIGH or CRITICAL risk, or when you are unsure.
 
 Leave `violated_policy` and `suggested_redline` null.
 
-CONTRACT:
-{text}
+CONTRACT EXTRACT:
+{window.text}
 
 {parser.get_format_instructions()}"""
 
         # No retry wrapper here: the provider SDKs already retry 429/503 with
         # their own backoff (google-genai walks 1s -> 17s before giving up).
         # Adding a second layer tripled a 34s failure into a 100s+ one.
-        #
-        # Failures propagate rather than returning an empty list. "The model was
-        # unavailable" and "this contract has no notable clauses" produce very
-        # different reports, and conflating them is how the original stub went
-        # unnoticed. Callers already handle the exception.
         response = self.llm.invoke(prompt)
         extraction = parser.parse(strip_code_fence(content_to_text(response.content)))
 
+        # Grounded against *this window*, not the whole contract. Checking
+        # against the full text would let a finding invented for window 3 pass
+        # because similar words happen to appear in window 17.
         grounded, ungrounded = [], []
         for clause in extraction.clauses:
-            (grounded if clause.is_grounded_in(text) else ungrounded).append(clause)
+            (grounded if clause.is_grounded_in(window.text) else ungrounded).append(clause)
 
         if ungrounded:
             logger.warning(
-                f"Dropped {len(ungrounded)} ungrounded clause(s) whose evidence span "
-                f"was absent from the contract: "
+                f"Window {window.index + 1}: dropped {len(ungrounded)} ungrounded "
+                f"clause(s) whose evidence span was absent: "
                 f"{[c.clause_type for c in ungrounded]}"
             )
+        return grounded
 
-        logger.info(f"Extracted {len(grounded)} clauses from {len(text):,} characters")
-        return json.dumps([c.to_wire() for c in grounded])
+    @staticmethod
+    def _merge_findings(per_window: List[List[Any]],
+                        provenance: List[List[tuple]]) -> List[tuple]:
+        """Flatten the windows' findings, dropping duplicate *reports*.
+
+        Identity is the clause type, a hash of the canonical evidence span, and
+        **the chunk occurrence the span sits in** — its hash *and* its position
+        in the membership list. The occurrence is what makes this a report of
+        one occurrence rather than of one wording: a contract can legitimately
+        contain the same notice or payment provision twice, in two schedules,
+        and those are two clauses a reviewer has to see. Keying on the text
+        alone silently dropped the second — and because the policy layer is
+        index-based precisely so that duplicate text can be told apart, dropping
+        it could take a real violation with it.
+
+        The canonical form is the same normalisation chunk identity uses, so a
+        difference in whitespace or case does not read as a second finding.
+
+        The first report wins, which is the earlier window, so a clause is
+        attributed to where it starts.
+        """
+        seen = set()
+        merged: List[tuple] = []
+        for findings, sources in zip(per_window, provenance):
+            for clause, source in zip(findings, sources):
+                span = canonical(getattr(clause, "evidence_span", "") or "")
+                key = (
+                    (getattr(clause, "clause_type", "") or "").strip().casefold(),
+                    hashlib.sha256(span.encode("utf-8")).hexdigest(),
+                    # The occurrence, not the text: (hash, order). Repeated
+                    # identical paragraphs share a hash and differ only in where
+                    # they sit, so the order is what keeps them two findings.
+                    source[1], source[2],
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                merged.append((clause, source))
+        return merged
 
 # Policy Compliance Agent Tools
 class PolicyCheckerInput(BaseModel):
@@ -178,40 +419,20 @@ class PolicyCheckerTool(BaseTool):
             return json.dumps([])
 
         by_id = {rule.id: rule for rule in self.rules}
-        parser = PydanticOutputParser(pydantic_object=PolicyAssessment)
 
-        rules_block = "\n".join(
-            f"- {r.id} [{r.severity}] ({r.section_reference}): {r.rule_text}"
-            for r in self.rules
-        )
-        clauses_block = "\n".join(
-            f"- clause {i} [{c.get('clause_type', 'Unknown')}]: "
-            f"{' '.join((c.get('evidence_span') or c.get('content') or '').split())}"
-            for i, c in enumerate(clauses)
-        )
-
-        prompt = f"""You are a contract compliance reviewer. Decide which clauses
-breach which playbook rules.
-
-PLAYBOOK RULES:
-{rules_block}
-
-CONTRACT CLAUSES:
-{clauses_block}
-
-Report one entry per genuine breach. Use `rule_id` exactly as written above and
-`clause_index` for the clause number. A clause may breach more than one rule, and
-most clauses breach none — returning an empty list is the correct answer for a
-compliant contract. Do not report a breach merely because a topic is mentioned.
-In `issue`, say specifically what the clause does that the rule forbids.
-
-{parser.get_format_instructions()}"""
-
-        response = self.llm.invoke(prompt)
-        assessment = parser.parse(strip_code_fence(content_to_text(response.content)))
+        # Batched, for the same reason clause extraction is windowed. This used
+        # to put every clause in one prompt, which was fine while a contract
+        # yielded a handful — but now that the whole document is analysed, a long
+        # one yields dozens, and a prompt that overflows gets truncated by the
+        # provider rather than refused, so the last clauses would be silently
+        # unchecked while the report claimed they were compliant.
+        assessments = []
+        for offset in range(0, len(clauses), POLICY_CHECK_BATCH):
+            batch = clauses[offset:offset + POLICY_CHECK_BATCH]
+            assessments.extend(self._check_batch(batch, offset))
 
         violations, discarded = [], []
-        for finding in assessment.violations:
+        for finding in assessments:
             rule = by_id.get(finding.rule_id)
             if rule is None or not 0 <= finding.clause_index < len(clauses):
                 discarded.append(finding.rule_id)
@@ -240,10 +461,52 @@ In `issue`, say specifically what the clause does that the rule forbids.
             )
 
         logger.info(
-            f"Checked {len(clauses)} clauses against {len(self.rules)} rules: "
-            f"{len(violations)} violations"
+            f"Checked {len(clauses)} clauses against {len(self.rules)} rules "
+            f"in {max(1, (len(clauses) + POLICY_CHECK_BATCH - 1) // POLICY_CHECK_BATCH)} "
+            f"batch(es): {len(violations)} violations"
         )
         return json.dumps(violations)
+
+    def _check_batch(self, batch: List[Dict[str, Any]], offset: int) -> List[Any]:
+        """One model call over one batch of clauses.
+
+        `offset` maps the batch's local clause numbering back to the caller's
+        global list. Without it every batch after the first would cite breaches
+        against clauses 0..n of the *whole* contract — attributing the wrong
+        text to the wrong rule, which is worse than missing the breach.
+        """
+        parser = PydanticOutputParser(pydantic_object=PolicyAssessment)
+
+        rules_block = "\n".join(
+            f"- {r.id} [{r.severity}] ({r.section_reference}): {r.rule_text}"
+            for r in self.rules
+        )
+        clauses_block = "\n".join(
+            f"- clause {offset + i} [{c.get('clause_type', 'Unknown')}]: "
+            f"{' '.join((c.get('evidence_span') or c.get('content') or '').split())}"
+            for i, c in enumerate(batch)
+        )
+
+        prompt = f"""You are a contract compliance reviewer. Decide which clauses
+breach which playbook rules.
+
+PLAYBOOK RULES:
+{rules_block}
+
+CONTRACT CLAUSES:
+{clauses_block}
+
+Report one entry per genuine breach. Use `rule_id` exactly as written above and
+`clause_index` for the clause number. A clause may breach more than one rule, and
+most clauses breach none — returning an empty list is the correct answer for a
+compliant contract. Do not report a breach merely because a topic is mentioned.
+In `issue`, say specifically what the clause does that the rule forbids.
+
+{parser.get_format_instructions()}"""
+
+        response = self.llm.invoke(prompt)
+        assessment = parser.parse(strip_code_fence(content_to_text(response.content)))
+        return list(assessment.violations)
 
 
 # Risk Assessment Agent Tools

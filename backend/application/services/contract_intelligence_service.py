@@ -28,7 +28,8 @@ class ContractIntelligenceService:
     def analyze_contract_intelligence(self, contract_text: str, model: str = "gemini-2.5-flash",
                                       use_planning: bool = True,
                                       tenant_id: str = "default-tenant",
-                                      contract_type: str = "general") -> ContractIntelligence:
+                                      contract_type: str = "general",
+                                      chunking_profile=None) -> ContractIntelligence:
         """Perform complete contract intelligence analysis using multi-agent system"""
         
         start_time = time.time()
@@ -44,7 +45,8 @@ class ContractIntelligenceService:
                 orchestrator = ContractIntelligenceAgentFactory.create_orchestrator(llm, model)
                 # Run multi-agent analysis with optional planning
                 analysis_result = orchestrator.analyze_contract(
-                    contract_text, use_planning, tenant_id, contract_type
+                    contract_text, use_planning, tenant_id, contract_type,
+                    chunking_profile,
                 )
             except ImportError as ie:
                 logger.error(f"Import error in orchestrator: {ie}")
@@ -135,12 +137,34 @@ class ContractIntelligenceService:
             #
             # `to_thread` copies the context, so the correlation id still
             # reaches the analysis and its debug events.
+            # The version's own chunking, read back from the graph. Analysis has
+            # to reproduce the boundaries the upload stored, or the windows it
+            # builds describe a division of the document that exists nowhere
+            # else — and every finding's chunk attribution with them.
+            profile, profile_error = await asyncio.to_thread(
+                self._read_chunking_profile, tenant_id, contract_id
+            )
+
             intelligence = await asyncio.to_thread(
                 self.analyze_contract_intelligence,
                 contract_text, model, use_planning,
                 tenant_id,
                 contract_data.get("contract_type") or "general",
+                profile,
             )
+
+            if profile_error:
+                # A version uploaded under a non-default profile, analysed with
+                # the default one, produces windows and `source_chunk` values
+                # computed against boundaries the stored membership does not
+                # have. The findings are still real; their chunk attribution is
+                # not, and Increment 9 would trust it. Say so rather than let it
+                # pass silently.
+                intelligence.warnings = list(intelligence.warnings or []) + [
+                    f"The stored chunking profile could not be read ({profile_error}), "
+                    f"so this analysis used default boundaries. The findings are "
+                    f"sound; their chunk attribution may not match earlier rounds."
+                ]
 
             # Store intelligence results back to database
             with trace_step("analysis", "store_results", contract_id=contract_id) as step:
@@ -195,6 +219,30 @@ class ContractIntelligenceService:
             raise_if_provider_error(e, model)
             logger.error(f"Failed to analyze contract {contract_id}: {e}")
             return None
+
+    @staticmethod
+    def _read_chunking_profile(tenant_id: str, contract_id: str) -> tuple:
+        """The version's recorded chunking, and whether the read itself failed.
+
+        Two different answers that were being conflated. A version with **no**
+        stored profile is ordinary — anything uploaded before Increment 7 has
+        none — and the default is right for it. A read that **failed** is not:
+        the version may well have a non-default profile, and analysing with the
+        default silently computes every window and every `source_chunk` against
+        boundaries the stored membership does not have.
+
+        Runs on a worker thread. The Neo4j client is synchronous and this is
+        reached from an async handler, so in-line it blocks the event loop for
+        the duration of the query — the same bug, in a new place, that
+        `to_thread` was introduced to fix for the analysis itself.
+        """
+        try:
+            from backend.infrastructure.chunk_repository import ChunkRepository
+
+            return ChunkRepository().profile_for_version(tenant_id, contract_id), None
+        except Exception as e:
+            logger.warning(f"Could not read the chunking profile for {contract_id}: {e}")
+            return None, str(e)
 
     def _set_analysis_status(self, contract_id: str, tenant_id: str,
                              status: AnalysisStatus, error: str = "") -> None:
@@ -359,6 +407,12 @@ class ContractIntelligenceService:
             # with nothing to say why.
             "critical_issues": list(risk.critical_issues or []),
             "risk_recommendations": list(risk.recommendations or []),
+            # The run's own warnings, stored with it. They lived only in the
+            # HTTP response, and `get_stored_analysis` rebuilt warnings from
+            # `analysis_error` alone — so a review that covered part of a
+            # contract was saved COMPLETE and reopened with nothing to say so.
+            # Increment 6's promise is that reopening shows what the run showed.
+            "analysis_warnings": list(intelligence.warnings or []),
         }
 
         findings = [
@@ -374,6 +428,11 @@ class ContractIntelligenceService:
                 "violated_policy": clause.violated_policy,
                 "suggested_redline": clause.suggested_redline,
                 "human_review_required": bool(clause.human_review_required),
+                # The chunk this finding came from. Increment 9 re-analyses the
+                # windows whose chunks changed, and reads that from here.
+                "source_chunk": clause.source_chunk,
+                "source_chunk_order": clause.source_chunk_order,
+                "source_window": clause.source_window,
             }
             for index, clause in enumerate(intelligence.clauses or [])
         ]
@@ -434,6 +493,9 @@ class ContractIntelligenceService:
                         violated_policy: f.violated_policy,
                         suggested_redline: f.suggested_redline,
                         human_review_required: f.human_review_required,
+                        source_chunk: f.source_chunk,
+                        source_chunk_order: f.source_chunk_order,
+                        source_window: f.source_window,
                         created_at: datetime()
                     })
                 }
@@ -520,6 +582,7 @@ class ContractIntelligenceService:
                    c.processing_time AS processing_time,
                    c.risk_score AS risk_score,
                    c.risk_level AS risk_level,
+                   coalesce(c.analysis_warnings, []) AS analysis_warnings,
                    coalesce(c.critical_issues, []) AS critical_issues,
                    coalesce(c.risk_recommendations, []) AS recommendations,
                    c.contract_type AS contract_type,
@@ -542,7 +605,10 @@ class ContractIntelligenceService:
                    f.violated_policy AS violated_policy,
                    f.suggested_redline AS suggested_redline,
                    f.human_review_required AS human_review_required,
-                   f.location AS location
+                   f.location AS location,
+                   f.source_chunk AS source_chunk,
+                   f.source_chunk_order AS source_chunk_order,
+                   f.source_window AS source_window
             ORDER BY f.position
             """,
             {"contract_id": contract_id, "tenant_id": tenant_id},
@@ -567,7 +633,9 @@ class ContractIntelligenceService:
 
         redlines = self.get_redlines(contract_id, tenant_id)
 
-        warnings = []
+        # The run's own warnings first — a partial-coverage review is COMPLETE
+        # and still has something the reviewer must see.
+        warnings = [str(w) for w in (row.get("analysis_warnings") or [])]
         if row.get("analysis_error"):
             # Surfaced as a warning, never as an absence of findings.
             warnings.append(str(row["analysis_error"]))
@@ -810,6 +878,9 @@ class ContractIntelligenceService:
                 violated_policy=clause_data.get("violated_policy"),
                 suggested_redline=clause_data.get("suggested_redline"),
                 human_review_required=clause_data.get("human_review_required", False),
+                source_chunk=clause_data.get("source_chunk"),
+                source_chunk_order=clause_data.get("source_chunk_order"),
+                source_window=clause_data.get("source_window"),
             ))
         
         # Convert violations
@@ -855,6 +926,10 @@ class ContractIntelligenceService:
             risk_assessment=risk_assessment,
             redlines=redlines,
             redlines_generated=analysis_result.get("redlines_generated", True),
+            # False when extraction could not run. An empty list then means "we
+            # do not know", and `_store_intelligence_results` refuses to replace
+            # a good stored review on the strength of it.
+            clauses_extracted=analysis_result.get("clauses_extracted", True),
             warnings=analysis_result.get("warnings", []) or [],
         )
         

@@ -95,6 +95,10 @@ async def analyze_contract_intelligence(
                         "suggested_redline": clause.suggested_redline,
                         "human_review_required": clause.human_review_required,
                         "location": clause.location,
+                        # Which chunk and window the finding came from, so a
+                        # caller can map it back to the version's membership.
+                        "source_chunk": clause.source_chunk,
+                        "source_window": clause.source_window,
                         # Legacy aliases the UI still reads; drop once migrated.
                         "content": clause.content,
                         "confidence_score": clause.confidence_score,

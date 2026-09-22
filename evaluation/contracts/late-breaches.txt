@@ -1,0 +1,128 @@
+SERVICES AGREEMENT
+
+This Agreement is made between Fabrikam Inc ("Customer") and
+Contoso Services LLC ("Provider").
+
+
+
+1. SERVICES. Provider shall supply the managed services described in the
+applicable Statement of Work.
+
+
+
+2. NOTICES. Notices under this Agreement must be in writing and delivered by hand, by recorded delivery, or by email to the addresses set out in the signature block, and are deemed given on receipt. This provision applies throughout the term of this Agreement and is restated here as clause 2 of the general schedule for completeness of the record.
+
+3. ASSIGNMENT. Neither party may assign this Agreement without the prior written consent of the other, such consent not to be unreasonably withheld, save that either party may assign to an affiliate or a successor in title on notice. This provision applies throughout the term of this Agreement and is restated here as clause 3 of the general schedule for completeness of the record.
+
+4. FORCE MAJEURE. Neither party is liable for any failure or delay caused by an event beyond its reasonable control, provided it notifies the other promptly and uses reasonable endeavours to mitigate the effect. This provision applies throughout the term of this Agreement and is restated here as clause 4 of the general schedule for completeness of the record.
+
+5. SEVERANCE. If any provision of this Agreement is held to be invalid or unenforceable, that provision shall be severed and the remainder shall continue in full force. This provision applies throughout the term of this Agreement and is restated here as clause 5 of the general schedule for completeness of the record.
+
+6. WAIVER. No failure or delay in exercising any right under this Agreement operates as a waiver of it, and no single or partial exercise precludes any further exercise. This provision applies throughout the term of this Agreement and is restated here as clause 6 of the general schedule for completeness of the record.
+
+7. COUNTERPARTS. This Agreement may be executed in counterparts, each of which is an original and all of which together constitute one and the same instrument. This provision applies throughout the term of this Agreement and is restated here as clause 7 of the general schedule for completeness of the record.
+
+8. THIRD PARTY RIGHTS. A person who is not a party to this Agreement has no right to enforce any of its terms, and the consent of any third party is not required to vary or rescind it. This provision applies throughout the term of this Agreement and is restated here as clause 8 of the general schedule for completeness of the record.
+
+9. RECORDS AND AUDIT. Provider shall keep complete and accurate records relating to the Services and shall make them available to Customer on reasonable notice during normal business hours, not more than twice in any twelve month period. This provision applies throughout the term of this Agreement and is restated here as clause 9 of the general schedule for completeness of the record.
+
+10. SUBCONTRACTING. Provider may subcontract performance of any part of the Services but remains responsible for the acts and omissions of its subcontractors as if they were its own. This provision applies throughout the term of this Agreement and is restated here as clause 10 of the general schedule for completeness of the record.
+
+11. NON-SOLICITATION. Neither party shall, during the term and for six months afterwards, knowingly solicit for employment any employee of the other who has been materially involved in the provision or receipt of the Services. This provision applies throughout the term of this Agreement and is restated here as clause 11 of the general schedule for completeness of the record.
+
+12. EXPORT CONTROL. Each party shall comply with all applicable export control and sanctions laws and shall not export or re-export any deliverable in contravention of them. This provision applies throughout the term of this Agreement and is restated here as clause 12 of the general schedule for completeness of the record.
+
+13. ANTI-BRIBERY. Each party shall comply with all applicable anti-bribery and anti-corruption laws, shall maintain adequate procedures, and shall promptly report any breach of this clause to the other. This provision applies throughout the term of this Agreement and is restated here as clause 13 of the general schedule for completeness of the record.
+
+14. INSURANCE. Provider shall maintain commercial general liability and professional indemnity insurance with reputable insurers at levels consistent with industry practice and shall provide evidence of cover on request. This provision applies throughout the term of this Agreement and is restated here as clause 14 of the general schedule for completeness of the record.
+
+15. CHANGE CONTROL. Any change to the Services must be recorded in a written change order signed by an authorised representative of each party, setting out the change, its impact on the fees, and its impact on the timetable. This provision applies throughout the term of this Agreement and is restated here as clause 15 of the general schedule for completeness of the record.
+
+16. DISPUTE RESOLUTION. The parties shall first attempt in good faith to resolve any dispute by escalation to their respective senior representatives before commencing proceedings. This provision applies throughout the term of this Agreement and is restated here as clause 16 of the general schedule for completeness of the record.
+
+17. SERVICE LEVELS. Provider shall perform the Services in accordance with the service levels set out in the applicable Statement of Work and shall report performance against them monthly. This provision applies throughout the term of this Agreement and is restated here as clause 17 of the general schedule for completeness of the record.
+
+18. ACCEPTANCE. Customer shall have ten business days from delivery of each deliverable to accept or reject it in writing, stating the grounds for any rejection; a deliverable not rejected within that period is deemed accepted. This provision applies throughout the term of this Agreement and is restated here as clause 18 of the general schedule for completeness of the record.
+
+19. PERSONNEL. Provider shall assign suitably qualified personnel to the Services and shall use reasonable endeavours to maintain continuity of key personnel throughout the term. This provision applies throughout the term of this Agreement and is restated here as clause 19 of the general schedule for completeness of the record.
+
+20. COMPLIANCE WITH LAWS. Each party shall comply with all laws and regulations applicable to it in connection with this Agreement. This provision applies throughout the term of this Agreement and is restated here as clause 20 of the general schedule for completeness of the record.
+
+21. ENTIRE AGREEMENT. This Agreement together with its Statements of Work constitutes the entire agreement between the parties and supersedes all prior discussions. This provision applies throughout the term of this Agreement and is restated here as clause 21 of the general schedule for completeness of the record.
+
+22. NOTICES. Notices under this Agreement must be in writing and delivered by hand, by recorded delivery, or by email to the addresses set out in the signature block, and are deemed given on receipt. This provision applies throughout the term of this Agreement and is restated here as clause 22 of the general schedule for completeness of the record.
+
+23. ASSIGNMENT. Neither party may assign this Agreement without the prior written consent of the other, such consent not to be unreasonably withheld, save that either party may assign to an affiliate or a successor in title on notice. This provision applies throughout the term of this Agreement and is restated here as clause 23 of the general schedule for completeness of the record.
+
+24. FORCE MAJEURE. Neither party is liable for any failure or delay caused by an event beyond its reasonable control, provided it notifies the other promptly and uses reasonable endeavours to mitigate the effect. This provision applies throughout the term of this Agreement and is restated here as clause 24 of the general schedule for completeness of the record.
+
+25. SEVERANCE. If any provision of this Agreement is held to be invalid or unenforceable, that provision shall be severed and the remainder shall continue in full force. This provision applies throughout the term of this Agreement and is restated here as clause 25 of the general schedule for completeness of the record.
+
+26. WAIVER. No failure or delay in exercising any right under this Agreement operates as a waiver of it, and no single or partial exercise precludes any further exercise. This provision applies throughout the term of this Agreement and is restated here as clause 26 of the general schedule for completeness of the record.
+
+27. COUNTERPARTS. This Agreement may be executed in counterparts, each of which is an original and all of which together constitute one and the same instrument. This provision applies throughout the term of this Agreement and is restated here as clause 27 of the general schedule for completeness of the record.
+
+28. THIRD PARTY RIGHTS. A person who is not a party to this Agreement has no right to enforce any of its terms, and the consent of any third party is not required to vary or rescind it. This provision applies throughout the term of this Agreement and is restated here as clause 28 of the general schedule for completeness of the record.
+
+29. RECORDS AND AUDIT. Provider shall keep complete and accurate records relating to the Services and shall make them available to Customer on reasonable notice during normal business hours, not more than twice in any twelve month period. This provision applies throughout the term of this Agreement and is restated here as clause 29 of the general schedule for completeness of the record.
+
+30. SUBCONTRACTING. Provider may subcontract performance of any part of the Services but remains responsible for the acts and omissions of its subcontractors as if they were its own. This provision applies throughout the term of this Agreement and is restated here as clause 30 of the general schedule for completeness of the record.
+
+31. NON-SOLICITATION. Neither party shall, during the term and for six months afterwards, knowingly solicit for employment any employee of the other who has been materially involved in the provision or receipt of the Services. This provision applies throughout the term of this Agreement and is restated here as clause 31 of the general schedule for completeness of the record.
+
+32. EXPORT CONTROL. Each party shall comply with all applicable export control and sanctions laws and shall not export or re-export any deliverable in contravention of them. This provision applies throughout the term of this Agreement and is restated here as clause 32 of the general schedule for completeness of the record.
+
+33. ANTI-BRIBERY. Each party shall comply with all applicable anti-bribery and anti-corruption laws, shall maintain adequate procedures, and shall promptly report any breach of this clause to the other. This provision applies throughout the term of this Agreement and is restated here as clause 33 of the general schedule for completeness of the record.
+
+34. INSURANCE. Provider shall maintain commercial general liability and professional indemnity insurance with reputable insurers at levels consistent with industry practice and shall provide evidence of cover on request. This provision applies throughout the term of this Agreement and is restated here as clause 34 of the general schedule for completeness of the record.
+
+35. CHANGE CONTROL. Any change to the Services must be recorded in a written change order signed by an authorised representative of each party, setting out the change, its impact on the fees, and its impact on the timetable. This provision applies throughout the term of this Agreement and is restated here as clause 35 of the general schedule for completeness of the record.
+
+36. DISPUTE RESOLUTION. The parties shall first attempt in good faith to resolve any dispute by escalation to their respective senior representatives before commencing proceedings. This provision applies throughout the term of this Agreement and is restated here as clause 36 of the general schedule for completeness of the record.
+
+37. SERVICE LEVELS. Provider shall perform the Services in accordance with the service levels set out in the applicable Statement of Work and shall report performance against them monthly. This provision applies throughout the term of this Agreement and is restated here as clause 37 of the general schedule for completeness of the record.
+
+38. ACCEPTANCE. Customer shall have ten business days from delivery of each deliverable to accept or reject it in writing, stating the grounds for any rejection; a deliverable not rejected within that period is deemed accepted. This provision applies throughout the term of this Agreement and is restated here as clause 38 of the general schedule for completeness of the record.
+
+39. PERSONNEL. Provider shall assign suitably qualified personnel to the Services and shall use reasonable endeavours to maintain continuity of key personnel throughout the term. This provision applies throughout the term of this Agreement and is restated here as clause 39 of the general schedule for completeness of the record.
+
+40. COMPLIANCE WITH LAWS. Each party shall comply with all laws and regulations applicable to it in connection with this Agreement. This provision applies throughout the term of this Agreement and is restated here as clause 40 of the general schedule for completeness of the record.
+
+41. ENTIRE AGREEMENT. This Agreement together with its Statements of Work constitutes the entire agreement between the parties and supersedes all prior discussions. This provision applies throughout the term of this Agreement and is restated here as clause 41 of the general schedule for completeness of the record.
+
+42. NOTICES. Notices under this Agreement must be in writing and delivered by hand, by recorded delivery, or by email to the addresses set out in the signature block, and are deemed given on receipt. This provision applies throughout the term of this Agreement and is restated here as clause 42 of the general schedule for completeness of the record.
+
+43. ASSIGNMENT. Neither party may assign this Agreement without the prior written consent of the other, such consent not to be unreasonably withheld, save that either party may assign to an affiliate or a successor in title on notice. This provision applies throughout the term of this Agreement and is restated here as clause 43 of the general schedule for completeness of the record.
+
+44. FORCE MAJEURE. Neither party is liable for any failure or delay caused by an event beyond its reasonable control, provided it notifies the other promptly and uses reasonable endeavours to mitigate the effect. This provision applies throughout the term of this Agreement and is restated here as clause 44 of the general schedule for completeness of the record.
+
+45. SEVERANCE. If any provision of this Agreement is held to be invalid or unenforceable, that provision shall be severed and the remainder shall continue in full force. This provision applies throughout the term of this Agreement and is restated here as clause 45 of the general schedule for completeness of the record.
+
+46. WAIVER. No failure or delay in exercising any right under this Agreement operates as a waiver of it, and no single or partial exercise precludes any further exercise. This provision applies throughout the term of this Agreement and is restated here as clause 46 of the general schedule for completeness of the record.
+
+47. COUNTERPARTS. This Agreement may be executed in counterparts, each of which is an original and all of which together constitute one and the same instrument. This provision applies throughout the term of this Agreement and is restated here as clause 47 of the general schedule for completeness of the record.
+
+
+
+48. FEES AND PAYMENT. Customer shall pay each undisputed invoice within
+sixty (60) days of invoice receipt.
+
+49. LIMITATION OF LIABILITY. Each party's aggregate liability under this
+Agreement shall not exceed the total fees paid or payable under the
+applicable Statement of Work.
+
+50. INDEMNIFICATION. Each party shall indemnify the other solely for
+third-party claims arising from its gross negligence, willful misconduct, or
+infringement of intellectual property under this Agreement.
+
+51. TERMINATION. Provider may terminate this Agreement immediately and
+without notice, and no payment shall be due for work in progress.
+
+52. INTELLECTUAL PROPERTY. Customer owns the deliverables created
+specifically for this engagement. Provider retains ownership of its
+pre-existing intellectual property, reusable tools and methodologies.
+
+53. CONFIDENTIALITY. Each party shall protect the other party's proprietary
+information using no less than reasonable care.
+
+54. GOVERNING LAW. This Agreement is governed by the laws of England and Wales.
