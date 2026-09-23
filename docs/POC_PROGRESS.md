@@ -2126,12 +2126,60 @@ this:
 5. Open the redline you decided in step 1. It should still carry your decision, not ask again.
 6. `GET /api/matters/{ref}/changes?from=1&to=3` compares any two rounds directly.
 
+### Addressed in review (Copilot, PR #11)
+
+Eleven findings, all valid. Six of them were one mistake.
+
+Increment 7 established that a chunk's identity is `(hash, order)`: the same paragraph appearing
+three times is one `(:Chunk)` with three `INCLUDES` rows, each carrying its own per-version text.
+Increment 8 fixed provenance to respect that. Increment 9 then keyed the entire diff on the hash
+alone — and the same slip surfaced in six places, each with its own symptom:
+
+| Where | Symptom |
+|---|---|
+| `ChangeReport.unchanged` / `.changed` | one changed occurrence left its twin marked unchanged |
+| `_fold_moves` | 3 removals + 2 insertions collapsed to 1 move, losing 2 entries and their positions |
+| the rendering maps | the later occurrence overwrote the earlier text; `from_text` showed the wrong side |
+| `_findings_by_chunk` | a finding attached to every occurrence sharing its hash |
+| the carry-forward filter | a stale finding carried onto an occurrence that had changed |
+| the reuse keys | provenance mismatched after an insertion shifted orders |
+
+All six are keyed on `(hash, order)` now. Worth naming: `_findings_by_chunk` had to start reading
+`f.source_chunk_order`, a property Increment 8 wrote and **nothing had ever read**. A column written
+and never consumed is a fact that cannot be wrong in testing, which is why this held together.
+
+The other five:
+
+- **Carry-forward now requires a fully skipped window.** `window_keys()` collects every chunk
+  occurrence in a window and the window joins `skipped_keys` only if all of them are unchanged.
+  Before, a window with one changed clause was re-extracted *and* had its old findings appended —
+  stale findings for the part the model did look at.
+- **Reuse is disabled when `profile_error` is set.** The code fell back to default boundaries on an
+  unreadable profile while still reusing hashes computed under the stored one. A profile we could
+  not read is not evidence that the chunking matches.
+- **An empty findings list is a completed analysis.** This was the sharpest of them: the guard
+  treated "no findings" as "nothing stored", so an unchanged *clean* round re-sent every window to
+  the model. The headline claim of this increment — nothing changed costs zero model calls — was
+  false for exactly the contracts that need nothing done.
+- **Redline ids carry the tenant.** References are allocated per tenant; `redline_id_unique` is
+  global. I checked this against a live 5.26 instance instead of reasoning about it: the second
+  tenant to file a redline on `MSA-2026-0001` got `Neo.ClientError.Schema.ConstraintValidationFailed`.
+  Both tenants now store cleanly. The tenant went into the id rather than the constraint becoming
+  composite, because that id is also the logical key the UI and the decision endpoints pass around.
+- **Two UI faults.** Both selectors listed every round, so selecting the same number on each side
+  404'd from an ordinary interaction; and the version pair was seeded once on mount, so uploading a
+  new round left the reviewer looking at the previous comparison.
+
+Verified: `make test` — 794 passed, 3 skipped, offline. Live: the six-check run still passes, plus
+two tenants at the same reference storing redlines without collision, and three identical paragraphs
+removed with two re-inserted now reporting two moves and one genuine deletion.
+
 ### Honest limits
 
 - **The similarity threshold is untuned on real contracts.** 0.80 is inherited from the advisory
   match, where it was measured; here it is a reasonable default that nothing has yet tested against
   a real round of redlining.
-- **Carry-forward is keyed on the chunk, so a reworded clause loses its findings** and is re-analysed
+- **Carry-forward is keyed on the chunk occurrence, so a reworded clause loses its findings** and is re-analysed
   — correct, but it means a round that touches many clauses saves little.
 - **Redline ids written before this increment stay scoped to their version.** Their decisions still
   apply to the round that made them and carry forward from the next round on; there is no migration.
