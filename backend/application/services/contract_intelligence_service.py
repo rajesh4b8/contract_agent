@@ -151,7 +151,13 @@ class ContractIntelligenceService:
             # both to save the model call and because re-running it risks a
             # slightly different answer on identical text, which would read as a
             # change the counterparty never made.
-            reusable = await asyncio.to_thread(
+            #
+            # Skipped entirely when the profile read failed. Falling back to
+            # default boundaries while reusing hashes computed under the stored
+            # ones compares two different divisions of the document: findings
+            # would be carried onto chunks that are not the chunks they came
+            # from. Analysing everything is always correct, only slower.
+            reusable = None if profile_error else await asyncio.to_thread(
                 self._reusable_findings, tenant_id, contract_id
             )
 
@@ -267,22 +273,30 @@ class ContractIntelligenceService:
             report = service.windows_needing_analysis(
                 tenant_id, matter["matter_ref"], previous["version_id"], contract_id
             )
-            if not report.comparable or not report.unchanged_hashes:
+            if not report.comparable or not report.unchanged:
                 return None
 
             stored = self.get_stored_analysis(previous["version_id"], tenant_id) or {}
-            findings = [
-                clause for clause in (stored.get("results", {}).get("clauses") or [])
-                if clause.get("source_chunk") in report.unchanged_hashes
-            ]
-            if not findings:
+            if stored.get("analysis_status") != AnalysisStatus.COMPLETE.value:
+                # A previous round that never finished has nothing trustworthy
+                # to carry, and its gaps would read as clauses with no findings.
                 return None
 
+            findings = [
+                clause for clause in (stored.get("results", {}).get("clauses") or [])
+                if (clause.get("source_chunk"),
+                    clause.get("source_chunk_order")) in report.unchanged
+            ]
+
+            # An empty list is a perfectly good answer: a clean contract has no
+            # findings, and returning None here sent every window of an
+            # unchanged clean round back to the model — the no-op path not
+            # applying to exactly the contracts that need nothing done.
             logger.info(
-                f"{contract_id}: {len(report.unchanged_hashes)} chunks unchanged since "
-                f"version {previous['n']}; carrying {len(findings)} findings forward"
+                f"{contract_id}: {len(report.unchanged)} chunk occurrences unchanged "
+                f"since version {previous['n']}; carrying {len(findings)} findings forward"
             )
-            return {"unchanged_hashes": report.unchanged_hashes, "findings": findings}
+            return {"unchanged_chunks": report.unchanged, "findings": findings}
         except Exception as e:
             # Analysing everything is always correct; it is only slower.
             logger.warning(f"Could not reuse the previous round for {contract_id}: {e}")
@@ -800,7 +814,13 @@ class ContractIntelligenceService:
         except Exception as e:
             logger.warning(f"Could not resolve the matter for {contract_id}: {e}")
             return contract_id
-        return matter["matter_ref"] if matter else contract_id
+        # Prefixed with the tenant. Reference numbers are allocated *per
+        # tenant*, so two tenants can both hold MSA-2026-0001 — and with the
+        # `redline_id` uniqueness constraint being global, the second tenant to
+        # analyse the same clause under the same rule would fail on it. The
+        # version ids this replaced were globally random, so the collision is
+        # new with the matter scoping.
+        return f"{tenant_id}|{matter['matter_ref']}" if matter else contract_id
 
     @staticmethod
     def _redline_id(contract_id: str, redline) -> str:

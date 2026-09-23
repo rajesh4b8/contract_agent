@@ -112,8 +112,21 @@ const ChangeRow: React.FC<{ change: Change }> = ({ change }) => {
  */
 export const ChangeReport: React.FC<ChangeReportProps> = ({ matterRef, versions }) => {
   const numbers = versions.map((v) => v.n);
-  const [to, setTo] = useState<number | undefined>(numbers[numbers.length - 1]);
-  const [from, setFrom] = useState<number | undefined>(numbers[numbers.length - 2]);
+  const latest = numbers[numbers.length - 1];
+  const [to, setTo] = useState<number>(latest);
+  const [from, setFrom] = useState<number>(numbers[numbers.length - 2]);
+
+  // A new round arrives by `refresh()` updating `versions` in place, without
+  // remounting this component — so without following it, the page goes on
+  // comparing the pair that were the latest two when it first rendered.
+  useEffect(() => {
+    if (!numbers.includes(to) || to !== latest) {
+      setTo(latest);
+      setFrom(numbers[numbers.length - 2]);
+    }
+    // Only when the set of versions itself changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [versions.length, latest]);
   const [report, setReport] = useState<Report | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -142,14 +155,27 @@ export const ChangeReport: React.FC<ChangeReportProps> = ({ matterRef, versions 
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h2 className="text-lg font-semibold text-slate-800">What changed</h2>
           <div className="flex items-center gap-2 text-sm text-slate-600">
+            {/* A version cannot be compared with itself — the server answers
+                404 — so the other selector's choice is not offered here. An
+                ordinary click should never produce an error state. */}
             <span>from</span>
-            <select className={select} value={from ?? ''}
+            <select className={select} value={from}
                     onChange={(e) => setFrom(Number(e.target.value))}>
-              {numbers.map((n) => <option key={n} value={n}>version {n}</option>)}
+              {numbers.filter((n) => n !== to).map((n) => (
+                <option key={n} value={n}>version {n}</option>
+              ))}
             </select>
             <span>to</span>
-            <select className={select} value={to ?? ''}
-                    onChange={(e) => setTo(Number(e.target.value))}>
+            <select className={select} value={to}
+                    onChange={(e) => {
+                      const next = Number(e.target.value);
+                      setTo(next);
+                      // Keep the pair valid rather than letting it collide.
+                      if (next === from) {
+                        const other = numbers.filter((n) => n !== next);
+                        setFrom(other[other.length - 1] ?? next);
+                      }
+                    }}>
               {numbers.map((n) => <option key={n} value={n}>version {n}</option>)}
             </select>
           </div>

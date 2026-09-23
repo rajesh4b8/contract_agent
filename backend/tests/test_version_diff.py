@@ -51,13 +51,13 @@ class TestNothingChanged:
 
         assert not report.has_substantive_changes
         assert report.summary["unchanged"] == 3
-        assert report.changed_hashes == set()
+        assert report.changed == set()
 
     def test_and_every_chunk_is_reusable(self):
         """Which is what makes the re-analysis incremental."""
         report = diff_versions(version("a", "b", "c"), version("a", "b", "c"))
 
-        assert report.unchanged_hashes == {"a", "b", "c"}
+        assert report.unchanged == {("a", 0), ("b", 1), ("c", 2)}
 
 
 class TestAClauseRewritten:
@@ -185,7 +185,7 @@ class TestTheAutojunkTrap:
         report = diff_versions(version(*self.OLD), version(*self.NEW),
                                similarity=lambda o, n: 0.9)
 
-        assert report.changed_hashes == {"payment-30"}
+        assert report.changed == {("payment-30", 250)}
 
 
 class TestRefusingToDiffTheIncomparable:
@@ -245,8 +245,8 @@ class TestRefusingToDiffTheIncomparable:
             current_profile=ChunkingProfile(chunker_version=99),
         )
 
-        assert report.changed_hashes == {"x", "y"}
-        assert report.unchanged_hashes == set()
+        assert report.changed == {("x", 0), ("y", 1)}
+        assert report.unchanged == set()
 
 
 class TestTheFirstRound:

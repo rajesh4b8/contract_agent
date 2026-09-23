@@ -158,7 +158,7 @@ class IntelligenceOrchestrator:
             reusable = state.get("reusable") or {}
             tool = ClauseDetectorTool(
                 llm=self.llm, chunking_profile=state.get("chunking_profile"),
-                unchanged_hashes=reusable.get("unchanged_hashes"),
+                unchanged_chunks=reusable.get("unchanged_chunks"),
                 carried_findings=reusable.get("findings"),
             )
             clauses_json = tool._run(state["contract_text"])

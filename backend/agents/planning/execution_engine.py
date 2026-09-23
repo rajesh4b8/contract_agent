@@ -251,7 +251,7 @@ class StepExecutor:
         # The previous round's findings for chunks that did not change, so the
         # windows holding them are skipped rather than re-asked.
         reusable = context.get("reusable") or {}
-        tool.unchanged_hashes = reusable.get("unchanged_hashes")
+        tool.unchanged_chunks = reusable.get("unchanged_chunks")
         tool.carried_findings = reusable.get("findings")
         clauses, coverage = parse_clause_result(tool._run(contract_text))
         # The planning path's warnings come only from failed *steps*, so a run

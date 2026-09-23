@@ -135,12 +135,16 @@ class ClauseDetectorTool(BaseTool):
     #: quietly wrong.
     chunking_profile: Any = None
 
-    #: Chunk hashes whose findings are already known and correct, from the
-    #: previous round. A window built entirely from these is skipped: its text
-    #: has not changed, so re-analysing it would spend a model call to be told
-    #: the same thing — and risk being told something slightly different, which
-    #: would look like a change the counterparty did not make.
-    unchanged_hashes: Any = None
+    #: Chunk occurrences — `(hash, order)` — whose findings are already known
+    #: and correct, from the previous round. A window built entirely from these
+    #: is skipped: its text has not changed, so re-analysing it would spend a
+    #: model call to be told the same thing — and risk being told something
+    #: slightly different, which would look like a change the counterparty did
+    #: not make.
+    #:
+    #: Occurrences, not hashes: a contract can carry the same paragraph twice,
+    #: and one of the two changing must not mark both as reusable.
+    unchanged_chunks: Any = None
 
     #: Findings carried forward for those windows, so the result is still a
     #: review of the whole contract rather than of its changed parts.
@@ -173,12 +177,25 @@ class ClauseDetectorTool(BaseTool):
             logger.info("No text to extract clauses from")
             return json.dumps([])
 
-        # Windows whose every chunk is unchanged since the previous round.
-        unchanged = set(self.unchanged_hashes or ())
-        to_analyse = [
-            w for w in windows
-            if not unchanged or not set(w.chunk_hashes).issubset(unchanged)
-        ]
+        # Windows whose every chunk occurrence is unchanged since the previous
+        # round. Packing is contiguous, so a window's orders run from
+        # `first_order` and pair with its hashes positionally.
+        unchanged = set(self.unchanged_chunks or ())
+
+        def window_keys(window) -> set:
+            return {
+                (digest, window.first_order + offset)
+                for offset, digest in enumerate(window.chunk_hashes)
+            }
+
+        skipped_keys: set = set()
+        to_analyse = []
+        for window in windows:
+            keys = window_keys(window)
+            if unchanged and keys.issubset(unchanged):
+                skipped_keys |= keys
+            else:
+                to_analyse.append(window)
         skipped = len(windows) - len(to_analyse)
 
         logger.info(
@@ -200,7 +217,10 @@ class ClauseDetectorTool(BaseTool):
             # Nothing changed at all. Every finding is carried forward, and the
             # coverage is complete because the whole document is accounted for.
             return json.dumps({
-                "clauses": list(self.carried_findings or []),
+                "clauses": [
+                    f for f in (self.carried_findings or [])
+                    if (f.get("source_chunk"), f.get("source_chunk_order")) in skipped_keys
+                ],
                 "coverage": {"windows": len(windows), "failed": 0, "complete": True,
                              "skipped": skipped},
             })
@@ -278,11 +298,16 @@ class ClauseDetectorTool(BaseTool):
         # returned nothing produced an empty list with no marker anywhere —
         # indistinguishable from a clean contract, which is the single worst
         # thing this pipeline can report.
-        # Findings for the windows that were skipped, so the result describes
-        # the whole contract rather than only the part that moved.
+        # Findings for the windows that were **skipped**, and only those.
+        #
+        # Filtering on "unchanged" alone carried forward the old findings for
+        # unchanged chunks that sit inside a window the model just re-analysed
+        # — so the same clause arrived twice, once carried and once freshly
+        # extracted, and the stale copy kept the previous round's position.
         carried = [
             finding for finding in (self.carried_findings or [])
-            if finding.get("source_chunk") in unchanged
+            if (finding.get("source_chunk"),
+                finding.get("source_chunk_order")) in skipped_keys
         ]
 
         return json.dumps({

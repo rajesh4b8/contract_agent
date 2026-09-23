@@ -104,8 +104,12 @@ class ChangeReportService:
             )
             step.set(comparable=report.comparable, **report.summary)
 
-        text_by_hash = {c.hash: c.text for c in previous}
-        text_by_hash.update({c.hash: c.text for c in current})
+        # Keyed on the occurrence, not the hash. Two copies of one paragraph
+        # share a hash, and `INCLUDES.text` is per-version, so a hash-keyed map
+        # lets one version's rendering overwrite the other's — and `from_text`
+        # then shows the text the clause was changed *to*.
+        previous_text = {(c.hash, c.order): c.text for c in previous}
+        current_text = {(c.hash, c.order): c.text for c in current}
 
         findings = self._findings_by_chunk(tenant_id, later_id)
         previous_findings = self._findings_by_chunk(tenant_id, earlier_id)
@@ -118,46 +122,55 @@ class ChangeReportService:
             "reason": report.incomparable_reason,
             "summary": report.summary,
             "changes": [
-                self._render(change, text_by_hash, findings, previous_findings)
+                self._render(change, previous_text, current_text,
+                             findings, previous_findings)
                 for change in report.changes
                 # An unchanged chunk is the majority of any contract and is not
                 # what the reviewer opened this page for. It is counted in the
                 # summary and left out of the list.
                 if change.kind is not ChangeKind.UNCHANGED
             ],
-            "unchanged": len(report.unchanged_hashes),
+            "unchanged": len(report.unchanged),
         }
 
     @staticmethod
-    def _render(change: Change, text_by_hash: Dict[str, str],
-                findings: Dict[str, List[dict]],
-                previous_findings: Dict[str, List[dict]]) -> Dict[str, Any]:
+    def _render(change: Change,
+                previous_text: Dict[tuple, str], current_text: Dict[tuple, str],
+                findings: Dict[tuple, List[dict]],
+                previous_findings: Dict[tuple, List[dict]]) -> Dict[str, Any]:
         """One change, with the text on both sides and the findings on it.
 
         Both texts, for every kind that has two. A word-level diff is only
         possible with the before and the after, and a reviewer reading "modified"
         needs to see what modified means.
+
+        Every lookup is by `(hash, order)`. A repeated clause has one hash and
+        several occurrences, and a hash-keyed lookup attaches one occurrence's
+        findings — and one version's wording — to all of them.
         """
+        from_key = (change.from_hash, change.from_order)
+        to_key = (change.to_hash, change.to_order)
         return {
             "kind": change.kind.value,
             "heading": change.heading,
             "from_order": change.from_order,
             "to_order": change.to_order,
-            "from_text": text_by_hash.get(change.from_hash or "", ""),
-            "to_text": text_by_hash.get(change.to_hash or "", ""),
+            "from_text": previous_text.get(from_key, ""),
+            "to_text": current_text.get(to_key, ""),
             "similarity": change.similarity,
             "needs_review": change.is_substantive,
             # What the analysis says about this text now, and what it said
             # before — which is how "did they accept our redline?" gets answered.
-            "findings": findings.get(change.to_hash or "", []),
-            "previous_findings": previous_findings.get(change.from_hash or "", []),
+            "findings": findings.get(to_key, []),
+            "previous_findings": previous_findings.get(from_key, []),
         }
 
-    def _findings_by_chunk(self, tenant_id: str, version_id: str) -> Dict[str, List[dict]]:
-        """The stored findings, grouped by the chunk they came from.
+    def _findings_by_chunk(self, tenant_id: str, version_id: str) -> Dict[tuple, List[dict]]:
+        """The stored findings, grouped by the chunk occurrence they came from.
 
-        Increment 8 stamps every finding with `source_chunk`; this is the first
-        thing to read it, and the reason it exists.
+        Increment 8 stamps every finding with `source_chunk` and
+        `source_chunk_order`; this is the first thing to read them, and the
+        reason both exist.
         """
         try:
             rows = self.chunks.graph.query(
@@ -165,7 +178,8 @@ class ChangeReportService:
                 MATCH (c:Contract {file_id: $version_id, tenant_id: $tenant_id})
                       -[:HAS_FINDING]->(f:ClauseFinding)
                 WHERE f.source_chunk IS NOT NULL
-                RETURN f.source_chunk AS chunk, f.clause_type AS clause_type,
+                RETURN f.source_chunk AS chunk, f.source_chunk_order AS chunk_order,
+                       f.clause_type AS clause_type,
                        f.risk_level AS risk_level, f.violated_policy AS violated_policy,
                        f.evidence_span AS evidence_span
                 ORDER BY f.position
@@ -177,9 +191,11 @@ class ChangeReportService:
             logger.warning(f"Could not load findings for {version_id}: {e}")
             return {}
 
-        grouped: Dict[str, List[dict]] = {}
+        grouped: Dict[tuple, List[dict]] = {}
         for row in rows:
-            grouped.setdefault(row["chunk"], []).append({
+            order = row.get("chunk_order")
+            grouped.setdefault((row["chunk"], int(order) if order is not None else None),
+                               []).append({
                 "clause_type": row.get("clause_type"),
                 "risk_level": row.get("risk_level"),
                 "violated_policy": row.get("violated_policy"),
@@ -191,7 +207,7 @@ class ChangeReportService:
                                  earlier_id: str, later_id: str) -> ChangeReport:
         """The diff, for deciding what to re-analyse rather than for reading.
 
-        `report.changed_hashes` is the work list: a window whose chunks are all
+        `report.changed` is the work list: a window whose chunks are all
         unchanged has nothing new to say, and its findings — and the decisions
         made on them — carry forward untouched.
         """

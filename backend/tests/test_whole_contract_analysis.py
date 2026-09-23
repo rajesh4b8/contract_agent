@@ -731,26 +731,34 @@ class TestOnlyChangedWindowsAreReAnalysed:
     were: chunk identity makes "unchanged" decidable, per-finding provenance
     makes the carried findings addressable.
 
+    Reuse is keyed on the **occurrence** — `(hash, order)` — not the hash. A
+    contract can carry the same paragraph twice, and one of the two changing
+    must not mark both as reusable.
+
     Skipping is not only cheaper. Re-running a model over identical text risks a
     slightly different answer, which on a change report reads as an edit the
     counterparty never made.
     """
 
-    def _carried(self, chunked, count=2):
+    @staticmethod
+    def keys(window):
+        return {(h, window.first_order + i) for i, h in enumerate(window.chunk_hashes)}
+
+    def _carried(self, window, count=2):
         return [
-            {"clause_type": "Payment Terms", "evidence_span": c.content[:40],
-             "risk_level": "LOW", "source_chunk": c.hash, "source_window": 0}
-            for c in chunked.chunks[:count]
+            {"clause_type": "Payment Terms", "evidence_span": f"finding {i}",
+             "risk_level": "LOW", "source_chunk": h, "source_chunk_order": o,
+             "source_window": window.index}
+            for i, (h, o) in enumerate(sorted(self.keys(window))[:count])
         ]
 
     def test_an_unchanged_window_is_not_sent_to_the_model(self):
         text = contract(sections=40)
-        chunked = identify_chunks(text)
-        windows = pack_windows(chunked.chunks)
-        first = set(windows[0].chunk_hashes)
+        windows = pack_windows(identify_chunks(text).chunks)
         llm = RecordingLLM()
 
-        ClauseDetectorTool(llm=llm, unchanged_hashes=first, carried_findings=[])._run(text)
+        ClauseDetectorTool(llm=llm, unchanged_chunks=self.keys(windows[0]),
+                           carried_findings=[])._run(text)
 
         assert len(llm.prompts) == len(windows) - 1
 
@@ -758,37 +766,56 @@ class TestOnlyChangedWindowsAreReAnalysed:
         """One changed chunk makes the whole window worth re-reading."""
         text = contract(sections=40)
         windows = pack_windows(identify_chunks(text).chunks)
-        all_but_one = set(windows[0].chunk_hashes[:-1])
+        all_but_one = set(sorted(self.keys(windows[0]))[:-1])
         llm = RecordingLLM()
 
-        ClauseDetectorTool(llm=llm, unchanged_hashes=all_but_one,
+        ClauseDetectorTool(llm=llm, unchanged_chunks=all_but_one,
                            carried_findings=[])._run(text)
 
         assert len(llm.prompts) == len(windows)
 
+    def test_a_re_analysed_windows_findings_are_not_also_carried(self):
+        """Filtering on "unchanged" alone carried the old findings for unchanged
+        chunks *inside* a window the model had just re-analysed — so the same
+        clause arrived twice, once carried and once freshly extracted, and the
+        stale copy kept the previous round's position."""
+        text = contract(sections=40)
+        windows = pack_windows(identify_chunks(text).chunks)
+        # Every chunk of window 1 is unchanged except one, so the window runs —
+        # but its unchanged chunks are still in the reusable set.
+        unchanged = self.keys(windows[0]) | set(sorted(self.keys(windows[1]))[:-1])
+        carried = self._carried(windows[1])
+        llm = RecordingLLM()
+
+        clauses, _ = parse_clause_result(ClauseDetectorTool(
+            llm=llm, unchanged_chunks=unchanged, carried_findings=carried,
+        )._run(text))
+
+        assert all(c.get("evidence_span") not in {"finding 0", "finding 1"}
+                   for c in clauses), "a re-analysed window's old findings came too"
+
     def test_the_skipped_windows_findings_are_carried_forward(self):
         """Otherwise the result would describe only the part that moved."""
         text = contract(sections=40)
-        chunked = identify_chunks(text)
-        windows = pack_windows(chunked.chunks)
-        carried = self._carried(chunked)
+        windows = pack_windows(identify_chunks(text).chunks)
+        carried = self._carried(windows[0])
         llm = RecordingLLM()
 
         clauses, _coverage = parse_clause_result(ClauseDetectorTool(
-            llm=llm, unchanged_hashes=set(windows[0].chunk_hashes),
-            carried_findings=carried,
+            llm=llm, unchanged_chunks=self.keys(windows[0]), carried_findings=carried,
         )._run(text))
 
         assert [c["evidence_span"] for c in clauses] == [c["evidence_span"] for c in carried]
 
     def test_nothing_changed_at_all_costs_no_model_call(self):
         text = contract(sections=40)
-        chunked = identify_chunks(text)
-        carried = self._carried(chunked)
+        windows = pack_windows(identify_chunks(text).chunks)
+        everything = set().union(*(self.keys(w) for w in windows))
+        carried = self._carried(windows[0])
         llm = RecordingLLM()
 
         clauses, coverage = parse_clause_result(ClauseDetectorTool(
-            llm=llm, unchanged_hashes=set(chunked.hashes), carried_findings=carried,
+            llm=llm, unchanged_chunks=everything, carried_findings=carried,
         )._run(text))
 
         assert llm.prompts == []
@@ -807,18 +834,33 @@ class TestOnlyChangedWindowsAreReAnalysed:
     def test_a_carried_finding_for_a_chunk_that_did_change_is_dropped(self):
         """It described text that is no longer there."""
         text = contract(sections=40)
-        chunked = identify_chunks(text)
-        windows = pack_windows(chunked.chunks)
+        windows = pack_windows(identify_chunks(text).chunks)
         stale = [{"clause_type": "X", "evidence_span": "gone",
-                  "source_chunk": "a-hash-this-version-does-not-have"}]
+                  "source_chunk": "a-hash-this-version-does-not-have",
+                  "source_chunk_order": 999}]
         llm = RecordingLLM()
 
         clauses, _ = parse_clause_result(ClauseDetectorTool(
-            llm=llm, unchanged_hashes=set(windows[0].chunk_hashes),
-            carried_findings=stale,
+            llm=llm, unchanged_chunks=self.keys(windows[0]), carried_findings=stale,
         )._run(text))
 
         assert all(c.get("evidence_span") != "gone" for c in clauses)
+
+    def test_one_of_two_identical_paragraphs_changing_does_not_reuse_both(self):
+        """They share a hash and are told apart only by position."""
+        text = contract(sections=40)
+        windows = pack_windows(identify_chunks(text).chunks)
+        keys = sorted(self.keys(windows[0]))
+        # The same hash at a different order is a different occurrence.
+        pretend = {(keys[0][0], keys[0][1])}
+        llm = RecordingLLM()
+
+        ClauseDetectorTool(llm=llm, unchanged_chunks=pretend,
+                           carried_findings=[])._run(text)
+
+        assert len(llm.prompts) == len(windows), (
+            "one unchanged occurrence marked a whole window reusable"
+        )
 
     def test_the_coverage_reports_what_was_skipped(self):
         text = contract(sections=40)
@@ -826,8 +868,7 @@ class TestOnlyChangedWindowsAreReAnalysed:
         llm = RecordingLLM()
 
         _clauses, coverage = parse_clause_result(ClauseDetectorTool(
-            llm=llm, unchanged_hashes=set(windows[0].chunk_hashes),
-            carried_findings=[],
+            llm=llm, unchanged_chunks=self.keys(windows[0]), carried_findings=[],
         )._run(text))
 
         assert coverage["skipped"] == 1

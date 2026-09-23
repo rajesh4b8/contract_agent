@@ -67,13 +67,28 @@ class Change:
         return self.kind in (ChangeKind.MODIFIED, ChangeKind.ADDED, ChangeKind.REMOVED)
 
 
+#: How a chunk is identified between versions: content **and position**.
+#:
+#: The hash alone is not an occurrence. `ChunkRepository` stores repeated
+#: identical text as one `(:Chunk)` with several `INCLUDES {order}`
+#: relationships, so a contract carrying the same notice provision in two
+#: schedules has one hash and two occurrences. Keyed on the hash, a change to
+#: one of them marks both as changed — or worse, leaves both marked unchanged
+#: and carries the stale finding forward onto the one that moved.
+Occurrence = tuple  # (hash, order)
+
+
+def occurrence(chunk) -> Occurrence:
+    return (chunk.hash, chunk.order)
+
+
 @dataclass
 class ChangeReport:
     changes: List[Change] = field(default_factory=list)
-    #: Chunks whose analysis can be reused wholesale, by hash.
-    unchanged_hashes: set = field(default_factory=set)
-    #: Hashes that are new to this version and must be analysed.
-    changed_hashes: set = field(default_factory=set)
+    #: Occurrences whose analysis can be reused wholesale.
+    unchanged: set = field(default_factory=set)
+    #: Occurrences that are new to this version and must be analysed.
+    changed: set = field(default_factory=set)
     #: Set when the two versions were chunked under different rules, which makes
     #: their hashes incomparable and every "change" below meaningless.
     comparable: bool = True
@@ -152,7 +167,7 @@ def diff_versions(
     if not comparable:
         return ChangeReport(
             changes=[], comparable=False, incomparable_reason=reason,
-            changed_hashes={c.hash for c in current},
+            changed={occurrence(c) for c in current},
         )
 
     previous = list(previous)
@@ -174,7 +189,9 @@ def diff_versions(
         if tag == "equal":
             for offset in range(i2 - i1):
                 old, new = previous[i1 + offset], current[j1 + offset]
-                unchanged.add(old.hash)
+                # The occurrence in the *new* version, because that is what the
+                # next analysis will be looking at.
+                unchanged.add(occurrence(new))
                 changes.append(Change(
                     kind=ChangeKind.UNCHANGED,
                     from_order=old.order, to_order=new.order,
@@ -189,9 +206,8 @@ def diff_versions(
             changes.extend(_replaced(previous[i1:i2], current[j1:j2], similarity))
 
     changes = _fold_moves(changes)
-    changed = {c.hash for c in current} - unchanged
-    return ChangeReport(changes=changes, unchanged_hashes=unchanged,
-                        changed_hashes=changed)
+    changed = {occurrence(c) for c in current} - unchanged
+    return ChangeReport(changes=changes, unchanged=unchanged, changed=changed)
 
 
 def _removed(chunks: Sequence) -> List[Change]:
@@ -242,33 +258,46 @@ def _replaced(old_chunks: Sequence, new_chunks: Sequence,
 
 
 def _fold_moves(changes: List[Change]) -> List[Change]:
-    """A hash that is both removed and added has moved, not changed.
+    """Text that leaves one place and appears in another has moved.
 
-    Identical text in a new position. Reporting it as a deletion and an
-    insertion buries a real negotiation signal — a relocated indemnity clause is
-    something a reviewer wants to know about — under two entries that each look
-    like something it is not.
+    Reporting that as a deletion and an insertion buries a real negotiation
+    signal — a relocated indemnity clause is something a reviewer wants to know
+    about — under two entries that each look like something it is not.
+
+    Paired **one removal to one addition**. Three identical paragraphs deleted
+    and two re-inserted is two moves and one genuine deletion; collapsing by
+    hash reported one move and lost the rest, along with their positions.
     """
-    removed = {c.from_hash: c for c in changes if c.kind is ChangeKind.REMOVED}
-    added = {c.to_hash: c for c in changes if c.kind is ChangeKind.ADDED}
-    moved_hashes = set(removed) & set(added)
-    if not moved_hashes:
+    removals: Dict[str, List[Change]] = {}
+    additions: Dict[str, List[Change]] = {}
+    for change in changes:
+        if change.kind is ChangeKind.REMOVED:
+            removals.setdefault(change.from_hash, []).append(change)
+        elif change.kind is ChangeKind.ADDED:
+            additions.setdefault(change.to_hash, []).append(change)
+
+    #: Which removal pairs with which addition, by identity of the Change.
+    pairs: Dict[int, Change] = {}
+    consumed: set = set()
+    for digest, removed_list in removals.items():
+        for removed, added in zip(removed_list, additions.get(digest, [])):
+            pairs[id(removed)] = added
+            consumed.add(id(added))
+
+    if not pairs:
         return changes
 
     folded: List[Change] = []
-    emitted: set = set()
     for change in changes:
-        digest = change.from_hash if change.kind is ChangeKind.REMOVED else change.to_hash
-        if change.kind in (ChangeKind.REMOVED, ChangeKind.ADDED) and digest in moved_hashes:
-            if digest in emitted:
-                continue
-            emitted.add(digest)
+        if id(change) in consumed:
+            continue                       # emitted as part of its move
+        partner = pairs.get(id(change))
+        if partner is not None:
             folded.append(Change(
                 kind=ChangeKind.MOVED,
-                from_order=removed[digest].from_order,
-                to_order=added[digest].to_order,
-                from_hash=digest, to_hash=digest,
-                heading=added[digest].heading or removed[digest].heading,
+                from_order=change.from_order, to_order=partner.to_order,
+                from_hash=change.from_hash, to_hash=partner.to_hash,
+                heading=partner.heading or change.heading,
             ))
             continue
         folded.append(change)

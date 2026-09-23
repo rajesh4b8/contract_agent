@@ -120,7 +120,7 @@ class TestFindingsTravelWithTheChange:
         svc = service(
             members(("a", "Net ninety (90) days.")),
             members(("b", "Net thirty (30) days.")),
-            findings=[{"chunk": "b", "clause_type": "Payment Terms",
+            findings=[{"chunk": "b", "chunk_order": 0, "clause_type": "Payment Terms",
                        "risk_level": "LOW", "violated_policy": None,
                        "evidence_span": "Net thirty (30) days."}],
         )
@@ -285,7 +285,9 @@ class TestADecisionIsMadeOnceNotEveryRound:
         second = svc._redline_id(svc._redline_scope("V-2", "acme"), redline)
 
         assert first == second, "round 2 would ask for the decision again"
-        assert first.startswith("MSA-2026-0042")
+        assert first.startswith("acme|MSA-2026-0042"), (
+            "reference numbers are per tenant, so the id must be too"
+        )
 
     def test_an_unfiled_version_falls_back_to_its_own_id(self):
         """It has no matter yet, so there is nothing to be stable across."""
@@ -326,3 +328,34 @@ class TestADecisionIsMadeOnceNotEveryRound:
                    if "NOT r.redline_id IN $current_ids" in c.args[0]][0]
         assert "DELETE link" in cleanup
         assert "WHERE NOT (:Contract)-[:HAS_REDLINE]->(r)" in cleanup
+
+
+class TestTheChangeReportUi:
+    """Static checks, as `test_frontend_navigation.py` does — `make test` stays
+    Python-only and these are two bugs a reviewer would hit on their first
+    click."""
+
+    @staticmethod
+    def _source():
+        import pathlib
+
+        return (pathlib.Path(__file__).resolve().parents[2] / "frontend" / "src"
+                / "components/features/matters/ChangeReport.tsx").read_text()
+
+    def test_a_version_cannot_be_compared_with_itself(self):
+        """The server answers 404, so an ordinary click would put the page into
+        an error state."""
+        source = self._source()
+
+        assert "numbers.filter((n) => n !== to)" in source
+
+    def test_choosing_a_colliding_pair_repairs_itself(self):
+        assert "if (next === from)" in self._source()
+
+    def test_it_follows_a_newly_uploaded_round(self):
+        """A new round arrives by `refresh()` updating `versions` in place,
+        without remounting — so without this the page goes on comparing the pair
+        that were the latest two when it first rendered."""
+        source = self._source()
+
+        assert "[versions.length, latest]" in source
