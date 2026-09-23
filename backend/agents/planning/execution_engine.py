@@ -248,6 +248,11 @@ class StepExecutor:
         # and the traditional path would attribute findings to different chunks
         # for the same document.
         tool.chunking_profile = context.get("chunking_profile")
+        # The previous round's findings for chunks that did not change, so the
+        # windows holding them are skipped rather than re-asked.
+        reusable = context.get("reusable") or {}
+        tool.unchanged_chunks = reusable.get("unchanged_chunks")
+        tool.carried_findings = reusable.get("findings")
         clauses, coverage = parse_clause_result(tool._run(contract_text))
         # The planning path's warnings come only from failed *steps*, so a run
         # where some windows failed but the step succeeded was reported complete
@@ -468,7 +473,8 @@ class PlanExecutionEngine:
     async def execute_plan(self, plan: ExecutionPlan, contract_text: str,
                            tenant_id: str = "default-tenant",
                            contract_type: str = "general",
-                           chunking_profile: Any = None) -> Dict[str, Any]:
+                           chunking_profile: Any = None,
+                           reusable: Any = None) -> Dict[str, Any]:
         """Execute the complete analysis plan"""
         logger.info(f"🚀 EXEC STEP 1: Starting plan execution {plan.plan_id} with {len(plan.steps)} steps")
         logger.info(f"🚀 EXEC STEP 2: Contract text length: {len(contract_text)} characters")
@@ -488,6 +494,7 @@ class PlanExecutionEngine:
             # The version's own chunking, so this path windows the document the
             # same way the traditional one does and the stored membership did.
             "chunking_profile": chunking_profile,
+            "reusable": reusable,
             # Which playbook the policy step checks against.
             "tenant_id": tenant_id,
             "contract_type": contract_type,

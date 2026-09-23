@@ -5,6 +5,7 @@ import { Badge } from '../components/shared/ui/badge';
 import { Loader } from '../components/shared/ui/loader';
 import { AlertTriangle, ArrowLeft, Clock, RefreshCw } from 'lucide-react';
 import { ContractIntelligence } from '../components/features/intelligence/ContractIntelligence';
+import { ChangeReport } from '../components/features/matters/ChangeReport';
 import { ModelPicker } from '../components/features/contracts/ModelPicker';
 import { FileDropZone } from '../components/features/contracts/FileDropZone';
 import { DebugEventPanel } from '../components/features/debug/DebugEventPanel';
@@ -328,6 +329,12 @@ export const MatterPage: React.FC<MatterPageProps> = ({ matterRef, onBack, onOpe
           </div>
         </div>
       </Card>
+
+      {/* What changed since last round — the question this whole system exists
+          to answer, and only askable once there are two rounds to compare. */}
+      {matter.versions.length > 1 && (
+        <ChangeReport matterRef={matter.matter_ref} versions={matter.versions} />
+      )}
 
       {version && (
         <Card className="bg-white border-slate-200 shadow-sm">

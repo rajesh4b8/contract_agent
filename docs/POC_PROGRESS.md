@@ -1,15 +1,15 @@
 # POC Progress Tracker
 
-**Resume point: Increment 9 — `specified, not started`.**
-Increments 0–8 are accepted. Increment 9's specification is complete; it is the last one planned.
+**Resume point: Increment 9 — `awaiting your test`.**
+Increments 0–8 are accepted. Increment 9 is built — the last one planned.
 
 Still awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
 (out-of-increment bug fix, from your report of an unexplained "processing error") and
 **[Debug — a live timeline of what the pipeline is doing](#debug--a-live-timeline-of-what-the-pipeline-is-doing)**
 (out-of-increment, from your report that uploads take a long time with nothing on screen to say why).
 
-**Increment 9 remains specified and ready to build** — the cross-version change report, and the
-last increment in this plan.
+**Increment 9 is built and waiting on you** — the cross-version change report, and the last
+increment in this plan.
 
 Two sections are worth knowing about before starting anything:
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) (settled — what this
@@ -44,7 +44,7 @@ produced it; this file is what you and I actually work from.
 | 6 | Multiple contracts, each resumable | accepted |
 | 7 | Content-addressed chunks | accepted |
 | 8 | Analyse the whole contract | accepted |
-| 9 | Incremental re-analysis and the change report | **specified — not started** |
+| 9 | Incremental re-analysis and the change report | **awaiting your test** |
 
 ---
 
@@ -2034,7 +2034,7 @@ _(write here)_
 
 ## Increment 9 — Incremental re-analysis and the change report
 
-**Status: `specified — not started`.** The payoff of the
+**Status: `awaiting your test`.** Built 2026-09-22. The payoff of the
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) decision.
 
 **Goal:** answer the question a legal team actually asks — *what changed since last round, and did
@@ -2058,6 +2058,135 @@ the counterparty accept our redline?* Nothing else on the market does this well.
   `_redline_id` already keys on a hash of normalised clause text, so re-keying it on `matter_ref`
   instead of `contract_id` is most of the work.
 - **`GET /api/matters/{ref}/changes?from=2&to=3`** and the UI that renders it.
+
+### What changed
+
+**`backend/domain/version_diff.py` is the whole engine**, pure stdlib and no I/O, so every rule in
+it is testable with the database down. `difflib.SequenceMatcher` over the two versions' chunk-hash
+lists does the alignment; everything that matters is the interpretation.
+
+**`autojunk=False` is load-bearing, and now demonstrated rather than asserted.** On a 301-chunk
+document that is mostly one repeated clause with a single real edit, the default aligns **250 of
+301** and reports the other 50 as changed — fifty spurious entries in the report and fifty
+unnecessary re-analyses behind them. With it off: 300 unchanged, 1 modified.
+
+**A `replace` block is classified by similarity** over the embeddings Increment 7 already stores. At
+or above 0.80 it is one MODIFIED clause, rendered with the word-level diff `wordDiff.ts` already
+does. Below, it is a REMOVED plus an ADDED — two entries, so the reviewer sees both texts rather
+than a claimed link nothing checked. A chunk with no usable vector takes the same safe reading.
+
+**Moves are free.** A hash in both the delete and insert sets is a relocation, folded into one MOVED
+entry that is reported but not flagged for re-reading — the words are identical. A relocated
+indemnity clause is a real negotiation signal, and two entries that each look like something else
+would bury it.
+
+**It refuses rather than inventing.** Two rounds chunked under a different strategy, size or
+normaliser version have unrelated hashes, and a diff over them reports the whole contract as
+replaced — confident, detailed and completely false. The report comes back `comparable: false` with
+the reason. A different *extractor* still compares: it makes the diff noisy, not meaningless, and
+refusing because the PDF library changed would help nobody.
+
+**Decisions are made once, not every round.** `_redline_id` is scoped to the **matter** now rather
+than the version, so the same clause breaching the same rule in round 2 is the redline the reviewer
+already ruled on in round 1. Two things fell out of that and both were found on a live database:
+
+- the relationship to the new version was MERGEd *after* `WHERE status = 'PENDING'`, so a redline the
+  reviewer had already **decided** was filtered out and never attached to the new round — round 2
+  showed nothing where round 1 had an approved redline, the exact opposite of carrying it forward;
+- the stale-draft cleanup used `DETACH DELETE`, which on a node now shared between rounds would have
+  rewritten an earlier round's review. It detaches from this version and deletes only a true orphan.
+
+**Incremental re-analysis.** A window whose every chunk is unchanged is skipped and its findings
+carried forward. Not only cheaper: re-running a model over identical text risks a slightly different
+answer, which on a change report reads as an edit the counterparty never made. A contract with
+nothing changed costs **zero** model calls.
+
+This is the first thing to consume Increment 8's per-finding `source_chunk`, and the reason it
+exists — selecting affected findings by matching text would be ambiguous exactly where it matters,
+on wording that repeats.
+
+### How to test
+
+```bash
+make test
+```
+
+789 pass, 3 skipped — offline, no Docker, no Neo4j, no API keys. The diff engine has 36 of its own
+(`test_version_diff.py`), including the `autojunk` demonstration.
+
+With the stack up, on a matter with two or more rounds — `sample-contracts/chunk-reuse/` is built for
+this:
+
+1. Upload `01-round1`, file it, analyse it, and **decide a redline**.
+2. Upload `02-round2-one-clause-edited` into the same matter.
+3. The matter page now shows **What changed**, defaulting to the last two rounds: one reworded
+   clause with the changed words marked, and everything else counted as unchanged.
+4. Upload `03-round3-section-inserted` — the inserted section shows as ADDED and the renumbered
+   clauses after it do **not** show as changed.
+5. Open the redline you decided in step 1. It should still carry your decision, not ask again.
+6. `GET /api/matters/{ref}/changes?from=1&to=3` compares any two rounds directly.
+
+### Addressed in review (Copilot, PR #11)
+
+Eleven findings, all valid. Six of them were one mistake.
+
+Increment 7 established that a chunk's identity is `(hash, order)`: the same paragraph appearing
+three times is one `(:Chunk)` with three `INCLUDES` rows, each carrying its own per-version text.
+Increment 8 fixed provenance to respect that. Increment 9 then keyed the entire diff on the hash
+alone — and the same slip surfaced in six places, each with its own symptom:
+
+| Where | Symptom |
+|---|---|
+| `ChangeReport.unchanged` / `.changed` | one changed occurrence left its twin marked unchanged |
+| `_fold_moves` | 3 removals + 2 insertions collapsed to 1 move, losing 2 entries and their positions |
+| the rendering maps | the later occurrence overwrote the earlier text; `from_text` showed the wrong side |
+| `_findings_by_chunk` | a finding attached to every occurrence sharing its hash |
+| the carry-forward filter | a stale finding carried onto an occurrence that had changed |
+| the reuse keys | provenance mismatched after an insertion shifted orders |
+
+All six are keyed on `(hash, order)` now. Worth naming: `_findings_by_chunk` had to start reading
+`f.source_chunk_order`, a property Increment 8 wrote and **nothing had ever read**. A column written
+and never consumed is a fact that cannot be wrong in testing, which is why this held together.
+
+The other five:
+
+- **Carry-forward now requires a fully skipped window.** `window_keys()` collects every chunk
+  occurrence in a window and the window joins `skipped_keys` only if all of them are unchanged.
+  Before, a window with one changed clause was re-extracted *and* had its old findings appended —
+  stale findings for the part the model did look at.
+- **Reuse is disabled when `profile_error` is set.** The code fell back to default boundaries on an
+  unreadable profile while still reusing hashes computed under the stored one. A profile we could
+  not read is not evidence that the chunking matches.
+- **An empty findings list is a completed analysis.** This was the sharpest of them: the guard
+  treated "no findings" as "nothing stored", so an unchanged *clean* round re-sent every window to
+  the model. The headline claim of this increment — nothing changed costs zero model calls — was
+  false for exactly the contracts that need nothing done.
+- **Redline ids carry the tenant.** References are allocated per tenant; `redline_id_unique` is
+  global. I checked this against a live 5.26 instance instead of reasoning about it: the second
+  tenant to file a redline on `MSA-2026-0001` got `Neo.ClientError.Schema.ConstraintValidationFailed`.
+  Both tenants now store cleanly. The tenant went into the id rather than the constraint becoming
+  composite, because that id is also the logical key the UI and the decision endpoints pass around.
+- **Two UI faults.** Both selectors listed every round, so selecting the same number on each side
+  404'd from an ordinary interaction; and the version pair was seeded once on mount, so uploading a
+  new round left the reviewer looking at the previous comparison.
+
+Verified: `make test` — 794 passed, 3 skipped, offline. Live: the six-check run still passes, plus
+two tenants at the same reference storing redlines without collision, and three identical paragraphs
+removed with two re-inserted now reporting two moves and one genuine deletion.
+
+### Honest limits
+
+- **The similarity threshold is untuned on real contracts.** 0.80 is inherited from the advisory
+  match, where it was measured; here it is a reasonable default that nothing has yet tested against
+  a real round of redlining.
+- **Carry-forward is keyed on the chunk occurrence, so a reworded clause loses its findings** and is re-analysed
+  — correct, but it means a round that touches many clauses saves little.
+- **Redline ids written before this increment stay scoped to their version.** Their decisions still
+  apply to the round that made them and carry forward from the next round on; there is no migration.
+- **The live end-to-end runs used a stubbed embedder**, because the Gemini free tier was returning
+  148s for a single call. The diff, the endpoint, the refusal and the decision carry-forward were all
+  verified against a real Neo4j; what was not re-measured is real embedding similarity on a real
+  round.
 
 ### Your feedback
 

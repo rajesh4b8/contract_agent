@@ -18,6 +18,10 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from backend.application.services.change_report_service import (
+    ChangeReportService,
+    VersionNotInMatter,
+)
 from backend.domain.matter import (
     InvalidTransition,
     MatterStatus,
@@ -218,6 +222,36 @@ async def create_matter(
         "title": title,
         "status": MatterStatus.DRAFT.value,
     }
+
+
+@router.get("/{matter_ref}/changes",
+            dependencies=[Depends(requires_permission(Permission.VIEW_REPORTS))])
+async def get_changes(
+    matter_ref: str,
+    tenant_id: str = Depends(get_current_tenant),
+    from_version: Optional[int] = Query(default=None, alias="from", ge=1),
+    to_version: Optional[int] = Query(default=None, alias="to", ge=1),
+):
+    """What changed between two rounds of this contract.
+
+    The question this system exists to answer. Defaults to the last two rounds,
+    because that is what is being asked nine times out of ten.
+
+    A pair of rounds chunked under different rules is reported as **not
+    comparable**, with the reason, rather than diffed anyway — the hashes are
+    unrelated, so the diff would report the entire contract as replaced. A
+    confident, detailed, completely false answer is worse than a refusal.
+    """
+    if not is_reference(matter_ref):
+        raise HTTPException(status_code=404, detail=f"No matter {matter_ref}")
+
+    service = ChangeReportService(matters=repository)
+    try:
+        return service.compare(tenant_id, matter_ref, from_version, to_version)
+    except VersionNotInMatter as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except LookupError:
+        raise HTTPException(status_code=404, detail=f"No matter {matter_ref}")
 
 
 class AttachVersionRequest(BaseModel):

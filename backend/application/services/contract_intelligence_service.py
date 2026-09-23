@@ -29,7 +29,8 @@ class ContractIntelligenceService:
                                       use_planning: bool = True,
                                       tenant_id: str = "default-tenant",
                                       contract_type: str = "general",
-                                      chunking_profile=None) -> ContractIntelligence:
+                                      chunking_profile=None,
+                                      reusable=None) -> ContractIntelligence:
         """Perform complete contract intelligence analysis using multi-agent system"""
         
         start_time = time.time()
@@ -46,7 +47,7 @@ class ContractIntelligenceService:
                 # Run multi-agent analysis with optional planning
                 analysis_result = orchestrator.analyze_contract(
                     contract_text, use_planning, tenant_id, contract_type,
-                    chunking_profile,
+                    chunking_profile, reusable,
                 )
             except ImportError as ie:
                 logger.error(f"Import error in orchestrator: {ie}")
@@ -145,12 +146,28 @@ class ContractIntelligenceService:
                 self._read_chunking_profile, tenant_id, contract_id
             )
 
+            # What the previous round already established. A window whose chunks
+            # are all unchanged is skipped and its findings carried forward —
+            # both to save the model call and because re-running it risks a
+            # slightly different answer on identical text, which would read as a
+            # change the counterparty never made.
+            #
+            # Skipped entirely when the profile read failed. Falling back to
+            # default boundaries while reusing hashes computed under the stored
+            # ones compares two different divisions of the document: findings
+            # would be carried onto chunks that are not the chunks they came
+            # from. Analysing everything is always correct, only slower.
+            reusable = None if profile_error else await asyncio.to_thread(
+                self._reusable_findings, tenant_id, contract_id
+            )
+
             intelligence = await asyncio.to_thread(
                 self.analyze_contract_intelligence,
                 contract_text, model, use_planning,
                 tenant_id,
                 contract_data.get("contract_type") or "general",
                 profile,
+                reusable,
             )
 
             if profile_error:
@@ -220,6 +237,71 @@ class ContractIntelligenceService:
             logger.error(f"Failed to analyze contract {contract_id}: {e}")
             return None
 
+    def _reusable_findings(self, tenant_id: str, contract_id: str) -> Optional[dict]:
+        """The previous round's findings for chunks this round did not change.
+
+        Returns `{"unchanged_hashes": set, "findings": [...]}`, or None when
+        there is no previous round, the two are not comparable, or anything
+        goes wrong — in which case the whole contract is analysed, which is
+        correct, just slower.
+
+        This is the payoff of the last three increments together: chunk
+        identity (7) makes "unchanged" decidable, per-finding provenance (8)
+        makes the carried findings addressable, and the diff (9) picks them out.
+        """
+        try:
+            from backend.application.services.change_report_service import (
+                ChangeReportService,
+            )
+
+            matter = self.matters.matter_for_version(tenant_id, contract_id)
+            if not matter:
+                return None
+
+            full = self.matters.get_matter(tenant_id, matter["matter_ref"])
+            versions = sorted(
+                (v for v in (full or {}).get("versions") or [] if v.get("version_id")),
+                key=lambda v: v.get("n") or 0,
+            )
+            index = next((i for i, v in enumerate(versions)
+                          if v["version_id"] == contract_id), None)
+            if index is None or index == 0:
+                return None        # the first round has nothing behind it
+
+            previous = versions[index - 1]
+            service = ChangeReportService(matters=self.matters)
+            report = service.windows_needing_analysis(
+                tenant_id, matter["matter_ref"], previous["version_id"], contract_id
+            )
+            if not report.comparable or not report.unchanged:
+                return None
+
+            stored = self.get_stored_analysis(previous["version_id"], tenant_id) or {}
+            if stored.get("analysis_status") != AnalysisStatus.COMPLETE.value:
+                # A previous round that never finished has nothing trustworthy
+                # to carry, and its gaps would read as clauses with no findings.
+                return None
+
+            findings = [
+                clause for clause in (stored.get("results", {}).get("clauses") or [])
+                if (clause.get("source_chunk"),
+                    clause.get("source_chunk_order")) in report.unchanged
+            ]
+
+            # An empty list is a perfectly good answer: a clean contract has no
+            # findings, and returning None here sent every window of an
+            # unchanged clean round back to the model — the no-op path not
+            # applying to exactly the contracts that need nothing done.
+            logger.info(
+                f"{contract_id}: {len(report.unchanged)} chunk occurrences unchanged "
+                f"since version {previous['n']}; carrying {len(findings)} findings forward"
+            )
+            return {"unchanged_chunks": report.unchanged, "findings": findings}
+        except Exception as e:
+            # Analysing everything is always correct; it is only slower.
+            logger.warning(f"Could not reuse the previous round for {contract_id}: {e}")
+            return None
+
     @staticmethod
     def _read_chunking_profile(tenant_id: str, contract_id: str) -> tuple:
         """The version's recorded chunking, and whether the read itself failed.
@@ -282,13 +364,17 @@ class ContractIntelligenceService:
             )
             return True
 
+        # Scoped to the matter when there is one, so a decision made in round 1
+        # is still the same redline in round 2.
+        scope = self._redline_scope(contract_id, tenant_id)
+
         try:
             # A redline is identified by the breach it fixes, not by its
             # position in the list. Positional ids ("_000") are not stable
             # between runs: the same breach could be written under a different
             # id, or two redlines could collide on one.
             for redline in redlines:
-                redline_id = self._redline_id(contract_id, redline)
+                redline_id = self._redline_id(scope, redline)
                 self.repository.graph.query(
                     """
                     MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
@@ -297,6 +383,13 @@ class ContractIntelligenceService:
                     // Re-running the model is not grounds for discarding their
                     // judgement, nor for quietly changing the text they approved.
                     ON CREATE SET r.status = 'PENDING'
+                    // Linked to this version *before* the status guard. With the
+                    // MERGE below the guard, a redline the reviewer had already
+                    // decided was filtered out and never attached to the new
+                    // round at all — so round 2 showed no redline where round 1
+                    // had an approved one, which is the opposite of carrying a
+                    // decision forward.
+                    MERGE (c)-[:HAS_REDLINE]->(r)
                     WITH c, r
                     WHERE coalesce(r.status, 'PENDING') = 'PENDING'
                     SET r.rule_id = $rule_id,
@@ -307,7 +400,6 @@ class ContractIntelligenceService:
                         r.justification = $justification,
                         r.priority = $priority,
                         r.updated_at = datetime()
-                    MERGE (c)-[:HAS_REDLINE]->(r)
                     """,
                     {
                         "contract_id": contract_id,
@@ -329,16 +421,23 @@ class ContractIntelligenceService:
             self.repository.graph.query(
                 """
                 MATCH (c:Contract {file_id: $contract_id, tenant_id: $tenant_id})
-                      -[:HAS_REDLINE]->(r:Redline)
+                      -[link:HAS_REDLINE]->(r:Redline)
                 WHERE coalesce(r.status, 'PENDING') = 'PENDING'
                   AND NOT r.redline_id IN $current_ids
-                WITH collect(r) AS stale
-                FOREACH (redline IN stale | DETACH DELETE redline)
+                // Detach from *this* version first. Now that a redline is
+                // scoped to the matter, the same node can be referenced by
+                // several rounds — and deleting it outright because this round
+                // no longer reports the breach would quietly rewrite an earlier
+                // round's review as well.
+                DELETE link
+                WITH r
+                WHERE NOT (:Contract)-[:HAS_REDLINE]->(r)
+                DETACH DELETE r
                 """,
                 {
                     "contract_id": contract_id,
                     "tenant_id": tenant_id,
-                    "current_ids": [self._redline_id(contract_id, r) for r in redlines],
+                    "current_ids": [self._redline_id(scope, r) for r in redlines],
                 },
             )
 
@@ -696,6 +795,33 @@ class ContractIntelligenceService:
 
 
 
+    def _redline_scope(self, contract_id: str, tenant_id: str) -> str:
+        """What a redline id is scoped to: the matter, or the version alone.
+
+        The matter, whenever the version belongs to one. A reviewer who
+        approved wording in round 1 must not be asked to approve the identical
+        wording again in round 2 — that is the whole promise of holding the
+        review rather than the contract, and scoping the id to the version broke
+        it on every new round.
+
+        An unfiled version has no matter yet, so it falls back to its own id.
+        Versions analysed before this change keep their old ids; their decisions
+        still apply to the round that made them, and carry forward from the next
+        round on.
+        """
+        try:
+            matter = self.matters.matter_for_version(tenant_id, contract_id)
+        except Exception as e:
+            logger.warning(f"Could not resolve the matter for {contract_id}: {e}")
+            return contract_id
+        # Prefixed with the tenant. Reference numbers are allocated *per
+        # tenant*, so two tenants can both hold MSA-2026-0001 — and with the
+        # `redline_id` uniqueness constraint being global, the second tenant to
+        # analyse the same clause under the same rule would fail on it. The
+        # version ids this replaced were globally random, so the collision is
+        # new with the matter scoping.
+        return f"{tenant_id}|{matter['matter_ref']}" if matter else contract_id
+
     @staticmethod
     def _redline_id(contract_id: str, redline) -> str:
         """Stable id: one breach of one rule on one clause has one redline.
@@ -710,6 +836,11 @@ class ContractIntelligenceService:
 
         Hashing the normalised clause text keeps the id stable across reordering
         and across whitespace differences from re-extraction.
+
+        `contract_id` here is really the *scope* — see `_redline_scope`. Passing
+        the matter makes the id stable across rounds too, so the same clause
+        breaching the same rule in version 2 is the same redline the reviewer
+        already ruled on in version 1.
         """
         import hashlib
 

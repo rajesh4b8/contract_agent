@@ -155,8 +155,11 @@ class IntelligenceOrchestrator:
             # boundaries the upload stored. Chunking it differently here would
             # make every finding's chunk attribution point at boundaries that
             # exist nowhere else.
+            reusable = state.get("reusable") or {}
             tool = ClauseDetectorTool(
-                llm=self.llm, chunking_profile=state.get("chunking_profile")
+                llm=self.llm, chunking_profile=state.get("chunking_profile"),
+                unchanged_chunks=reusable.get("unchanged_chunks"),
+                carried_findings=reusable.get("findings"),
             )
             clauses_json = tool._run(state["contract_text"])
             clauses_list, coverage = parse_clause_result(clauses_json)
@@ -539,7 +542,8 @@ class IntelligenceOrchestrator:
     def analyze_contract(self, contract_text: str, use_planning: bool = True,
                          tenant_id: str = "default-tenant",
                          contract_type: str = "general",
-                         chunking_profile: Any = None) -> dict:
+                         chunking_profile: Any = None,
+                         reusable: Any = None) -> dict:
         """Run analysis with optional autonomous planning"""
         note(
             "analysis",
@@ -571,14 +575,14 @@ class IntelligenceOrchestrator:
                                 context.run,
                                 asyncio.run,
                                 self._analyze_with_planning(contract_text, tenant_id, contract_type,
-                                                            chunking_profile),
+                                                            chunking_profile, reusable),
                             )
                             return future.result()
                     except RuntimeError:
                         # No event loop running, safe to use asyncio.run
                         return asyncio.run(
                             self._analyze_with_planning(contract_text, tenant_id, contract_type,
-                                                            chunking_profile)
+                                                            chunking_profile, reusable)
                         )
                 except Exception as planning_error:
                     # Retrying the whole analysis against a model that just
@@ -594,10 +598,10 @@ class IntelligenceOrchestrator:
                         error=str(planning_error),
                     )
                     return self._analyze_traditional(contract_text, tenant_id, contract_type,
-                                                     chunking_profile)
+                                                     chunking_profile, reusable)
             else:
                 return self._analyze_traditional(contract_text, tenant_id, contract_type,
-                                                     chunking_profile)
+                                                     chunking_profile, reusable)
             
         except Exception as e:
             # An empty analysis is a legitimate answer to "this contract has no
@@ -616,7 +620,8 @@ class IntelligenceOrchestrator:
     async def _analyze_with_planning(self, contract_text: str,
                                      tenant_id: str = "default-tenant",
                                      contract_type: str = "general",
-                                     chunking_profile: Any = None) -> dict:
+                                     chunking_profile: Any = None,
+                                     reusable: Any = None) -> dict:
         """Analyze contract using autonomous planning agent"""
         logger.info("🧠 STEP 1: Starting Planning Agent Analysis")
         
@@ -645,7 +650,7 @@ class IntelligenceOrchestrator:
             logger.info("🧠 STEP 4: Starting plan execution")
             results = await self.execution_engine.execute_plan(
                 execution_plan, contract_text, tenant_id, contract_type,
-                chunking_profile,
+                chunking_profile, reusable,
             )
             logger.info(f"🧠 STEP 5: Plan execution completed: {results.get('processing_complete')}")
             
@@ -672,7 +677,8 @@ class IntelligenceOrchestrator:
     def _analyze_traditional(self, contract_text: str,
                              tenant_id: str = "default-tenant",
                              contract_type: str = "general",
-                             chunking_profile: Any = None) -> dict:
+                             chunking_profile: Any = None,
+                             reusable: Any = None) -> dict:
         """Traditional workflow analysis (fallback)"""
         # Start workflow tracking
         workflow_tracker.start_workflow()
@@ -684,6 +690,7 @@ class IntelligenceOrchestrator:
             "contract_type": contract_type,
             "model_id": self.model_id,
             "chunking_profile": chunking_profile,
+            "reusable": reusable,
             "extracted_clauses": [],
             "policy_violations": [],
             "risk_data": {},
