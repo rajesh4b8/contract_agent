@@ -1,15 +1,16 @@
 # POC Progress Tracker
 
-**Resume point: Increment 9 — `awaiting your test`.**
-Increments 0–8 are accepted. Increment 9 is built — the last one planned.
+**Resume point: all nine increments accepted.** Nothing is queued.
+Increments 0–9 are accepted; 9 was the last one planned. What happens next is a decision, not a
+task — the two candidates are named under [Where this leaves the POC](#where-this-leaves-the-poc).
 
 Still awaiting your test: **[Fix — model failures now say what happened](#fix--model-failures-now-say-what-happened)**
 (out-of-increment bug fix, from your report of an unexplained "processing error") and
 **[Debug — a live timeline of what the pipeline is doing](#debug--a-live-timeline-of-what-the-pipeline-is-doing)**
 (out-of-increment, from your report that uploads take a long time with nothing on screen to say why).
 
-**Increment 9 is built and waiting on you** — the cross-version change report, and the last
-increment in this plan.
+**The increment plan is complete.** The POC does end to end what it was specified to do; the
+open questions are now about what to build on it, not what is missing from it.
 
 Two sections are worth knowing about before starting anything:
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) (settled — what this
@@ -44,7 +45,7 @@ produced it; this file is what you and I actually work from.
 | 6 | Multiple contracts, each resumable | accepted |
 | 7 | Content-addressed chunks | accepted |
 | 8 | Analyse the whole contract | accepted |
-| 9 | Incremental re-analysis and the change report | **awaiting your test** |
+| 9 | Incremental re-analysis and the change report | accepted |
 
 ---
 
@@ -856,7 +857,36 @@ analysis. The real quota case is the Gemini free tier — a few analyses in a da
 
 ### Your feedback
 
-_(write here)_
+_Merged in PR #11 on 2026-09-22. Accepted._
+
+---
+
+## Where this leaves the POC
+
+All nine increments are accepted. The system takes a contract in, extracts clauses against a
+schema, checks them against a real playbook, drafts redlines, carries a human decision on each, and
+— from Increment 9 — tells a reviewer what changed between two rounds and whether the counterparty
+took the redline. That is the loop a legal team actually runs.
+
+Two things are open, and neither is a coding task:
+
+1. **[Is Neo4j the right store?](#roadmap--is-neo4j-the-right-store-open-not-decided)** Deliberately
+   undecided, with the evidence recorded. Increment 9 is the increment that was meant to inform
+   this: it is the most graph-shaped thing the POC does, and it leaned on Cypher for version
+   membership and occurrence identity rather than working around the store. That is a data point
+   for keeping it, not a settled answer.
+2. **What the POC is for now.** Two honest candidates: harden it toward something a pilot user can
+   touch, or treat it as the answer to "is this buildable?" and use what it taught to spec the real
+   thing. Worth deciding before more code lands.
+
+Known debt, carried and not hidden:
+
+- `npm run build` fails on 31 pre-existing TypeScript errors across 15 files this work never
+  touched. `make test` is green; the frontend typecheck is not, and predates these increments.
+- 3,508 legacy chunks hang under 6 filename-MERGEd `Document` nodes from before content-addressed
+  chunking. Search reads both shapes, so nothing is broken; they await a retirement decision.
+- The similarity threshold (0.80) and the live embedding path have not been measured on a real
+  round of redlining — see Increment 9's *Honest limits*.
 
 ---
 
@@ -2034,7 +2064,7 @@ _(write here)_
 
 ## Increment 9 — Incremental re-analysis and the change report
 
-**Status: `awaiting your test`.** Built 2026-09-22. The payoff of the
+**Status: `accepted`** (2026-09-22, after one round of review — eleven findings). The payoff of the
 [Product shape](#product-shape--what-this-system-is-the-source-of-truth-for) decision.
 
 **Goal:** answer the question a legal team actually asks — *what changed since last round, and did
